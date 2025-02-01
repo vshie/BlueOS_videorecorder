@@ -9,10 +9,7 @@ RUN python -m pip install /app --extra-index-url https://www.piwheels.org/simple
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
     && rm -rf /var/lib/apt/lists/*
-# Install Python dependencies
-COPY requirements.txt /app/requirements.txt
-WORKDIR /app
-RUN pip install --no-cache-dir -r requirements.txt
+
 
 EXPOSE 59002/tcp
 
