@@ -1,14 +1,17 @@
 [project]
-name = "quickstart"
-version = "0.0.2"
-description = "BlueOS QuickStart Example Extension"
+name = "BlueOS_video_recorder"
+version = "0.0.1"
+description = "BlueOS Video Recorder"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "requests",
-    "litestar[standard]",
+    "Requests==2.31.0",
+    "jinja2==2.11.3",
+    "flask==1.1.2",
+    "markupsafe==2.0.1",
+    "itsdangerous==2.0.1",
+    "werkzeug==2.0.3"
 ]
-
