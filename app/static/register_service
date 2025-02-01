@@ -1,9 +1,9 @@
 {
-    "name":"QuickStart",
-    "description":"Example Extension",
-    "icon":"mdi-clock",
+    "name":"BlueOS Video Recorder",
+    "description":"This extension makes it easy to record video onboard the Raspberry Pi, so no connection to a surface computer is required. The video device must be disabled in BlueOS!",
+    "icon":"mdi-map-plus",
     "company":"Blue Robotics",
-    "version":"0.0.1",
-    "webpage":"https://example.com",
-    "api":""
+    "version":"0.9",
+    "webpage":"https://github.com/vshie/BlueOS_videorecorder",
+    "api":"https://github.com/bluerobotics/BlueOS-docker"
 }
