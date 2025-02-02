@@ -32,20 +32,31 @@ def index():
 @app.route('/devices')
 def list_devices():
     devices = []
-    video_paths = glob.glob("/dev/video*")
-    for video_path in video_paths:
-        device_basename = os.path.basename(video_path)
-        sys_path = f"/sys/class/video4linux/{device_basename}/name"
-        if os.path.exists(sys_path):
-            try:
-                with open(sys_path, "r") as f:
-                    device_name = f.read().strip()
-            except Exception as e:
-                app.logger.error(f"Error reading device name for {video_path}: {e}", exc_info=True)
-                device_name = f"Error: {str(e)}"
-        else:
-            device_name = "Unknown"
-        devices.append({"device": video_path, "name": device_name})
+    try:
+        import subprocess
+        # Use v4l2-ctl to get detailed device information
+        result = subprocess.run(['v4l2-ctl', '--list-devices'], capture_output=True, text=True)
+        current_device_name = None
+        
+        for line in result.stdout.split('\n'):
+            if ':' in line:  # This is a device name
+                current_device_name = line.split('(')[0].strip()
+            elif 'video' in line:  # This is a device path
+                device_path = line.strip()
+                devices.append({
+                    "device": device_path,
+                    "name": f"{current_device_name} ({device_path})"
+                })
+    except Exception as e:
+        app.logger.error(f"Error listing devices: {e}", exc_info=True)
+        # Fallback to basic device listing
+        video_paths = glob.glob("/dev/video*")
+        for video_path in video_paths:
+            devices.append({
+                "device": video_path,
+                "name": f"Camera Device {video_path}"
+            })
+    
     return jsonify({"devices": devices})
 
 @app.route('/start', methods=['POST'])
@@ -64,8 +75,9 @@ def start_recording():
         return jsonify({"error": "Invalid duration parameters"}), 400
 
     command = [
-        "gst-launch-1.0", "-e", "v4l2src", f"device={device}",
-        "!", "video/x-h264,width=1920,height=1080,framerate=30/1",
+        "gst-launch-1.0", "-e",
+        "v4l2src", f"device={device}",
+        "!", "video/x-h264,width=1920,height=1080,framerate=30/1",  # Explicitly use H.264
         "!", "h264parse",
         "!", "splitmuxsink",
         f"location={VIDEO_DIRECTORY}/video_%05d.mp4",
@@ -106,7 +118,7 @@ def stop_recording():
         finally:
             process = None
 
-    return jsonify({"message": "Recording stopped"})
+    return 'Stopped'
 
 @app.route('/list')
 def list_videos():
@@ -126,17 +138,6 @@ def download_video(filename):
         app.logger.error(f"Error sending file {filename}", exc_info=True)
         return jsonify({"error": f"Error sending file: {str(e)}"}), 500
 
-@app.route('/register_service')
-def register_service():
-    return jsonify({
-        "name": "Video Recorder",
-        "description": "Record video from connected cameras. Supports splitting recordings into manageable chunks and downloading recorded files.",
-        "icon": "mdi-video",
-        "company": "Blue Robotics",
-        "version": "0.9",
-        "webpage": "",
-        "api": "https://github.com/bluerobotics/BlueOS-docker"
-    })
 
 # Global error handler
 @app.errorhandler(Exception)
@@ -149,4 +150,5 @@ def handle_exception(e):
 
 if __name__ == '__main__':
     # For production use a proper WSGI server; this is just for development.
-    app.run(host='0.0.0.0', port=5423, debug=True)
+    app.run(host='0.0.0.0', port=5423
+            , debug=True)

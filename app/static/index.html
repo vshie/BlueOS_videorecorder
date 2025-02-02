@@ -23,6 +23,9 @@
     </div>
     <button onclick="startRecording()">Start Recording</button>
     <button onclick="stopRecording()">Stop Recording</button>
+    <div id="recordingStatus" style="margin-top: 10px;">
+        <span id="recordingTime" style="color: red; display: none;">Recording Time: 00:00:00</span>
+    </div>
     <p id="errorMessage" style="color: red"></p>
     <h2>Recorded Videos</h2>
     <ul id="videoList"></ul>
@@ -30,6 +33,9 @@
 </html>
 
 <script>
+let recordingTimer;
+let startTime;
+
 async function fetchDevices() {
     const response = await axios.get('/devices');
     const devices = response.data.devices;
@@ -42,8 +48,11 @@ async function startRecording() {
     const maxDuration = document.getElementById("maxDuration").value;
     const splitDuration = document.getElementById("splitDuration").value;
     try {
-        await axios.post('/start', { device, max_duration: maxDuration, split_duration: splitDuration });
+        await axios.get(`/start?device=${device}&max_duration=${maxDuration}&split_duration=${splitDuration}`);
         document.getElementById("errorMessage").innerText = "";
+        startTime = new Date();
+        document.getElementById("recordingTime").style.display = "block";
+        recordingTimer = setInterval(updateRecordingTime, 1000);
     } catch (error) {
         document.getElementById("errorMessage").innerText = error.response?.data?.error || "An unknown error occurred";
     }
@@ -51,11 +60,24 @@ async function startRecording() {
 
 async function stopRecording() {
     try {
-        await axios.post('/stop');
+        await axios.get('/stop');
         document.getElementById("errorMessage").innerText = "";
+        clearInterval(recordingTimer);
+        document.getElementById("recordingTime").style.display = "none";
+        await fetchVideos();
     } catch (error) {
         document.getElementById("errorMessage").innerText = error.response?.data?.error || "An unknown error occurred";
     }
+}
+
+function updateRecordingTime() {
+    const now = new Date();
+    const diff = now - startTime;
+    const hours = Math.floor(diff / 3600000);
+    const minutes = Math.floor((diff % 3600000) / 60000);
+    const seconds = Math.floor((diff % 60000) / 1000);
+    const timeString = `Recording Time: ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    document.getElementById("recordingTime").innerText = timeString;
 }
 
 async function fetchVideos() {

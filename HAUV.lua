@@ -114,6 +114,7 @@ function control_dive_mission()
         -- set depth target
         -- set descent rate
         -- set descent throttle
+        -- if depth > vrecord_depth, start recording via http request to video recorder extension
         -- monitor descent rate / depth
         -- if decrease in descent rate > descent_rate_threshold, set max_depth, hover_depth = max_depth - hover_offset
         if hover_depth != 0 then
@@ -187,9 +188,50 @@ function mavlink_decode_header(message)
         result[v[1]], offset = string.unpack(v[2], message, offset)
       end
     end
-  
     -- ignore the idea of a checksum
-  
     return result
   end
+  
+-- http request to video recorder extension
+  local function send_http_request(url, method, headers, body)
+    local sock = Socket(0)
+  
+    if not sock:bind("0.0.0.0", 9988) then
+      gcs:send_text(0, string.format("WebServer: failed to bind to TCP %u", 9988))
+      sock.close(sock)
+      return
+    end
+  
+    if (sock:is_connected() == false) then
+      if (not sock:connect(cameraip, cameraport)) then
+        gcs:send_text(0, "Connection failed ")
+        sock.close(sock)
+        return
+      end
+    end
+    local request = string.format(
+      "%s %s HTTP/1.1\r\nHost: %s\r\n",
+      method,
+      url,
+      cameraip
+    )
+  
+    for k, v in pairs(headers) do
+      request = request .. string.format("%s: %s\r\n", k, v)
+    end
+  
+    request = request .. "Connection: close\r\n"
+  
+    if body then
+      request = request .. string.format("Content-Length: %d\r\n\r\n%s", #body, body)
+    else
+      request = request .. "\r\n"
+    end
+  
+    sock:send(request, #request)
+    --sock.recv(1000)
+    sock.close(sock)
+    sock = nil
+  end
+  
 
