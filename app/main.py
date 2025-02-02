@@ -4,9 +4,11 @@ import threading
 import subprocess
 import glob
 import logging
+print("hello we are running main.py, hello world")
 
 # Configure Flask to serve static files from the root URL.
-app = Flask(__name__, static_folder="static", static_url_path="")
+app = Flask(__name__, static_url_path="/static", static_folder="static") #setup flask app
+
 
 # Enable logging with a basic configuration.
 logging.basicConfig(level=logging.DEBUG,
@@ -19,11 +21,11 @@ if not os.path.exists(VIDEO_DIRECTORY):
 recording = False
 process = None
 
-@app.route("/", methods=["GET"])
-def index():
-    return send_file(os.path.join(app.static_folder, "index.html"))
+@app.route('/')
+def home():
+    return app.send_static_file("index.html")
 
-@app.route("/devices", methods=["GET"])
+@app.route('/devices')
 def list_devices():
     devices = []
     video_paths = glob.glob("/dev/video*")
@@ -42,7 +44,7 @@ def list_devices():
         devices.append({"device": video_path, "name": device_name})
     return jsonify({"devices": devices})
 
-@app.route("/start", methods=["POST"])
+@app.route('/start')
 def start_recording():
     global recording, process
 
@@ -77,7 +79,7 @@ def start_recording():
 
     return jsonify({"message": "Recording started"})
 
-@app.route("/stop", methods=["POST"])
+@app.route('/stop')
 def stop_recording():
     global recording, process
 
@@ -102,7 +104,7 @@ def stop_recording():
 
     return jsonify({"message": "Recording stopped"})
 
-@app.route("/list", methods=["GET"])
+@app.route('/list')
 def list_videos():
     try:
         files = [f for f in os.listdir(VIDEO_DIRECTORY)
@@ -112,7 +114,7 @@ def list_videos():
         return jsonify({"error": f"Error listing videos: {str(e)}"}), 500
     return jsonify({"videos": files})
 
-@app.route("/download/<filename>", methods=["GET"])
+@app.route('/download/<filename>')
 def download_video(filename):
     try:
         return send_from_directory(VIDEO_DIRECTORY, filename, as_attachment=True)
@@ -120,16 +122,6 @@ def download_video(filename):
         app.logger.error(f"Error sending file {filename}", exc_info=True)
         return jsonify({"error": f"Error sending file: {str(e)}"}), 500
 
-# Catch-all route to serve static files or return index.html for client-side routing.
-@app.route('/<path:path>', methods=["GET"])
-def catch_all(path):
-    full_path = os.path.join(app.static_folder, path)
-    if os.path.exists(full_path):
-        return send_from_directory(app.static_folder, path)
-    else:
-        # For routes like /register_service, /docs, or /v1.0/ui/ that don't have a server route,
-        # return index.html so that the client-side (Vue) router can handle the route.
-        return send_file(os.path.join(app.static_folder, "index.html"))
 
 # Global error handler
 @app.errorhandler(Exception)
@@ -140,6 +132,6 @@ def handle_exception(e):
     }
     return jsonify(response), 500
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     # For production use a proper WSGI server; this is just for development.
-    app.run(host="0.0.0.0", port=59002, debug=True)
+    app.run(host='0.0.0.0', port=59002, debug=True)
