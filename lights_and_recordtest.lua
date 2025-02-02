@@ -29,7 +29,7 @@ function start_video_recording()
         return
     end
 
-    local request = "GET /start?max_duration=120&split_duration=30 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    local request = "GET /start?split_duration=90 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     sock:send(request)
     sock:close()
     gcs:send_text(0, "Video recording started")

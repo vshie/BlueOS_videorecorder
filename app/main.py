@@ -155,12 +155,14 @@ def stop_recording():
 @app.route('/list')
 def list_videos():
     try:
-        files = [f for f in os.listdir(VIDEO_DIRECTORY)
-                 if os.path.isfile(os.path.join(VIDEO_DIRECTORY, f))]
+        videos = []
+        for file in os.listdir(VIDEO_DIRECTORY):
+            if file.endswith('.mp4'):
+                videos.append(file)
+        return jsonify({"videos": sorted(videos)})
     except Exception as e:
-        app.logger.error("Error listing video files", exc_info=True)
-        return jsonify({"error": f"Error listing videos: {str(e)}"}), 500
-    return jsonify({"videos": files})
+        app.logger.error(f"Error listing videos: {e}", exc_info=True)
+        return jsonify({"error": "Error listing videos"}), 500
 
 @app.route('/download/<filename>')
 def download_video(filename):

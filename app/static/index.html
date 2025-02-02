@@ -13,12 +13,8 @@
         <p>Using camera device: <strong>/dev/video2</strong></p>
     </div>
     <div>
-        <label>Max Duration (seconds):</label>
-        <input type="number" id="maxDuration" value="60" />
-    </div>
-    <div>
         <label>Split Duration (seconds):</label>
-        <input type="number" id="splitDuration" value="30" />
+        <input type="number" id="splitDuration" value="90" readonly />
     </div>
     <button onclick="startRecording()">Start Recording</button>
     <button onclick="stopRecording()">Stop Recording</button>
@@ -36,10 +32,8 @@ let recordingTimer;
 let startTime;
 
 async function startRecording() {
-    const maxDuration = document.getElementById("maxDuration").value;
-    const splitDuration = document.getElementById("splitDuration").value;
     try {
-        await axios.get(`/start?max_duration=${maxDuration}&split_duration=${splitDuration}`);
+        await axios.get(`/start?split_duration=90`);
         document.getElementById("errorMessage").innerText = "";
         startTime = new Date();
         document.getElementById("recordingTime").style.display = "block";
