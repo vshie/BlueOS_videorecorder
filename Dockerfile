@@ -16,52 +16,51 @@ LABEL version="0.9"
 
 ARG IMAGE_NAME
 
-LABEL permissions='\
-{\
-  "ExposedPorts": {\
-    "59002/tcp": {}\
+LABEL permissions="{\
+  \"ExposedPorts\": {\
+    \"59002/tcp\": {}\
   },\
-  "HostConfig": {\
-    "Binds": [\
-      "/usr/blueos/extensions/videorecorder:/app/videorecordings",\
-      "/usr/blueos/extensions/videorecorder:/app",\
-      "/dev/video2:/dev/video2"\
+  \"HostConfig\": {\
+    \"Binds\": [\
+      \"/usr/blueos/extensions/videorecorder:/app/videorecordings\",\
+      \"/usr/blueos/extensions/videorecorder:/app\",\
+      \"/dev/video2:/dev/video2\"\
     ],\
-    "ExtraHosts": ["host.docker.internal:host-gateway"],\
-    "PortBindings": {\
-      "59002/tcp": [\
+    \"ExtraHosts\": [\"host.docker.internal:host-gateway\"],\
+    \"PortBindings\": {\
+      \"59002/tcp\": [\
         {\
-          "HostPort": ""\
+          \"HostPort\": \"\"\
         }\
       ]\
     },\
-    "Privileged": true\n
+    \"Privileged\": true\
   }\
-}'
+}"
 
 ARG AUTHOR
 ARG AUTHOR_EMAIL
-LABEL authors='[\
+LABEL authors="[\
     {\
-        "name": "Tony White",\
-        "email": "tonywhite@bluerobotics.com"\
+        \"name\": \"Tony White\",\
+        \"email\": \"tonywhite@bluerobotics.com\"\
     }\
-]'
+]"
 
 ARG MAINTAINER
 ARG MAINTAINER_EMAIL
-LABEL company='{\
-        "about": "",\
-        "name": "Blue Robotics",\
-        "email": "support@bluerobotics.com"\
-    }'
+LABEL company="{\
+        \"about\": \"\",\
+        \"name\": \"Blue Robotics\",\
+        \"email\": \"support@bluerobotics.com\"\
+    }"
 LABEL type="tool"
 ARG REPO
 ARG OWNER
-LABEL readme=''
-LABEL links='{\
-        "source": ""\
-    }'
+LABEL readme=""
+LABEL links="{\
+        \"source\": \"\"\
+    }"
 LABEL requirements="core >= 1.1"
 
 # Mark /dev/video2 as a volume so that it can be bound from the host at runtime.
