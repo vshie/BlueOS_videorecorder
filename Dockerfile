@@ -1,19 +1,20 @@
 FROM python:3.11-slim
 
-# Install all required packages in a single RUN command
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Enable universe repository and install all required packages in a single RUN command
+RUN apt-get update && \
+    apt-get install -y software-properties-common && \
+    apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
-    v4l2-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY app /app
 RUN python -m pip install /app --extra-index-url https://www.piwheels.org/simple
 
-EXPOSE 5423/tcp
+EXPOSE 59002/tcp
 
 LABEL version="0.9"
 
@@ -22,7 +23,7 @@ ARG IMAGE_NAME
 LABEL permissions='\
 {\
   "ExposedPorts": {\
-    "5423/tcp": {}\
+    "59002/tcp": {}\
   },\
   "HostConfig": {\
     "Binds": [\
@@ -31,7 +32,7 @@ LABEL permissions='\
     ],\
     "ExtraHosts": ["host.docker.internal:host-gateway"],\
     "PortBindings": {\
-      "5423/tcp": [\
+      "59002/tcp": [\
         {\
           "HostPort": ""\
         }\
