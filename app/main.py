@@ -29,47 +29,81 @@ def index():
         app.logger.error(f"Error serving index.html: {e}", exc_info=True)
         return jsonify({"error": "Error serving index page"}), 500
 
+@app.route('/app.js')
+def serve_js():
+    return send_file("static/app.js")
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_file("static/favicon.ico")
+
+@app.route('/docs')
+def docs():
+    return jsonify({
+        "openapi": "3.0.0",
+        "info": {
+            "title": "Video Recorder API",
+            "version": "1.0.0"
+        },
+        "paths": {}
+    })
+
+@app.route('/v1.0/ui/')
+def ui():
+    return jsonify({
+        "message": "UI endpoint"
+    })
+
+@app.route('/register_service')
+def register_service():
+    return jsonify({
+        "name": "Video Recorder",
+        "description": "Record video from connected cameras. Supports splitting recordings into manageable chunks and downloading recorded files.",
+        "icon": "mdi-video",
+        "company": "Blue Robotics",
+        "version": "0.9",
+        "webpage": "",
+        "api": "https://github.com/bluerobotics/BlueOS-docker"
+    })
+
 @app.route('/devices')
 def list_devices():
     devices = []
     try:
-        import subprocess
-        # Use v4l2-ctl to get detailed device information
-        result = subprocess.run(['v4l2-ctl', '--list-devices'], capture_output=True, text=True)
-        current_device_name = None
-        
-        for line in result.stdout.split('\n'):
-            if ':' in line:  # This is a device name
-                current_device_name = line.split('(')[0].strip()
-            elif 'video' in line:  # This is a device path
-                device_path = line.strip()
-                devices.append({
-                    "device": device_path,
-                    "name": f"{current_device_name} ({device_path})"
-                })
-    except Exception as e:
-        app.logger.error(f"Error listing devices: {e}", exc_info=True)
-        # Fallback to basic device listing
+        # Simpler approach using glob
         video_paths = glob.glob("/dev/video*")
         for video_path in video_paths:
             devices.append({
                 "device": video_path,
                 "name": f"Camera Device {video_path}"
             })
+    except Exception as e:
+        app.logger.error(f"Error listing devices: {e}", exc_info=True)
+        return jsonify({"error": f"Error listing devices: {str(e)}"}), 500
     
     return jsonify({"devices": devices})
 
-@app.route('/start', methods=['POST'])
+@app.route('/start', methods=['GET', 'POST'])
 def start_recording():
     global recording, process
 
     if recording:
         return jsonify({"error": "Recording already in progress"}), 400
 
-    device = request.json.get("device", "/dev/video2")
+    # Handle both GET and POST parameters
+    if request.method == 'POST':
+        data = request.json
+        device = data.get("device", "/dev/video2")
+        max_duration = data.get("max_duration", 60)
+        split_duration = data.get("split_duration", 30)
+    else:  # GET
+        device = request.args.get("device", "/dev/video2")
+        max_duration = request.args.get("max_duration", 60)
+        split_duration = request.args.get("split_duration", 30)
+
     try:
-        max_duration = int(request.json.get("max_duration", 60)) * 1_000_000_000
-        split_duration = int(request.json.get("split_duration", 30)) * 1_000_000_000
+        max_duration = int(max_duration) * 1_000_000_000
+        split_duration = int(split_duration) * 1_000_000_000
     except (ValueError, TypeError) as e:
         app.logger.error("Invalid duration parameters", exc_info=True)
         return jsonify({"error": "Invalid duration parameters"}), 400
@@ -77,7 +111,7 @@ def start_recording():
     command = [
         "gst-launch-1.0", "-e",
         "v4l2src", f"device={device}",
-        "!", "video/x-h264,width=1920,height=1080,framerate=30/1",  # Explicitly use H.264
+        "!", "video/x-h264,width=1920,height=1080,framerate=30/1",
         "!", "h264parse",
         "!", "splitmuxsink",
         f"location={VIDEO_DIRECTORY}/video_%05d.mp4",
@@ -93,9 +127,9 @@ def start_recording():
         app.logger.error("Error starting recording", exc_info=True)
         return jsonify({"error": f"Error starting recording: {str(e)}"}), 500
 
-    return jsonify({"message": "Recording started"})
+    return 'Started'
 
-@app.route('/stop', methods=['POST'])
+@app.route('/stop', methods=['GET', 'POST'])
 def stop_recording():
     global recording, process
 
