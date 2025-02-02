@@ -19,9 +19,24 @@ def index():
 
 @app.route("/devices", methods=["GET"])
 def list_devices():
-    # List available video devices
-    devices = glob.glob("/dev/video*")
+    devices = []
+    # Find all video device nodes
+    video_paths = glob.glob("/dev/video*")
+    for video_path in video_paths:
+        # Extract the basename (e.g. "video0")
+        device_basename = os.path.basename(video_path)
+        sys_path = f"/sys/class/video4linux/{device_basename}/name"
+        if os.path.exists(sys_path):
+            try:
+                with open(sys_path, "r") as f:
+                    device_name = f.read().strip()
+            except Exception as e:
+                device_name = "Error reading name"
+        else:
+            device_name = "Unknown"
+        devices.append({"device": video_path, "name": device_name})
     return jsonify({"devices": devices})
+
 
 @app.route("/start", methods=["POST"])
 def start_recording():
@@ -30,7 +45,7 @@ def start_recording():
     if recording:
         return jsonify({"error": "Recording already in progress"}), 400
 
-    device = request.json.get("device", "/dev/video0")
+    device = request.json.get("device", "/dev/video2")
     max_duration = int(request.json.get("max_duration", 60)) * 1_000_000_000  # Convert seconds to nanoseconds
     split_duration = int(request.json.get("split_duration", 10)) * 1_000_000_000  # Convert seconds to nanoseconds
 
