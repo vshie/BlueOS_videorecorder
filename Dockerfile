@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
     && rm -rf /var/lib/apt/lists/*
 
-EXPOSE 59002/tcp
+EXPOSE 5423/tcp
 
 LABEL version="0.9"
 
@@ -19,7 +19,7 @@ ARG IMAGE_NAME
 LABEL permissions='\
 {\
   "ExposedPorts": {\
-    "59002/tcp": {}\
+    "5423/tcp": {}\
   },\
   "HostConfig": {\
     "Binds": [\
@@ -28,7 +28,7 @@ LABEL permissions='\
     ],\
     "ExtraHosts": ["host.docker.internal:host-gateway"],\
     "PortBindings": {\
-      "59002/tcp": [\
+      "5423/tcp": [\
         {\
           "HostPort": ""\
         }\

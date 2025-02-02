@@ -149,4 +149,4 @@ def handle_exception(e):
 
 if __name__ == '__main__':
     # For production use a proper WSGI server; this is just for development.
-    app.run(host='0.0.0.0', port=59002, debug=True)
+    app.run(host='0.0.0.0', port=5423, debug=True)
