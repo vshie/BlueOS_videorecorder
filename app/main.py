@@ -14,7 +14,7 @@ app = Flask(__name__, static_url_path="/static", static_folder="static") #setup 
 logging.basicConfig(level=logging.DEBUG,
                     format="%(asctime)s %(levelname)s: %(message)s")
 
-VIDEO_DIRECTORY = "./videos"
+VIDEO_DIRECTORY = "/app/videorecordings"
 if not os.path.exists(VIDEO_DIRECTORY):
     os.makedirs(VIDEO_DIRECTORY)
 
