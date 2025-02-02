@@ -7,7 +7,7 @@ FROM python:3.11-slim
 COPY app /app
 RUN python -m pip install /app --extra-index-url https://www.piwheels.org/simple
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    curl gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
     && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 59002/tcp
