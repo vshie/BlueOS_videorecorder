@@ -48,7 +48,7 @@ def list_devices():
         devices.append({"device": video_path, "name": device_name})
     return jsonify({"devices": devices})
 
-@app.route('/start')
+@app.route('/start', methods=['POST'])
 def start_recording():
     global recording, process
 
@@ -83,7 +83,7 @@ def start_recording():
 
     return jsonify({"message": "Recording started"})
 
-@app.route('/stop')
+@app.route('/stop', methods=['POST'])
 def stop_recording():
     global recording, process
 
@@ -138,4 +138,4 @@ def handle_exception(e):
 
 if __name__ == '__main__':
     # For production use a proper WSGI server; this is just for development.
-    app.run(host='0.0.0.0', port=59002, debug=True)
+    app.run(host='0.0.0.0', port=8000, debug=True)

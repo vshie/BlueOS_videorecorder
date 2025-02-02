@@ -30,14 +30,11 @@
 </html>
 
 <script>
-const apiUrl = "";  
-
 async function fetchDevices() {
-    const response = await axios.get(`${apiUrl}/devices`);
+    const response = await axios.get('/devices');
     const devices = response.data.devices;
     const deviceSelect = document.getElementById("deviceSelect");
     deviceSelect.innerHTML = devices.map(device => `<option value="${device.device}">${device.name}</option>`);
-
 }
 
 async function startRecording() {
@@ -45,7 +42,7 @@ async function startRecording() {
     const maxDuration = document.getElementById("maxDuration").value;
     const splitDuration = document.getElementById("splitDuration").value;
     try {
-        await axios.post(`${apiUrl}/start`, { device, max_duration: maxDuration, split_duration: splitDuration });
+        await axios.post('/start', { device, max_duration: maxDuration, split_duration: splitDuration });
         document.getElementById("errorMessage").innerText = "";
     } catch (error) {
         document.getElementById("errorMessage").innerText = error.response?.data?.error || "An unknown error occurred";
@@ -54,7 +51,7 @@ async function startRecording() {
 
 async function stopRecording() {
     try {
-        await axios.post(`${apiUrl}/stop`);
+        await axios.post('/stop');
         document.getElementById("errorMessage").innerText = "";
     } catch (error) {
         document.getElementById("errorMessage").innerText = error.response?.data?.error || "An unknown error occurred";
@@ -62,10 +59,10 @@ async function stopRecording() {
 }
 
 async function fetchVideos() {
-    const response = await axios.get(`${apiUrl}/list`);
+    const response = await axios.get('/list');
     const videos = response.data.videos;
     const videoList = document.getElementById("videoList");
-    videoList.innerHTML = videos.map(video => `<li><a href="${apiUrl}/download/${video}" download>${video}</a></li>`).join('');
+    videoList.innerHTML = videos.map(video => `<li><a href="/download/${video}" download>${video}</a></li>`).join('');
 }
 
 window.onload = async () => {
