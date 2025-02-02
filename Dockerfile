@@ -36,7 +36,7 @@ LABEL permissions='\
   "HostConfig": {\
   "Privileged": true,\
   "Binds":[\
-    "/usr/blueos/extensions/data-logger:/app",\
+    "/usr/blueos/extensions/videorecorder:/app",\
     "/dev:/dev"\
   ]\
 }
