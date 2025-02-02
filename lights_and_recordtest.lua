@@ -3,14 +3,35 @@ LIGHTS1_SERVO = 13  -- Servo function for lights
 PWM_Lightoff = 1000  -- PWM value for lights off
 PWM_Lightmed = 1500  -- PWM value for medium brightness
 
+-- States
+STANDBY = 0
+LIGHTS_ON = 1
+RECORDING = 2
+LIGHTS_OFF = 3
+COMPLETE = 4
+
+-- HTTP Configuration
+HTTP_HOST = "localhost"
+HTTP_PORT = 5423
+
+-- Timing constants (in milliseconds)
+LIGHTS_ON_DELAY = 30000
+START_RECORDING_DELAY = 30000
+LIGHTS_OFF_DELAY = 30000
+STOP_RECORDING_DELAY = 30000
+
+-- Global variables
+local state = STANDBY
+local timer = 0
+
 -- Function to control lights
 function set_lights(on)
     if on then
         SRV_Channels:set_output_pwm(LIGHTS1_SERVO, PWM_Lightmed)
-        gcs:send_text(0, "Lights turned ON")
+        gcs:send_text(6, "Lights turned ON")
     else
         SRV_Channels:set_output_pwm(LIGHTS1_SERVO, PWM_Lightoff)
-        gcs:send_text(0, "Lights turned OFF")
+        gcs:send_text(6, "Lights turned OFF")
     end
 end
 
@@ -18,82 +39,103 @@ end
 function start_video_recording()
     local sock = Socket(0)
     if not sock:bind("0.0.0.0", 9988) then
-        gcs:send_text(0, "Failed to bind socket")
+        gcs:send_text(6, "Failed to bind socket")
         sock:close()
-        return
+        return false
     end
 
-    if not sock:connect("localhost", 5423) then
-        gcs:send_text(0, "Failed to connect to video recorder")
+    if not sock:connect(HTTP_HOST, HTTP_PORT) then
+        gcs:send_text(6, string.format("Failed to connect to %s:%d", HTTP_HOST, HTTP_PORT))
         sock:close()
-        return
+        return false
     end
 
     local request = "GET /start?split_duration=90 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=90", HTTP_HOST, HTTP_PORT))
     sock:send(request)
     sock:close()
-    gcs:send_text(0, "Video recording started")
+    gcs:send_text(6, "Video recording started")
+    return true
 end
 
 -- Function to stop video recording
 function stop_video_recording()
     local sock = Socket(0)
     if not sock:bind("0.0.0.0", 9988) then
-        gcs:send_text(0, "Failed to bind socket")
+        gcs:send_text(6, "Failed to bind socket")
         sock:close()
-        return
+        return false
     end
 
-    if not sock:connect("localhost", 5423) then
-        gcs:send_text(0, "Failed to connect to video recorder")
+    if not sock:connect(HTTP_HOST, HTTP_PORT) then
+        gcs:send_text(6, string.format("Failed to connect to %s:%d", HTTP_HOST, HTTP_PORT))
         sock:close()
-        return
+        return false
     end
 
     local request = "GET /stop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/stop", HTTP_HOST, HTTP_PORT))
     sock:send(request)
     sock:close()
-    gcs:send_text(0, "Video recording stopped")
+    gcs:send_text(6, "Video recording stopped")
+    return true
 end
 
--- Main test sequence
-local start_time = millis()
-local state = 0
-
-function update()
-    local now = millis()
-    local elapsed = (now - start_time) / 1000  -- Convert to seconds
-
-    if state == 0 and elapsed >= 30 then
-        -- After 30 seconds, turn on lights
-        set_lights(true)
-        gcs:send_text(0, string.format("Test sequence: Lights ON at %.1f seconds", elapsed))
-        state = 1
-        
-    elseif state == 1 and elapsed >= 60 then
-        -- After 60 seconds (30s after lights), start recording
-        start_video_recording()
-        gcs:send_text(0, string.format("Test sequence: Recording started at %.1f seconds", elapsed))
-        state = 2
-        
-    elseif state == 2 and elapsed >= 90 then
-        -- After 90 seconds (30s after recording start), turn off lights
-        set_lights(false)
-        gcs:send_text(0, string.format("Test sequence: Lights OFF at %.1f seconds", elapsed))
-        state = 3
-        
-    elseif state == 3 and elapsed >= 120 then
-        -- After 120 seconds (30s after lights off), stop recording
-        stop_video_recording()
-        gcs:send_text(0, string.format("Test sequence: Recording stopped at %.1f seconds", elapsed))
-        state = 4
-        gcs:send_text(0, "Test sequence complete!")
-        return
+function handle_sequence()
+    if state == STANDBY then
+        -- Start the sequence by turning on lights after delay
+        if millis() > (timer + LIGHTS_ON_DELAY) then
+            set_lights(true)
+            state = LIGHTS_ON
+            timer = millis()
+            gcs:send_text(6, "State: LIGHTS ON")
+        end
+    elseif state == LIGHTS_ON then
+        -- Start recording after lights have been on
+        if millis() > (timer + START_RECORDING_DELAY) then
+            if start_video_recording() then
+                state = RECORDING
+                timer = millis()
+                gcs:send_text(6, "State: RECORDING")
+            else
+                gcs:send_text(6, "Failed to start recording - retrying in 5 seconds")
+                timer = millis() - (START_RECORDING_DELAY - 5000)  -- Retry in 5 seconds
+            end
+        end
+    elseif state == RECORDING then
+        -- Turn off lights while still recording
+        if millis() > (timer + LIGHTS_OFF_DELAY) then
+            set_lights(false)
+            state = LIGHTS_OFF
+            timer = millis()
+            gcs:send_text(6, "State: LIGHTS OFF")
+        end
+    elseif state == LIGHTS_OFF then
+        -- Stop recording after lights have been off
+        if millis() > (timer + STOP_RECORDING_DELAY) then
+            if stop_video_recording() then
+                state = COMPLETE
+                gcs:send_text(6, "Test sequence complete!")
+                return
+            else
+                gcs:send_text(6, "Failed to stop recording - retrying in 5 seconds")
+                timer = millis() - (STOP_RECORDING_DELAY - 5000)  -- Retry in 5 seconds
+            end
+        end
     end
-
-    return update, 1000  -- Check again in 1 second
 end
 
--- Start the test sequence
-gcs:send_text(0, "Starting lights and recording test sequence...")
-return update() 
+function loop()
+    if state ~= COMPLETE then
+        handle_sequence()
+    end
+    return loop, 100
+end
+
+function main()
+    timer = millis()  -- Initialize timer
+    gcs:send_text(6, "Starting lights and recording test sequence...")
+    return loop, 100
+end
+
+return main, 5000 
