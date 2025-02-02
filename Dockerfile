@@ -33,7 +33,7 @@ ARG IMAGE_NAME
 LABEL permissions='\
 {\
   "ExposedPorts": {\
-    "59002/tcp": {}\
+    "5423/tcp": {}\
   },\
   "HostConfig": {\
     "Binds": [\
@@ -42,7 +42,7 @@ LABEL permissions='\
     ],\
     "ExtraHosts": ["host.docker.internal:host-gateway"],\
     "PortBindings": {\
-      "59002/tcp": [\
+      "5423/tcp": [\
         {\
           "HostPort": ""\
         }\
