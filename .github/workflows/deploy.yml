@@ -2,11 +2,11 @@ name: Deploy BlueOS Extension Image
 
 on:
   # Automatically run when a new commit is added to the repository
-  #push:
+  push:
   # Automatically run when someone makes a Pull Request to the repository
   #pull_request:
   # Run manually
-  workflow_dispatch:
+  #workflow_dispatch:
   # NOTE: caches may be removed if not run weekly
   #  -> may be worth scheduling for every 6 days
 
