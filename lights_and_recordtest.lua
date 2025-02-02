@@ -1,8 +1,14 @@
 -- Configuration
-LIGHTS1_SERVO = 13  -- Servo function for lights
+--LIGHTS1_SERVO = 13  -- Servo function for lights
 PWM_Lightoff = 1000  -- PWM value for lights off
 PWM_Lightmed = 1500  -- PWM value for medium brightness
-
+WINCH_SERVO = 13
+-- from https://ardupilot.org/rover/docs/parameters.html#servo14-function-servo-output-function
+WINCH_FUNCTION = 88
+winch_channel = SRV_Channels:find_channel(WINCH_FUNCTION)
+if winch_channel == nil then
+    gcs:send_text(6, "Set a SERVO_FUNCTION to WINCH and try restart vehicle")
+end
 -- States
 STANDBY = 0
 LIGHTS_ON = 1
@@ -27,10 +33,10 @@ local timer = 0
 -- Function to control lights
 function set_lights(on)
     if on then
-        SRV_Channels:set_output_pwm(LIGHTS1_SERVO, PWM_Lightmed)
+        SRV_Channels:set_output_pwm(winch_channel, PWM_Lightmed)
         gcs:send_text(6, "Lights turned ON")
     else
-        SRV_Channels:set_output_pwm(LIGHTS1_SERVO, PWM_Lightoff)
+        SRV_Channels:set_output_pwm(winch_channel, PWM_Lightoff)
         gcs:send_text(6, "Lights turned OFF")
     end
 end

@@ -1,20 +1,30 @@
 FROM python:3.11-slim
 
+WORKDIR /app
+
 # Enable universe repository and install all required packages in a single RUN command
 RUN apt-get update && \
-    apt-get install -y software-properties-common && \
-    apt-get update && apt-get install -y --no-install-recommends \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    software-properties-common \
     curl \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-COPY app /app
-RUN python -m pip install /app --extra-index-url https://www.piwheels.org/simple
+# Copy the application code
+COPY app/ .
 
-EXPOSE 59002/tcp
+# Install Python dependencies
+RUN pip install --no-cache-dir flask requests
+
+# Expose the port that the application runs on
+EXPOSE 5423
+
+# Command to run the application
+CMD ["python", "main.py"]
 
 LABEL version="0.9"
 
