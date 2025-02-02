@@ -5,14 +5,12 @@ import subprocess
 import glob
 import logging
 
-app = Flask(__name__, static_folder="static")
-app.config["DEBUG"] = True  # Set False in production
+# Configure Flask to serve static files from the root URL.
+app = Flask(__name__, static_folder="static", static_url_path="")
 
-# Set up logging to include timestamps and log level
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s: %(message)s'
-)
+# Enable logging with a basic configuration.
+logging.basicConfig(level=logging.DEBUG,
+                    format="%(asctime)s %(levelname)s: %(message)s")
 
 VIDEO_DIRECTORY = "./videos"
 if not os.path.exists(VIDEO_DIRECTORY):
@@ -51,10 +49,9 @@ def start_recording():
     if recording:
         return jsonify({"error": "Recording already in progress"}), 400
 
-    # Get parameters from JSON body with defaults
     device = request.json.get("device", "/dev/video2")
     try:
-        max_duration = int(request.json.get("max_duration", 60)) * 1_000_000_000  # seconds to ns
+        max_duration = int(request.json.get("max_duration", 60)) * 1_000_000_000
         split_duration = int(request.json.get("split_duration", 10)) * 1_000_000_000
     except (ValueError, TypeError) as e:
         app.logger.error("Invalid duration parameters", exc_info=True)
@@ -123,8 +120,18 @@ def download_video(filename):
         app.logger.error(f"Error sending file {filename}", exc_info=True)
         return jsonify({"error": f"Error sending file: {str(e)}"}), 500
 
-# Global error handler: returns detailed errors in debug mode,
-# but only a generic message otherwise.
+# Catch-all route to serve static files or return index.html for client-side routing.
+@app.route('/<path:path>', methods=["GET"])
+def catch_all(path):
+    full_path = os.path.join(app.static_folder, path)
+    if os.path.exists(full_path):
+        return send_from_directory(app.static_folder, path)
+    else:
+        # For routes like /register_service, /docs, or /v1.0/ui/ that don't have a server route,
+        # return index.html so that the client-side (Vue) router can handle the route.
+        return send_file(os.path.join(app.static_folder, "index.html"))
+
+# Global error handler
 @app.errorhandler(Exception)
 def handle_exception(e):
     app.logger.error("Unhandled Exception", exc_info=e)
@@ -134,4 +141,5 @@ def handle_exception(e):
     return jsonify(response), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=59002)
+    # For production use a proper WSGI server; this is just for development.
+    app.run(host="0.0.0.0", port=59002, debug=True)
