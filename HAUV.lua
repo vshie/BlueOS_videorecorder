@@ -192,46 +192,49 @@ function mavlink_decode_header(message)
     return result
   end
   
--- http request to video recorder extension
-  local function send_http_request(url, method, headers, body)
+-- Function to control video recording
+function start_video_recording(max_duration, split_duration)
     local sock = Socket(0)
-  
     if not sock:bind("0.0.0.0", 9988) then
-      gcs:send_text(0, string.format("WebServer: failed to bind to TCP %u", 9988))
-      sock.close(sock)
-      return
-    end
-  
-    if (sock:is_connected() == false) then
-      if (not sock:connect(cameraip, cameraport)) then
-        gcs:send_text(0, "Connection failed ")
-        sock.close(sock)
+        gcs:send_text(0, "Failed to bind socket")
+        sock:close()
         return
-      end
     end
-    local request = string.format(
-      "%s %s HTTP/1.1\r\nHost: %s\r\n",
-      method,
-      url,
-      cameraip
-    )
-  
-    for k, v in pairs(headers) do
-      request = request .. string.format("%s: %s\r\n", k, v)
+
+    if not sock:connect("localhost", 5423) then
+        gcs:send_text(0, "Failed to connect to video recorder")
+        sock:close()
+        return
     end
-  
-    request = request .. "Connection: close\r\n"
-  
-    if body then
-      request = request .. string.format("Content-Length: %d\r\n\r\n%s", #body, body)
-    else
-      request = request .. "\r\n"
+
+    local max_dur = max_duration or 60  -- default 60 seconds
+    local split_dur = split_duration or 30  -- default 30 seconds
+    local request = string.format("GET /start?max_duration=%d&split_duration=%d HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", 
+        max_dur, split_dur)
+    
+    sock:send(request)
+    sock:close()
+    gcs:send_text(0, "Video recording started")
+end
+
+function stop_video_recording()
+    local sock = Socket(0)
+    if not sock:bind("0.0.0.0", 9988) then
+        gcs:send_text(0, "Failed to bind socket")
+        sock:close()
+        return
     end
-  
-    sock:send(request, #request)
-    --sock.recv(1000)
-    sock.close(sock)
-    sock = nil
-  end
+
+    if not sock:connect("localhost", 5423) then
+        gcs:send_text(0, "Failed to connect to video recorder")
+        sock:close()
+        return
+    end
+
+    local request = "GET /stop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    sock:send(request)
+    sock:close()
+    gcs:send_text(0, "Video recording stopped")
+end
   
 
