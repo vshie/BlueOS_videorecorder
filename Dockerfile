@@ -33,6 +33,13 @@ LABEL permissions='\
       ]\
     }\
   }\
+  "HostConfig": {\
+  "Privileged": true,\
+  "Binds":[\
+    "/usr/blueos/extensions/data-logger:/app",\
+    "/dev:/dev"\
+  ]\
+}
 }'
 
 ARG AUTHOR
