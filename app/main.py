@@ -22,8 +22,12 @@ recording = False
 process = None
 
 @app.route('/')
-def home():
-    return app.send_static_file("index.html")
+def index():
+    try:
+        return send_file("static/index.html")
+    except Exception as e:
+        app.logger.error(f"Error serving index.html: {e}", exc_info=True)
+        return jsonify({"error": "Error serving index page"}), 500
 
 @app.route('/devices')
 def list_devices():
