@@ -93,11 +93,9 @@ def start_recording():
     # Handle both GET and POST parameters
     if request.method == 'POST':
         data = request.json
-        device = data.get("device", "/dev/video2")
         max_duration = data.get("max_duration", 60)
         split_duration = data.get("split_duration", 30)
     else:  # GET
-        device = request.args.get("device", "/dev/video2")
         max_duration = request.args.get("max_duration", 60)
         split_duration = request.args.get("split_duration", 30)
 
@@ -110,7 +108,7 @@ def start_recording():
 
     command = [
         "gst-launch-1.0", "-e",
-        "v4l2src", f"device={device}",
+        "v4l2src", "device=/dev/video2",  # Hardcoded to video2
         "!", "video/x-h264,width=1920,height=1080,framerate=30/1",
         "!", "h264parse",
         "!", "splitmuxsink",

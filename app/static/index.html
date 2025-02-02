@@ -9,9 +9,8 @@
 </head>
 <body>
     <h1>Video Recorder</h1>
-    <div>
-        <label>Select Video Device:</label>
-        <select id="deviceSelect"></select>
+    <div style="margin-bottom: 15px; color: #666;">
+        <p>Using camera device: <strong>/dev/video2</strong></p>
     </div>
     <div>
         <label>Max Duration (seconds):</label>
@@ -36,19 +35,11 @@
 let recordingTimer;
 let startTime;
 
-async function fetchDevices() {
-    const response = await axios.get('/devices');
-    const devices = response.data.devices;
-    const deviceSelect = document.getElementById("deviceSelect");
-    deviceSelect.innerHTML = devices.map(device => `<option value="${device.device}">${device.name}</option>`);
-}
-
 async function startRecording() {
-    const device = document.getElementById("deviceSelect").value;
     const maxDuration = document.getElementById("maxDuration").value;
     const splitDuration = document.getElementById("splitDuration").value;
     try {
-        await axios.get(`/start?device=${device}&max_duration=${maxDuration}&split_duration=${splitDuration}`);
+        await axios.get(`/start?max_duration=${maxDuration}&split_duration=${splitDuration}`);
         document.getElementById("errorMessage").innerText = "";
         startTime = new Date();
         document.getElementById("recordingTime").style.display = "block";
@@ -81,14 +72,23 @@ function updateRecordingTime() {
 }
 
 async function fetchVideos() {
-    const response = await axios.get('/list');
-    const videos = response.data.videos;
-    const videoList = document.getElementById("videoList");
-    videoList.innerHTML = videos.map(video => `<li><a href="/download/${video}" download>${video}</a></li>`).join('');
+    try {
+        const response = await axios.get('/list');
+        const videoList = document.getElementById("videoList");
+        videoList.innerHTML = '';
+        response.data.videos.forEach(video => {
+            const li = document.createElement('li');
+            const a = document.createElement('a');
+            a.href = `/download/${video}`;
+            a.textContent = video;
+            li.appendChild(a);
+            videoList.appendChild(li);
+        });
+    } catch (error) {
+        document.getElementById("errorMessage").innerText = error.response?.data?.error || "Error fetching videos";
+    }
 }
 
-window.onload = async () => {
-    await fetchDevices();
-    await fetchVideos();
-};
+// Initial video list fetch
+fetchVideos();
 </script>
