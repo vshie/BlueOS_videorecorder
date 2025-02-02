@@ -23,7 +23,6 @@ LABEL permissions="{\
   \"HostConfig\": {\
     \"Binds\": [\
       \"/usr/blueos/extensions/videorecorder:/app/videorecordings\",\
-      \"/usr/blueos/extensions/videorecorder:/app\",\
       \"/dev/video2:/dev/video2\"\
     ],\
     \"ExtraHosts\": [\"host.docker.internal:host-gateway\"],\
