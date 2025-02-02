@@ -58,7 +58,7 @@ def start_recording():
     device = request.json.get("device", "/dev/video2")
     try:
         max_duration = int(request.json.get("max_duration", 60)) * 1_000_000_000
-        split_duration = int(request.json.get("split_duration", 10)) * 1_000_000_000
+        split_duration = int(request.json.get("split_duration", 30)) * 1_000_000_000
     except (ValueError, TypeError) as e:
         app.logger.error("Invalid duration parameters", exc_info=True)
         return jsonify({"error": "Invalid duration parameters"}), 400
@@ -126,6 +126,17 @@ def download_video(filename):
         app.logger.error(f"Error sending file {filename}", exc_info=True)
         return jsonify({"error": f"Error sending file: {str(e)}"}), 500
 
+@app.route('/register_service')
+def register_service():
+    return jsonify({
+        "name": "Video Recorder",
+        "description": "Record video from connected cameras. Supports splitting recordings into manageable chunks and downloading recorded files.",
+        "icon": "mdi-video",
+        "company": "Blue Robotics",
+        "version": "0.9",
+        "webpage": "",
+        "api": "https://github.com/bluerobotics/BlueOS-docker"
+    })
 
 # Global error handler
 @app.errorhandler(Exception)
