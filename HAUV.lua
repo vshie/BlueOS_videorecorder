@@ -89,11 +89,12 @@ function get_data()
     return depth, roll, mah
 end
 
--- Function to set depth target / descent rate / descent throttle
-
+-- Mode definitions
+MODE_MANUAL = 19
+MODE_STABILIZE = 0
+MODE_ALT_HOLD = 2
 
 -- Function to control dive mission!
-
 function control_dive_mission()
     if not switch_closed() and state ~= STANDBY then
         gcs:send_text(6, "Mission switch opened - aborting")
@@ -103,6 +104,17 @@ function control_dive_mission()
     if state == STANDBY then
         set_lights(false)
         if updateswitch() then
+            -- Arm vehicle and set to manual mode
+            if not vehicle:arm() then
+                gcs:send_text(6, "Failed to arm vehicle")
+                return
+            end
+            if not vehicle:set_mode(MODE_MANUAL) then
+                gcs:send_text(6, "Failed to set manual mode")
+                return
+            end
+            gcs:send_text(6, "Vehicle armed and in manual mode")
+            
             timer = millis()
             state = COUNTDOWN
             start_mah = battery:consumed_mah()

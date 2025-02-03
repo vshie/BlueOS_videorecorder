@@ -30,6 +30,7 @@
 <script>
 let recordingTimer;
 let startTime;
+let fileListTimer;
 
 async function startRecording() {
     try {
@@ -86,4 +87,13 @@ async function fetchVideos() {
 
 // Initial video list fetch
 fetchVideos();
+
+// Set up periodic refresh of video list (every 5 seconds)
+fileListTimer = setInterval(fetchVideos, 5000);
+
+// Clean up timer when page is unloaded
+window.addEventListener('unload', () => {
+    clearInterval(fileListTimer);
+    clearInterval(recordingTimer);
+});
 </script>

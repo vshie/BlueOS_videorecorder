@@ -139,7 +139,9 @@ def stop_recording():
     recording = False
     if process:
         try:
-            process.terminate()
+            # Send EOS (End Of Stream) signal to gstreamer pipeline
+            process.send_signal(subprocess.SIGINT)
+            # Wait for the process to finish gracefully
             stdout, stderr = process.communicate(timeout=10)
             app.logger.info(f"Recording process stdout: {stdout.decode('utf-8')}")
             if stderr:
