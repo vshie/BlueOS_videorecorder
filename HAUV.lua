@@ -65,14 +65,19 @@ function updateswitch()
   return update, 1000
 end
 
+-- Configuration for lights
+PWM_Lightoff = 1000  -- PWM value for lights off
+PWM_Lightmed = 1500  -- PWM value for medium brightness
+local RC9 = rc:get_channel(9)  -- Get RC channel 9 for lights
+
 -- Function to control lights
 function set_lights(on)
-    -- Assuming lights are controlled via relay
     if on then
-        SRV_Channels:set_output_pwm_chan(lights1_channel, PWM_Lightmed) --is light channel valid use of servo function?
-
+        RC9:set_override(PWM_Lightmed)
+        gcs:send_text(6, "Lights turned ON")
     else
-        SRV_Channels:set_output_pwm_chan(lights1_channel, PWM_Lightoff) --is light channel valid use of servo function?
+        RC9:set_override(PWM_Lightoff)
+        gcs:send_text(6, "Lights turned OFF")
     end
 end
 
@@ -94,49 +99,45 @@ function control_dive_mission()
         gcs:send_text(6, "Mission switch opened - aborting")
         state = ABORT
     end
+    
     if state == STANDBY then
-        SRV_Channels:set_output_pwm_chan(LIGHTS1_SERVO, PWM_Lightoff)
+        set_lights(false)
         if updateswitch() then
             timer = millis()
             state = COUNTDOWN
             start_mah = battery:consumed_mah()
         end
-    end
     elseif state == COUNTDOWN then
         timer = millis()
-        if millis() > (timer + dive_delay_s * 1000) then
+        if millis() > (timer + dive_delay_s:get() * 1000) then
             state = DESCENDING
             last_depth = depth
             gcs:send_text(6, "Starting descent")
         end
-    end
     elseif state == DESCENDING then
-        -- set depth target
-        -- set descent rate
-        -- set descent throttle
-        -- if depth > vrecord_depth, start recording via http request to video recorder extension
-        -- monitor descent rate / depth
-        -- if decrease in descent rate > descent_rate_threshold, set max_depth, hover_depth = max_depth - hover_offset
-        if hover_depth != 0 then
-            state = HOVERING
+        local depth = get_data()
+        if depth > light_depth:get() then
+            set_lights(true)
+            if start_video_recording() then
+                gcs:send_text(6, "Video recording started at depth")
+            end
         end
-    elseif state == HOVERING then
-        -- monitor depth, error depth - hover_depth
-        timer = millis()
-        if millis() > (timer + hover_time * 1000) then
-            state = SURFACING
-        end
+        -- ... rest of descending logic ...
     elseif state == SURFACING then
-        -- disarm (?)
-        -- verify ascent rate +
-        -- if depth > surf_depth, set state = STANDBY
-    end
-elseif state == ABORT then
+        set_lights(false)
+        if stop_video_recording() then
+            gcs:send_text(6, "Video recording stopped during surfacing")
+        end
+        -- ... rest of surfacing logic ...
+    elseif state == ABORT then
+        set_lights(false)
+        stop_video_recording()
         vehicle:disarm()
     end
+    
     gcs:send_named_float("State", state)
     gcs:send_named_float("Depth", depth)
-    return update 1000
+    return update, 1000
 end
 
 function mavlink_decode_header(message)
@@ -192,49 +193,54 @@ function mavlink_decode_header(message)
     return result
   end
   
--- Function to control video recording
-function start_video_recording(max_duration, split_duration)
+-- HTTP Configuration
+HTTP_HOST = "localhost"
+HTTP_PORT = 5423
+
+-- Function to start video recording
+function start_video_recording()
     local sock = Socket(0)
     if not sock:bind("0.0.0.0", 9988) then
-        gcs:send_text(0, "Failed to bind socket")
+        gcs:send_text(6, "Failed to bind socket")
         sock:close()
-        return
+        return false
     end
 
-    if not sock:connect("localhost", 5423) then
-        gcs:send_text(0, "Failed to connect to video recorder")
+    if not sock:connect(HTTP_HOST, HTTP_PORT) then
+        gcs:send_text(6, string.format("Failed to connect to %s:%d", HTTP_HOST, HTTP_PORT))
         sock:close()
-        return
+        return false
     end
 
-    local max_dur = max_duration or 60  -- default 60 seconds
-    local split_dur = split_duration or 30  -- default 30 seconds
-    local request = string.format("GET /start?max_duration=%d&split_duration=%d HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", 
-        max_dur, split_dur)
-    
-    sock:send(request)
+    local request = "GET /start?split_duration=90 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=90", HTTP_HOST, HTTP_PORT))
+    sock:send(request, string.len(request))
     sock:close()
-    gcs:send_text(0, "Video recording started")
+    gcs:send_text(6, "Video recording started")
+    return true
 end
 
+-- Function to stop video recording
 function stop_video_recording()
     local sock = Socket(0)
     if not sock:bind("0.0.0.0", 9988) then
-        gcs:send_text(0, "Failed to bind socket")
+        gcs:send_text(6, "Failed to bind socket")
         sock:close()
-        return
+        return false
     end
 
-    if not sock:connect("localhost", 5423) then
-        gcs:send_text(0, "Failed to connect to video recorder")
+    if not sock:connect(HTTP_HOST, HTTP_PORT) then
+        gcs:send_text(6, string.format("Failed to connect to %s:%d", HTTP_HOST, HTTP_PORT))
         sock:close()
-        return
+        return false
     end
 
     local request = "GET /stop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-    sock:send(request)
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/stop", HTTP_HOST, HTTP_PORT))
+    sock:send(request, string.len(request))
     sock:close()
-    gcs:send_text(0, "Video recording stopped")
+    gcs:send_text(6, "Video recording stopped")
+    return true
 end
   
 
