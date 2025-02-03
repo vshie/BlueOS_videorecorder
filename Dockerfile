@@ -2,17 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Enable universe repository and install all required packages in a single RUN command
+# Install required packages
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        software-properties-common \
-        curl \
-        gstreamer1.0-tools \
-        gstreamer1.0-plugins-base \
-        gstreamer1.0-plugins-good \
-        gstreamer1.0-plugins-bad \
-        gstreamer1.0-x \
-        gstreamer1.0-alsa \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
