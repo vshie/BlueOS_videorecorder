@@ -4,6 +4,8 @@ import threading
 import subprocess
 import glob
 import logging
+import signal
+
 print("hello we are running main.py, hello world")
 
 # Configure Flask to serve static files from the root URL.
@@ -140,7 +142,7 @@ def stop_recording():
     if process:
         try:
             # Send EOS (End Of Stream) signal to gstreamer pipeline
-            process.send_signal(subprocess.SIGINT)
+            process.send_signal(signal.SIGINT)
             # Wait for the process to finish gracefully
             stdout, stderr = process.communicate(timeout=10)
             app.logger.info(f"Recording process stdout: {stdout.decode('utf-8')}")
