@@ -1,31 +1,38 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bullseye
 
+# Install dependencies in a single RUN command with proper error handling
+RUN set -ex && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gstreamer1.0-tools \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-bad \
+        python3-minimal && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create app directory
 WORKDIR /app
 
-# Install required packages
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    gstreamer1.0-tools \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# Copy requirements first to leverage Docker cache
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Create necessary directories
-RUN mkdir -p /app/static /app/videorecordings
+# Copy app files
+COPY app/ .
 
-# Copy the application code and static files
-COPY app/main.py /app/
-COPY app/static/* /app/static/
+# Create directory for video recordings
+RUN mkdir -p /app/videorecordings
 
-# Install Python dependencies
-RUN pip install --no-cache-dir flask requests
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV FLASK_APP=main.py
 
-# Expose the port that the application runs on
+# Expose port
 EXPOSE 5423
 
-# Command to run the application
+# Run app
 CMD ["python", "main.py"]
 
 LABEL version="0.9"
