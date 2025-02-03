@@ -6,6 +6,17 @@
     <title>Video Recorder</title>
     <script defer src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
     <script defer src="/static/app.js"></script>
+    <style>
+        .error {
+            color: red;
+            display: none;
+            margin: 10px 0;
+        }
+        #recordingDuration {
+            font-family: monospace;
+            font-size: 1.2em;
+        }
+    </style>
 </head>
 <body>
     <h1>Video Recorder</h1>
@@ -13,14 +24,16 @@
         <p>Using camera device: <strong>/dev/video2</strong></p>
     </div>
     <div>
-        <label>Split Duration (seconds):</label>
+        <p>Status: <span id="recordingStatus">Stopped</span></p>
+        <p>Duration: <span id="recordingDuration">00:00:00</span></p>
+    </div>
+    <div>
+        <label for="splitDuration">Split Duration (seconds):</label>
         <input type="number" id="splitDuration" value="30" min="1" max="3600" />
     </div>
     <button onclick="startRecording()">Start Recording</button>
     <button onclick="stopRecording()">Stop Recording</button>
-    <div id="recordingStatus">Stopped</div>
-    <div id="recordingDuration"></div>
-    <p id="errorMessage" style="color: red"></p>
+    <div id="errorMessage" class="error"></div>
     <h2>Recorded Videos</h2>
     <ul id="videoList"></ul>
 </body>

@@ -1,8 +1,5 @@
 FROM python:3.11-slim
 
-# Set Python to run in unbuffered mode
-ENV PYTHONUNBUFFERED=1
-
 WORKDIR /app
 
 # Install required packages
