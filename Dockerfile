@@ -15,9 +15,8 @@ RUN set -ex && \
 # Create app directory
 WORKDIR /app
 
-# Copy requirements first to leverage Docker cache
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies directly
+RUN pip install --no-cache-dir flask requests
 
 # Copy app files
 COPY app/ .
