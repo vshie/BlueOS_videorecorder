@@ -176,6 +176,75 @@ def download_video(filename):
         app.logger.error(f"Error sending file {filename}", exc_info=True)
         return jsonify({"error": f"Error sending file: {str(e)}"}), 500
 
+@app.route('/api/docs')
+def api_docs():
+    return jsonify({
+        "openapi": "3.0.0",
+        "info": {
+            "title": "Video Recorder API",
+            "description": "API for controlling video recording and managing recorded files",
+            "version": "1.0.0"
+        },
+        "paths": {
+            "/start": {
+                "get": {
+                    "summary": "Start video recording",
+                    "parameters": [
+                        {
+                            "name": "split_duration",
+                            "in": "query",
+                            "description": "Duration in seconds for each video segment",
+                            "required": False,
+                            "schema": {
+                                "type": "integer",
+                                "default": 30
+                            }
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Recording started successfully"
+                        }
+                    }
+                }
+            },
+            "/stop": {
+                "get": {
+                    "summary": "Stop video recording",
+                    "responses": {
+                        "200": {
+                            "description": "Recording stopped successfully"
+                        }
+                    }
+                }
+            },
+            "/list": {
+                "get": {
+                    "summary": "List recorded videos",
+                    "responses": {
+                        "200": {
+                            "description": "List of recorded video files",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "videos": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "string"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
 
 # Global error handler
 @app.errorhandler(Exception)
