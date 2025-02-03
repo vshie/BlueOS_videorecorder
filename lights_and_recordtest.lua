@@ -21,15 +21,23 @@ HTTP_HOST = "localhost"
 HTTP_PORT = 5423
 
 -- Timing constants (in milliseconds)
-LIGHTS_ON_DELAY = 10000
+LIGHTS_ON_DELAY = 5000
 START_RECORDING_DELAY = 10000
 LIGHTS_OFF_DELAY = 30000
-STOP_RECORDING_DELAY = 92000
+STOP_RECORDING_DELAY = 40000
 
 -- Global variables
 local state = STANDBY
 local timer = 0
 local RC9 = rc:get_channel(9)
+
+-- Switch input configuration
+gpio:pinMode(51,0) -- set AUX 2 to input
+
+function switch_closed()
+    return gpio:read(51)
+end
+
 -- Function to control lights
 function set_lights(on)
     if on then
@@ -56,8 +64,8 @@ function start_video_recording()
         return false
     end
 
-    local request = "GET /start?split_duration=90 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=90", HTTP_HOST, HTTP_PORT))
+    local request = "GET /start?split_duration=30 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=30", HTTP_HOST, HTTP_PORT))
     sock:send(request, string.len(request))
     sock:close()
     gcs:send_text(6, "Video recording started")
@@ -88,13 +96,21 @@ function stop_video_recording()
 end
 
 function handle_sequence()
+    if not switch_closed() and state ~= STANDBY then
+        gcs:send_text(6, "Switch opened - stopping sequence")
+        set_lights(false)
+        stop_video_recording()
+        state = STANDBY
+        return
+    end
+    
     if state == STANDBY then
-        -- Start the sequence by turning on lights after delay
-        if millis() > (timer + LIGHTS_ON_DELAY) then
+        -- Wait for switch to be closed before starting sequence
+        if switch_closed() then
+            gcs:send_text(6, "Switch closed - starting sequence")
             set_lights(true)
-            state = LIGHTS_ON
             timer = millis()
-            gcs:send_text(6, "State: LIGHTS ON")
+            state = LIGHTS_ON
         end
     elseif state == LIGHTS_ON then
         -- Start recording after lights have been on
