@@ -21,10 +21,10 @@ HTTP_HOST = "localhost"
 HTTP_PORT = 5423
 
 -- Timing constants (in milliseconds)
-LIGHTS_ON_DELAY = 30000
-START_RECORDING_DELAY = 30000
+LIGHTS_ON_DELAY = 10000
+START_RECORDING_DELAY = 10000
 LIGHTS_OFF_DELAY = 30000
-STOP_RECORDING_DELAY = 30000
+STOP_RECORDING_DELAY = 92000
 
 -- Global variables
 local state = STANDBY
@@ -58,7 +58,7 @@ function start_video_recording()
 
     local request = "GET /start?split_duration=90 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=90", HTTP_HOST, HTTP_PORT))
-    sock:send(request)
+    sock:send(request, string.len(request))
     sock:close()
     gcs:send_text(6, "Video recording started")
     return true
@@ -81,7 +81,7 @@ function stop_video_recording()
 
     local request = "GET /stop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     gcs:send_text(6, string.format("Sending request to http://%s:%d/stop", HTTP_HOST, HTTP_PORT))
-    sock:send(request)
+    sock:send(request, string.len(request))
     sock:close()
     gcs:send_text(6, "Video recording stopped")
     return true

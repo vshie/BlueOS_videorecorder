@@ -93,18 +93,20 @@ def start_recording():
     # Handle both GET and POST parameters
     if request.method == 'POST':
         data = request.json
-        max_duration = data.get("max_duration", 60)
         split_duration = data.get("split_duration", 30)
     else:  # GET
-        max_duration = request.args.get("max_duration", 60)
         split_duration = request.args.get("split_duration", 30)
 
     try:
-        max_duration = int(max_duration) * 1_000_000_000
         split_duration = int(split_duration) * 1_000_000_000
     except (ValueError, TypeError) as e:
-        app.logger.error("Invalid duration parameters", exc_info=True)
-        return jsonify({"error": "Invalid duration parameters"}), 400
+        app.logger.error("Invalid duration parameter", exc_info=True)
+        return jsonify({"error": "Invalid duration parameter"}), 400
+
+    # Create filename with timestamp
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename_pattern = f"{VIDEO_DIRECTORY}/video_{timestamp}_%03d.mp4"
 
     command = [
         "gst-launch-1.0", "-e",
@@ -112,7 +114,7 @@ def start_recording():
         "!", "video/x-h264,width=1920,height=1080,framerate=30/1",
         "!", "h264parse",
         "!", "splitmuxsink",
-        f"location={VIDEO_DIRECTORY}/video_%05d.mp4",
+        f"location={filename_pattern}",
         f"max-size-time={split_duration}"
     ]
 
