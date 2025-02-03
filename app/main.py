@@ -9,9 +9,19 @@ from datetime import datetime
 
 print("hello we are running main.py, hello world")
 
-# Configure Flask to serve static files from the root URL.
-app = Flask(__name__, static_url_path="/static", static_folder="static") #setup flask app
+# Get the directory containing the current file
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, 'static')
 
+app = Flask(__name__, static_folder='static')
+
+# Remove the custom /app.js route since Flask will handle static files
+# @app.route('/app.js')
+# def serve_js():
+#     return send_file("static/app.js")  # Remove this
+
+# Make sure the static directory exists
+os.makedirs(STATIC_DIR, exist_ok=True)
 
 # Enable logging with a basic configuration.
 logging.basicConfig(level=logging.DEBUG,
@@ -35,10 +45,6 @@ def index():
     except Exception as e:
         app.logger.error(f"Error serving index.html: {e}", exc_info=True)
         return jsonify({"error": "Error serving index page"}), 500
-
-@app.route('/app.js')
-def serve_js():
-    return send_file("static/app.js")
 
 @app.route('/favicon.ico')
 def favicon():

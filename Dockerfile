@@ -12,8 +12,12 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the application code
-COPY app/ .
+# Create necessary directories
+RUN mkdir -p /app/static /app/videorecordings
+
+# Copy the application code and static files
+COPY app/main.py /app/
+COPY app/static/* /app/static/
 
 # Install Python dependencies
 RUN pip install --no-cache-dir flask requests
