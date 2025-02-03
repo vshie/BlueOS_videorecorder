@@ -73,46 +73,46 @@ def stop_recording():
 def index():
     return send_from_directory(STATIC_DIR, 'index.html')
 
-@app.route('/api/v1/recording/start', methods=['POST'])
-def api_start_recording():
-    if start_recording():
-        return jsonify({"status": "success", "message": "Recording started"})
-    return jsonify({"status": "error", "message": "Failed to start recording"}), 500
-
-@app.route('/api/v1/recording/stop', methods=['POST'])
-def api_stop_recording():
-    if stop_recording():
-        return jsonify({"status": "success", "message": "Recording stopped"})
-    return jsonify({"status": "error", "message": "Failed to stop recording"}), 500
-
-@app.route('/api/v1/recording/status', methods=['GET'])
-def api_recording_status():
+@app.route('/status', methods=['GET'])
+def get_status():
     return jsonify({
         "recording": recording,
         "start_time": start_time.isoformat() if start_time else None
     })
 
-@app.route('/api/v1/recordings', methods=['GET'])
-def list_recordings():
+@app.route('/start', methods=['GET'])
+def start():
+    split_duration = request.args.get('split_duration', default=30, type=int)
+    if start_recording():
+        return jsonify({"status": "success", "message": "Recording started"})
+    return jsonify({"status": "error", "message": "Failed to start recording"}), 500
+
+@app.route('/stop', methods=['GET'])
+def stop():
+    if stop_recording():
+        return jsonify({"status": "success", "message": "Recording stopped"})
+    return jsonify({"status": "error", "message": "Failed to stop recording"}), 500
+
+@app.route('/list', methods=['GET'])
+def list_videos():
     recordings = []
     for file in sorted(glob.glob("/app/videorecordings/*.mp4")):
         filename = os.path.basename(file)
-        size = os.path.getsize(file)
-        mtime = os.path.getmtime(file)
-        recordings.append({
-            "filename": filename,
-            "size": size,
-            "mtime": mtime
-        })
-    return jsonify(recordings)
+        recordings.append(filename)
+    return jsonify({"videos": recordings})
 
-@app.route('/api/v1/recordings/<path:filename>', methods=['GET'])
-def download_recording(filename):
+@app.route('/download/<path:filename>', methods=['GET'])
+def download_video(filename):
     return send_file(
         os.path.join("/app/videorecordings", filename),
         as_attachment=True,
         download_name=filename
     )
+
+# Add error handler for 404
+@app.errorhandler(404)
+def not_found_error(error):
+    return jsonify({"error": "Not found"}), 404
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5423)
