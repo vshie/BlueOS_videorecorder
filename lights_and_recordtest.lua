@@ -29,14 +29,14 @@ STOP_RECORDING_DELAY = 30000
 -- Global variables
 local state = STANDBY
 local timer = 0
-
+local RC9 = rc:get_channel(9)
 -- Function to control lights
 function set_lights(on)
     if on then
-        SRV_Channels:set_output_pwm(winch_channel, PWM_Lightmed)
+        RC9:set_override(PWM_Lightmed)
         gcs:send_text(6, "Lights turned ON")
     else
-        SRV_Channels:set_output_pwm(winch_channel, PWM_Lightoff)
+        RC9:set_override(PWM_Lightoff)
         gcs:send_text(6, "Lights turned OFF")
     end
 end
