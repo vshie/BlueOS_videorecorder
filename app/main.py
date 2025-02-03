@@ -178,8 +178,10 @@ def download_video(filename):
         app.logger.error(f"Error sending file {filename}", exc_info=True)
         return jsonify({"error": f"Error sending file: {str(e)}"}), 500
 
-@app.route('/api/docs')
-def api_docs():
+@app.route('/docs.json')
+@app.route('/openapi.json')
+@app.route('/swagger.json')
+def api_json():
     return jsonify({
         "openapi": "3.0.0",
         "info": {
@@ -257,7 +259,10 @@ def handle_exception(e):
     }
     return jsonify(response), 500
 
+# Turn off Flask development server warning
+import logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
 if __name__ == '__main__':
-    # For production use a proper WSGI server; this is just for development.
-    app.run(host='0.0.0.0', port=5423
-            , debug=True)
+    app.run(host='0.0.0.0', port=5423, debug=True)  # Set debug=False for production
