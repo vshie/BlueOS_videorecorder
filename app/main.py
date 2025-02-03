@@ -27,6 +27,9 @@ def start_recording():
         if recording:
             return False
             
+        # Ensure the video directory exists
+        os.makedirs("/app/videorecordings", exist_ok=True)
+            
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"video_{timestamp}_%03d.mp4"
         filepath = os.path.join("/app/videorecordings", filename)
@@ -48,25 +51,36 @@ def start_recording():
         
     except Exception as e:
         logger.error(f"Failed to start recording: {str(e)}")
+        recording = False
+        process = None
+        start_time = None
         return False
 
 def stop_recording():
     global recording, process, start_time
     try:
         if not recording:
-            return False
+            return True  # Return success if already stopped
             
         if process:
             process.terminate()
-            process.wait(timeout=5)
-            process = None
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()  # Force kill if terminate doesn't work
+                process.wait()
             
         recording = False
+        process = None
         start_time = None
         return True
         
     except Exception as e:
         logger.error(f"Failed to stop recording: {str(e)}")
+        # Reset state even if there's an error
+        recording = False
+        process = None
+        start_time = None
         return False
 
 @app.route('/')
@@ -109,7 +123,11 @@ def download_video(filename):
         download_name=filename
     )
 
-# Add error handler for 404
+# Add error handlers
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error"}), 500
+
 @app.errorhandler(404)
 def not_found_error(error):
     return jsonify({"error": "Not found"}), 404
