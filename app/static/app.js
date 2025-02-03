@@ -25,6 +25,7 @@ async function updateStatus() {
     }
 }
 
+//test
 function updateRecordingDuration(startTime) {
     if (recordingTimer) {
         clearInterval(recordingTimer);
