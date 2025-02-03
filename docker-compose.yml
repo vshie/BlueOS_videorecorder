@@ -1,0 +1,15 @@
+version: '3.7'
+
+services:
+  video-recorder:
+    build: .
+    container_name: blueos-videorecorder
+    network_mode: host  # Required for BlueOS
+    ports:
+      - "5423:5423"  # Fixed host:container port mapping
+    volumes:
+      - /usr/blueos/extensions/videorecorder:/app/videorecordings
+      - /dev/video2:/dev/video2
+    restart: unless-stopped
+    environment:
+      - BLUEOS=true
