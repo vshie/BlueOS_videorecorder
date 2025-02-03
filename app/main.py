@@ -5,45 +5,44 @@ import subprocess
 import glob
 import logging
 import signal
-from datetime import datetime
-
-print("hello we are running main.py, hello world")
+from datetime import datetime, timezone
 
 # Get the directory containing the current file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
+VIDEO_DIRECTORY = "/app/videorecordings"
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Turn off Flask development server warning
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 app = Flask(__name__, static_folder='static')
+
+# Global variables
+recording = False
+process = None
+start_time = None
+record_lock = threading.Lock()
+
+# Make sure directories exist
+os.makedirs(STATIC_DIR, exist_ok=True)
+os.makedirs(VIDEO_DIRECTORY, exist_ok=True)
 
 # Remove the custom /app.js route since Flask will handle static files
 # @app.route('/app.js')
 # def serve_js():
 #     return send_file("static/app.js")  # Remove this
 
-# Make sure the static directory exists
-os.makedirs(STATIC_DIR, exist_ok=True)
-
-# Enable logging with a basic configuration.
-logging.basicConfig(level=logging.DEBUG,
-                    format="%(asctime)s %(levelname)s: %(message)s")
-
-VIDEO_DIRECTORY = "/app/videorecordings"
-if not os.path.exists(VIDEO_DIRECTORY):
-    os.makedirs(VIDEO_DIRECTORY)
-
-recording = False
-process = None
-start_time = None
-
-# Add lock for thread safety
-record_lock = threading.Lock()
-
 @app.route('/')
 def index():
     try:
         return send_file("static/index.html")
     except Exception as e:
-        app.logger.error(f"Error serving index.html: {e}", exc_info=True)
+        logger.error(f"Error serving index.html: {e}", exc_info=True)
         return jsonify({"error": "Error serving index page"}), 500
 
 @app.route('/favicon.ico')
@@ -91,7 +90,7 @@ def list_devices():
                 "name": f"Camera Device {video_path}"
             })
     except Exception as e:
-        app.logger.error(f"Error listing devices: {e}", exc_info=True)
+        logger.error(f"Error listing devices: {e}", exc_info=True)
         return jsonify({"error": f"Error listing devices: {str(e)}"}), 500
     
     return jsonify({"devices": devices})
@@ -129,7 +128,7 @@ def start_recording():
         try:
             split_duration = int(split_duration) * 1_000_000_000
         except (ValueError, TypeError) as e:
-            app.logger.error("Invalid duration parameter", exc_info=True)
+            logger.error("Invalid duration parameter", exc_info=True)
             return jsonify({"error": "Invalid duration parameter"}), 400
 
         # Create filename with timestamp
@@ -147,7 +146,7 @@ def start_recording():
         ]
 
         try:
-            app.logger.info(f"Starting recording with command: {' '.join(command)}")
+            logger.info(f"Starting recording with command: {' '.join(command)}")
             recording = True
             start_time = datetime.now().isoformat()  # Store start time
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -155,7 +154,7 @@ def start_recording():
             recording = False
             start_time = None
             process = None
-            app.logger.error("Error starting recording", exc_info=True)
+            logger.error("Error starting recording", exc_info=True)
             return jsonify({"error": f"Error starting recording: {str(e)}"}), 500
 
         return 'Started'
@@ -176,13 +175,13 @@ def stop_recording():
                 process.send_signal(signal.SIGINT)
                 # Wait for the process to finish gracefully
                 stdout, stderr = process.communicate(timeout=10)
-                app.logger.info(f"Recording process stdout: {stdout.decode('utf-8')}")
+                logger.info(f"Recording process stdout: {stdout.decode('utf-8')}")
                 if stderr:
                     error_msg = stderr.decode("utf-8")
-                    app.logger.error(f"Recording process error: {error_msg}")
+                    logger.error(f"Recording process error: {error_msg}")
                     return jsonify({"error": error_msg}), 500
             except Exception as e:
-                app.logger.error("Error stopping recording", exc_info=True)
+                logger.error("Error stopping recording", exc_info=True)
                 if process:  # Double-check process still exists
                     try:
                         process.kill()  # Force kill if necessary
@@ -204,7 +203,7 @@ def list_videos():
                 videos.append(file)
         return jsonify({"videos": sorted(videos)})
     except Exception as e:
-        app.logger.error(f"Error listing videos: {e}", exc_info=True)
+        logger.error(f"Error listing videos: {e}", exc_info=True)
         return jsonify({"error": "Error listing videos"}), 500
 
 @app.route('/download/<filename>')
@@ -212,7 +211,7 @@ def download_video(filename):
     try:
         return send_from_directory(VIDEO_DIRECTORY, filename, as_attachment=True)
     except Exception as e:
-        app.logger.error(f"Error sending file {filename}", exc_info=True)
+        logger.error(f"Error sending file {filename}", exc_info=True)
         return jsonify({"error": f"Error sending file: {str(e)}"}), 500
 
 @app.route('/docs.json')
@@ -297,16 +296,17 @@ def get_status():
 # Global error handler
 @app.errorhandler(Exception)
 def handle_exception(e):
-    app.logger.error("Unhandled Exception", exc_info=e)
+    logger.error("Unhandled Exception", exc_info=e)
     response = {
         "error": str(e) if app.debug else "An unknown error occurred."
     }
     return jsonify(response), 500
 
-# Turn off Flask development server warning
-import logging
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5423, debug=True)  # Set debug=False for production
+    # Ensure we start with recording off
+    recording = False
+    process = None
+    start_time = None
+    
+    # Run without debug mode
+    app.run(host='0.0.0.0', port=5423, debug=False)
