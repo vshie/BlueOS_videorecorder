@@ -89,23 +89,44 @@ def index():
 
 @app.route('/status', methods=['GET'])
 def get_status():
-    return jsonify({
-        "recording": recording,
-        "start_time": start_time.isoformat() if start_time else None
-    })
+    try:
+        if process and process.poll() is not None:
+            global recording, start_time
+            recording = False
+            start_time = None
+            
+        return jsonify({
+            "recording": recording,
+            "start_time": start_time.isoformat() if start_time else None
+        })
+    except Exception as e:
+        logger.error(f"Error in status endpoint: {str(e)}")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/start', methods=['GET'])
 def start():
-    split_duration = request.args.get('split_duration', default=30, type=int)
-    if start_recording():
-        return jsonify({"status": "success", "message": "Recording started"})
-    return jsonify({"status": "error", "message": "Failed to start recording"}), 500
+    try:
+        split_duration = request.args.get('split_duration', default=30, type=int)
+        success = start_recording()
+        if success:
+            return jsonify({"success": True})
+        else:
+            return jsonify({"success": False, "message": "Failed to start recording"}), 500
+    except Exception as e:
+        logger.error(f"Error in start endpoint: {str(e)}")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/stop', methods=['GET'])
 def stop():
-    if stop_recording():
-        return jsonify({"status": "success", "message": "Recording stopped"})
-    return jsonify({"status": "error", "message": "Failed to stop recording"}), 500
+    try:
+        success = stop_recording()
+        if success:
+            return jsonify({"success": True})
+        else:
+            return jsonify({"success": False, "message": "Failed to stop recording"}), 500
+    except Exception as e:
+        logger.error(f"Error in stop endpoint: {str(e)}")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/list', methods=['GET'])
 def list_videos():

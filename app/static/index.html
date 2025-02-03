@@ -7,14 +7,88 @@
     <script defer src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
     <script defer src="/static/app.js"></script>
     <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        
+        .status-container {
+            margin: 20px 0;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        
+        .controls {
+            margin: 20px 0;
+        }
+        
         .error {
             color: red;
             display: none;
             margin: 10px 0;
+            padding: 10px;
+            background-color: #ffe6e6;
+            border: 1px solid #ff9999;
+            border-radius: 4px;
         }
+        
+        #recordingStatus {
+            font-weight: bold;
+        }
+        
         #recordingDuration {
             font-family: monospace;
             font-size: 1.2em;
+            margin-left: 10px;
+        }
+        
+        button {
+            padding: 8px 16px;
+            margin-right: 10px;
+            cursor: pointer;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
+        
+        button:hover {
+            background-color: #f0f0f0;
+        }
+        
+        #videoList {
+            list-style: none;
+            padding: 0;
+        }
+        
+        #videoList li {
+            margin: 5px 0;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        #videoList a {
+            text-decoration: none;
+            color: #0066cc;
+        }
+        
+        #videoList a:hover {
+            text-decoration: underline;
+        }
+        
+        .input-group {
+            margin: 15px 0;
+        }
+        
+        .input-group label {
+            margin-right: 10px;
+        }
+        
+        input[type="number"] {
+            padding: 5px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
         }
     </style>
 </head>
@@ -23,16 +97,18 @@
     <div style="margin-bottom: 15px; color: #666;">
         <p>Using camera device: <strong>/dev/video2</strong></p>
     </div>
-    <div>
+    <div class="status-container">
         <p>Status: <span id="recordingStatus">Stopped</span></p>
         <p>Duration: <span id="recordingDuration">00:00:00</span></p>
     </div>
-    <div>
+    <div class="input-group">
         <label for="splitDuration">Split Duration (seconds):</label>
         <input type="number" id="splitDuration" value="30" min="1" max="3600" />
     </div>
-    <button onclick="startRecording()">Start Recording</button>
-    <button onclick="stopRecording()">Stop Recording</button>
+    <div class="controls">
+        <button onclick="startRecording()">Start Recording</button>
+        <button onclick="stopRecording()">Stop Recording</button>
+    </div>
     <div id="errorMessage" class="error"></div>
     <h2>Recorded Videos</h2>
     <ul id="videoList"></ul>
