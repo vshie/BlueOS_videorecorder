@@ -1,14 +1,8 @@
 -- Configuration
 --LIGHTS1_SERVO = 13  -- Servo function for lights
-PWM_Lightoff = 1000  -- PWM value for lights off
-PWM_Lightmed = 1500  -- PWM value for medium brightness
-WINCH_SERVO = 13
--- from https://ardupilot.org/rover/docs/parameters.html#servo14-function-servo-output-function
-WINCH_FUNCTION = 88
-winch_channel = SRV_Channels:find_channel(WINCH_FUNCTION)
-if winch_channel == nil then
-    gcs:send_text(6, "Set a SERVO_FUNCTION to WINCH and try restart vehicle")
-end
+PWM_Lightoff = 1400  -- PWM value for lights off
+PWM_Lightmed = 1600  -- PWM value for medium brightness
+
 -- States
 STANDBY = 0
 LIGHTS_ON = 1
@@ -24,20 +18,12 @@ HTTP_PORT = 5423
 LIGHTS_ON_DELAY = 5000
 START_RECORDING_DELAY = 10000
 LIGHTS_OFF_DELAY = 30000
-STOP_RECORDING_DELAY = 40000
+STOP_RECORDING_DELAY = 50000
 
 -- Global variables
 local state = STANDBY
 local timer = 0
 local RC9 = rc:get_channel(9)
-
--- Switch input configuration
-gpio:pinMode(51,0) -- set AUX 2 to input
-
-function switch_closed()
-    return gpio:read(51)
-end
-
 -- Function to control lights
 function set_lights(on)
     if on then
@@ -64,8 +50,8 @@ function start_video_recording()
         return false
     end
 
-    local request = "GET /start?split_duration=30 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=30", HTTP_HOST, HTTP_PORT))
+    local request = "GET /start?split_duration=20 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=20", HTTP_HOST, HTTP_PORT))
     sock:send(request, string.len(request))
     sock:close()
     gcs:send_text(6, "Video recording started")
@@ -96,21 +82,13 @@ function stop_video_recording()
 end
 
 function handle_sequence()
-    if not switch_closed() and state ~= STANDBY then
-        gcs:send_text(6, "Switch opened - stopping sequence")
-        set_lights(false)
-        stop_video_recording()
-        state = STANDBY
-        return
-    end
-    
     if state == STANDBY then
-        -- Wait for switch to be closed before starting sequence
-        if switch_closed() then
-            gcs:send_text(6, "Switch closed - starting sequence")
+        -- Start the sequence by turning on lights after delay
+        if millis() > (timer + LIGHTS_ON_DELAY) then
             set_lights(true)
-            timer = millis()
             state = LIGHTS_ON
+            timer = millis()
+            gcs:send_text(6, "State: LIGHTS ON")
         end
     elseif state == LIGHTS_ON then
         -- Start recording after lights have been on

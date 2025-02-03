@@ -22,11 +22,10 @@ log.setLevel(logging.ERROR)
 
 app = Flask(__name__, static_folder='static')
 
-# Global variables
-recording = False
-process = None
-start_time = None
-record_lock = threading.Lock()
+# Add proper thread synchronization
+recording_lock = threading.Lock()
+recording_process = None
+is_recording = False
 
 # Make sure directories exist
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -95,104 +94,72 @@ def list_devices():
     
     return jsonify({"devices": devices})
 
-@app.route('/start', methods=['GET', 'POST'])
 def start_recording():
-    global recording, process, start_time
-
-    # Use lock to ensure thread safety
-    with record_lock:
-        if recording:
-            return jsonify({"error": "Recording already in progress"}), 400
-
-        # Kill any existing process
-        if process:
-            try:
-                process.send_signal(signal.SIGINT)
-                process.wait(timeout=5)
-            except:
-                if process:  # Double-check process still exists
-                    try:
-                        process.kill()  # Force kill if necessary
-                        process.wait(timeout=2)
-                    except:
-                        pass
-            process = None
-
-        # Handle both GET and POST parameters
-        if request.method == 'POST':
-            data = request.json
-            split_duration = data.get("split_duration", 30)
-        else:  # GET
-            split_duration = request.args.get("split_duration", 30)
-
+    global recording_process, is_recording
+    
+    with recording_lock:
+        if is_recording:
+            logging.info("Recording already in progress")
+            return False
+            
         try:
-            split_duration = int(split_duration) * 1_000_000_000
-        except (ValueError, TypeError) as e:
-            logger.error("Invalid duration parameter", exc_info=True)
-            return jsonify({"error": "Invalid duration parameter"}), 400
-
-        # Create filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename_pattern = f"{VIDEO_DIRECTORY}/video_{timestamp}_%03d.mp4"
-
-        command = [
-            "gst-launch-1.0", "-e",
-            "v4l2src", "device=/dev/video2",  # Hardcoded to video2
-            "!", "video/x-h264,width=1920,height=1080,framerate=30/1",
-            "!", "h264parse",
-            "!", "splitmuxsink",
-            f"location={filename_pattern}",
-            f"max-size-time={split_duration}"
-        ]
-
-        try:
-            logger.info(f"Starting recording with command: {' '.join(command)}")
-            recording = True
-            start_time = datetime.now().isoformat()  # Store start time
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"video_{timestamp}_%03d.mp4"
+            filepath = os.path.join("/app/videorecordings", filename)
+            
+            command = [
+                "gst-launch-1.0", "-e",
+                "v4l2src", "device=/dev/video2",
+                "!", "video/x-h264,width=1920,height=1080,framerate=30/1",
+                "!", "h264parse",
+                "!", f"splitmuxsink location={filepath} max-size-time=30000000000"
+            ]
+            
+            logging.info(f"Starting recording with command: {' '.join(command)}")
+            recording_process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
+            is_recording = True
+            return True
+            
         except Exception as e:
-            recording = False
-            start_time = None
-            process = None
-            logger.error("Error starting recording", exc_info=True)
-            return jsonify({"error": f"Error starting recording: {str(e)}"}), 500
+            logging.error(f"Failed to start recording: {str(e)}")
+            return False
 
-        return 'Started'
-
-@app.route('/stop', methods=['GET', 'POST'])
 def stop_recording():
-    global recording, process, start_time
+    global recording_process, is_recording
+    
+    with recording_lock:
+        if not is_recording:
+            logging.info("No recording in progress")
+            return False
+            
+        try:
+            if recording_process:
+                recording_process.terminate()
+                recording_process.wait(timeout=5)
+                recording_process = None
+            is_recording = False
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to stop recording: {str(e)}")
+            return False
 
-    with record_lock:
-        if not recording:
-            return jsonify({"error": "No recording in progress"}), 400
+@app.route('/api/v1/recording/start', methods=['POST'])
+def api_start_recording():
+    if start_recording():
+        return jsonify({"status": "success", "message": "Recording started"})
+    return jsonify({"status": "error", "message": "Failed to start recording"}), 500
 
-        recording = False
-        start_time = None
-        if process:
-            try:
-                # Send EOS (End Of Stream) signal to gstreamer pipeline
-                process.send_signal(signal.SIGINT)
-                # Wait for the process to finish gracefully
-                stdout, stderr = process.communicate(timeout=10)
-                logger.info(f"Recording process stdout: {stdout.decode('utf-8')}")
-                if stderr:
-                    error_msg = stderr.decode("utf-8")
-                    logger.error(f"Recording process error: {error_msg}")
-                    return jsonify({"error": error_msg}), 500
-            except Exception as e:
-                logger.error("Error stopping recording", exc_info=True)
-                if process:  # Double-check process still exists
-                    try:
-                        process.kill()  # Force kill if necessary
-                        process.wait(timeout=2)
-                    except:
-                        pass
-                return jsonify({"error": f"Error stopping recording: {str(e)}"}), 500
-            finally:
-                process = None
-
-        return 'Stopped'
+@app.route('/api/v1/recording/stop', methods=['POST'])
+def api_stop_recording():
+    if stop_recording():
+        return jsonify({"status": "success", "message": "Recording stopped"})
+    return jsonify({"status": "error", "message": "Failed to stop recording"}), 500
 
 @app.route('/list')
 def list_videos():
@@ -289,8 +256,7 @@ def api_json():
 @app.route('/status')
 def get_status():
     return jsonify({
-        "recording": recording,
-        "start_time": start_time
+        "recording": is_recording
     })
 
 # Global error handler
@@ -304,9 +270,8 @@ def handle_exception(e):
 
 if __name__ == '__main__':
     # Ensure we start with recording off
-    recording = False
-    process = None
-    start_time = None
+    is_recording = False
+    recording_process = None
     
     # Run without debug mode
     app.run(host='0.0.0.0', port=5423, debug=False)
