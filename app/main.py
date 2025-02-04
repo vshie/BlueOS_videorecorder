@@ -99,33 +99,40 @@ def stop():
             return jsonify({"success": True})
         
         if process:
-            # Send SIGINT (Ctrl+C) for graceful shutdown
-            process.send_signal(signal.SIGINT)
+            logger.info("Stopping recording process...")
+            # First try SIGTERM
+            process.terminate()
             try:
-                # Give it some time to finish writing
-                process.wait(timeout=5)
+                # Wait up to 3 seconds for graceful shutdown
+                process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                # If it takes too long, force kill
+                logger.warning("Process did not terminate gracefully, forcing kill...")
+                # If SIGTERM didn't work, force kill
                 process.kill()
                 process.wait()
+            
+            # Get any output from the process
+            stdout, stderr = process.communicate()
+            if stderr:
+                logger.warning(f"Process stderr: {stderr.decode()}")
         
         recording = False
         start_time = None
         process = None
         
-        # Small delay to ensure file is properly closed
-        time.sleep(1)
-        
+        logger.info("Recording stopped successfully")
         return jsonify({"success": True})
     except Exception as e:
         logger.error(f"Error in stop endpoint: {str(e)}")
-        recording = False
-        start_time = None
+        # Ensure process is killed in case of error
         if process:
             try:
                 process.kill()
+                process.wait()
             except:
                 pass
+        recording = False
+        start_time = None
         process = None
         return jsonify({"success": False, "message": str(e)}), 500
 
