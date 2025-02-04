@@ -90,18 +90,17 @@ def index():
 @app.route('/status', methods=['GET'])
 def get_status():
     try:
-        if process and process.poll() is not None:
-            global recording, start_time
+        if process and process.poll() is not None:  # Process has terminated
             recording = False
+            process = None
             start_time = None
-            
-        return jsonify({
-            "recording": recording,
-            "start_time": start_time.isoformat() if start_time else None
-        })
     except Exception as e:
-        logger.error(f"Error in status endpoint: {str(e)}")
-        return jsonify({"success": False, "message": str(e)}), 500
+        logger.error(f"Error checking process status: {str(e)}")
+        
+    return jsonify({
+        "recording": recording,
+        "start_time": start_time.isoformat() if start_time else None
+    })
 
 @app.route('/start', methods=['GET'])
 def start():
