@@ -133,17 +133,30 @@ def start():
         filename = f"video_{timestamp}_%03d.mp4"
         filepath = os.path.join("/app/videorecordings", filename)
         
-        # Fixed GStreamer pipeline with proper element separation
+        # Construct the command as a proper list for subprocess
         command = [
-            "gst-launch-1.0", "-e",
-            "v4l2src device=/dev/video2 ! "
-            "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
-            "h264parse ! "
-            "splitmuxsink location=" + filepath + " max-size-time=" + str(split_duration * 1000000000)
+            "gst-launch-1.0",
+            "-e",
+            f"v4l2src device=/dev/video2 ! video/x-h264,width=1920,height=1080,framerate=30/1 ! h264parse ! splitmuxsink location={filepath} max-size-time={split_duration * 1000000000}"
         ]
         
         logger.info(f"Starting recording with command: {' '.join(command)}")
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Use shell=True to properly handle the GStreamer pipeline string
+        process = subprocess.Popen(
+            ' '.join(command),
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Check if the process started successfully
+        if process.poll() is not None:
+            # Process failed to start or terminated immediately
+            stdout, stderr = process.communicate()
+            logger.error(f"Process failed to start. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
+            raise Exception(f"Failed to start recording: {stderr.decode()}")
+            
         recording = True
         start_time = datetime.now()
         
@@ -152,6 +165,11 @@ def start():
         logger.error(f"Error in start endpoint: {str(e)}")
         recording = False
         start_time = None
+        if process:
+            try:
+                process.kill()
+            except:
+                pass
         process = None
         return jsonify({"success": False, "message": str(e)}), 500
 
