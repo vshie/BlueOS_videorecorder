@@ -17,8 +17,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global variables
-recording = False
 process = None
+recording = False
 start_time = None
 
 def start_recording():
@@ -87,44 +87,90 @@ def stop_recording():
 def index():
     return send_from_directory(STATIC_DIR, 'index.html')
 
+@app.route('/register_service')
+def register_service():
+    return '''
+    {
+        "name": "Video Recorder",
+        "description": "Record video from connected cameras. Supports automatic file splitting and download of recorded videos.",
+        "icon": "mdi-video",
+        "company": "Blue Robotics",
+        "version": "0.5",
+        "webpage": "https://github.com/bluerobotics/blueos-video-recorder",
+        "api": "https://github.com/bluerobotics/BlueOS-docker"
+    }
+    '''
+
 @app.route('/status', methods=['GET'])
 def get_status():
     try:
-        if process and process.poll() is not None:  # Process has terminated
+        if process and process.poll() is not None:
+            global recording, start_time
             recording = False
-            process = None
             start_time = None
+            
+        return jsonify({
+            "recording": recording,
+            "start_time": start_time.isoformat() if start_time else None
+        })
     except Exception as e:
-        logger.error(f"Error checking process status: {str(e)}")
-        
-    return jsonify({
-        "recording": recording,
-        "start_time": start_time.isoformat() if start_time else None
-    })
+        logger.error(f"Error in status endpoint: {str(e)}")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/start', methods=['GET'])
 def start():
+    global process, recording, start_time
     try:
+        if recording:
+            return jsonify({"success": False, "message": "Already recording"}), 400
+            
         split_duration = request.args.get('split_duration', default=30, type=int)
-        success = start_recording()
-        if success:
-            return jsonify({"success": True})
-        else:
-            return jsonify({"success": False, "message": "Failed to start recording"}), 500
+        
+        # Ensure the video directory exists
+        os.makedirs("/app/videorecordings", exist_ok=True)
+            
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"video_{timestamp}_%03d.mp4"
+        filepath = os.path.join("/app/videorecordings", filename)
+        
+        command = [
+            "gst-launch-1.0", "-e",
+            "v4l2src device=/dev/video2 ! video/x-raw,width=1920,height=1080,framerate=30/1 ! videoconvert ! x264enc ! splitmuxsink location=" + filepath + " max-size-time=" + str(split_duration * 1000000000)
+        ]
+        
+        process = subprocess.Popen(command)
+        recording = True
+        start_time = datetime.now()
+        
+        return jsonify({"success": True})
     except Exception as e:
         logger.error(f"Error in start endpoint: {str(e)}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/stop', methods=['GET'])
 def stop():
+    global process, recording, start_time
     try:
-        success = stop_recording()
-        if success:
+        if not recording:
             return jsonify({"success": True})
-        else:
-            return jsonify({"success": False, "message": "Failed to stop recording"}), 500
+        
+        if process:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        
+        recording = False
+        start_time = None
+        process = None
+        
+        return jsonify({"success": True})
     except Exception as e:
         logger.error(f"Error in stop endpoint: {str(e)}")
+        recording = False
+        start_time = None
+        process = None
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/list', methods=['GET'])
