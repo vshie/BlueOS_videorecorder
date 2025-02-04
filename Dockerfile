@@ -6,11 +6,6 @@ RUN apt-get update && apt-get install -y \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly \
-    python3-gst-1.0 \
-    python3-gi \
-    python3-gi-cairo \
-    gir1.2-gstreamer-1.0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
@@ -32,13 +27,9 @@ ENV FLASK_APP=main.py
 # Expose port
 EXPOSE 5423
 
-# Run app
-CMD ["python", "-u", "/app/main.py"]
-
 LABEL version="0.9"
 
 ARG IMAGE_NAME
-
 LABEL permissions='\
 {\
   "ExposedPorts": {\
@@ -90,7 +81,7 @@ LABEL links='\
     }'
 LABEL requirements="core >= 1.1"
 
-# Mark /dev/video2 as a volume so that it can be bound from the host at runtime.
+# Mark /dev/video2 as a volume
 VOLUME ["/dev/video2"]
 
 ENTRYPOINT ["python", "-u", "/app/main.py"]
