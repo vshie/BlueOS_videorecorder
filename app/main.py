@@ -100,21 +100,19 @@ def stop():
         
         if process:
             logger.info("Stopping recording process...")
-            # First try SIGTERM
-            process.terminate()
-            try:
-                # Wait up to 3 seconds for graceful shutdown
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                logger.warning("Process did not terminate gracefully, forcing kill...")
-                # If SIGTERM didn't work, force kill
-                process.kill()
-                process.wait()
             
-            # Get any output from the process
-            stdout, stderr = process.communicate()
-            if stderr:
-                logger.warning(f"Process stderr: {stderr.decode()}")
+            # Kill all gst-launch-1.0 processes
+            try:
+                subprocess.run(['pkill', '-9', 'gst-launch-1.0'], check=False)
+            except Exception as e:
+                logger.warning(f"Error killing gst-launch: {str(e)}")
+            
+            # Also terminate our subprocess
+            try:
+                process.kill()
+                process.wait(timeout=1)
+            except:
+                pass
         
         recording = False
         start_time = None
@@ -124,13 +122,11 @@ def stop():
         return jsonify({"success": True})
     except Exception as e:
         logger.error(f"Error in stop endpoint: {str(e)}")
-        # Ensure process is killed in case of error
-        if process:
-            try:
-                process.kill()
-                process.wait()
-            except:
-                pass
+        # One final attempt to kill everything
+        try:
+            subprocess.run(['pkill', '-9', 'gst-launch-1.0'], check=False)
+        except:
+            pass
         recording = False
         start_time = None
         process = None
