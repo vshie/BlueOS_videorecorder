@@ -1,5 +1,4 @@
 // Global variables
-let recordingTimer = null;
 let isRecording = false;
 
 async function updateStatus() {
@@ -10,54 +9,25 @@ async function updateStatus() {
         }
         const data = await response.json();
         const statusElement = document.getElementById("recordingStatus");
-        const durationElement = document.getElementById("recordingDuration");
+        const startButton = document.getElementById("startButton");
+        const stopButton = document.getElementById("stopButton");
         
         isRecording = data.recording;
         
         if (isRecording) {
             statusElement.textContent = "Recording";
             statusElement.style.color = "red";
-            if (data.start_time) {
-                if (!recordingTimer) {
-                    updateRecordingDuration(new Date(data.start_time));
-                }
-            }
+            startButton.disabled = true;
+            stopButton.disabled = false;
         } else {
             statusElement.textContent = "Stopped";
             statusElement.style.color = "black";
-            if (recordingTimer) {
-                clearInterval(recordingTimer);
-                recordingTimer = null;
-                durationElement.textContent = "00:00:00";
-            }
+            startButton.disabled = false;
+            stopButton.disabled = true;
         }
     } catch (error) {
         console.error("Error updating status:", error);
     }
-}
-
-function updateRecordingDuration(startTime) {
-    if (recordingTimer) {
-        clearInterval(recordingTimer);
-    }
-    
-    function updateDuration() {
-        if (!isRecording) {
-            clearInterval(recordingTimer);
-            recordingTimer = null;
-            return;
-        }
-        const now = new Date();
-        const duration = Math.floor((now - startTime) / 1000);
-        const hours = Math.floor(duration / 3600);
-        const minutes = Math.floor((duration % 3600) / 60);
-        const seconds = duration % 60;
-        document.getElementById("recordingDuration").textContent = 
-            `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-    }
-    
-    updateDuration();
-    recordingTimer = setInterval(updateDuration, 1000);
 }
 
 async function startRecording() {
@@ -74,7 +44,7 @@ async function startRecording() {
         const data = await response.json();
         if (data.success) {
             document.getElementById("errorMessage").style.display = "none";
-            await updateStatus(); // Immediately update status
+            await updateStatus();
         } else {
             throw new Error(data.message || "Failed to start recording");
         }
@@ -99,8 +69,8 @@ async function stopRecording() {
         const data = await response.json();
         if (data.success) {
             document.getElementById("errorMessage").style.display = "none";
-            await updateStatus(); // Immediately update status
-            await listVideos(); // Refresh video list
+            await updateStatus();
+            await listVideos();
         } else {
             throw new Error(data.message || "Failed to stop recording");
         }
@@ -113,6 +83,7 @@ async function stopRecording() {
 }
 
 async function listVideos() {
+    const videoList = document.getElementById("videoList");
     try {
         const response = await fetch('/list');
         if (!response.ok) {
@@ -120,7 +91,6 @@ async function listVideos() {
         }
         
         const data = await response.json();
-        const videoList = document.getElementById("videoList");
         videoList.innerHTML = '';
         
         if (data.videos && data.videos.length > 0) {
@@ -134,20 +104,28 @@ async function listVideos() {
             });
             document.getElementById("errorMessage").style.display = "none";
         } else {
-            videoList.innerHTML = '<li>No videos found</li>';
+            videoList.innerHTML = '<li><em>No videos found</em></li>';
         }
     } catch (error) {
         console.error("Error listing videos:", error);
-        document.getElementById("videoList").innerHTML = '<li>Error loading videos</li>';
+        videoList.innerHTML = '<li><em>Loading videos...</em></li>';
+        // Retry once after a short delay
+        setTimeout(listVideos, 1000);
     }
 }
 
 // Initial load
 document.addEventListener('DOMContentLoaded', async () => {
-    await updateStatus();
-    await listVideos();
+    // Show loading state immediately
+    document.getElementById("videoList").innerHTML = '<li><em>Loading videos...</em></li>';
     
-    // Set up periodic updates
-    setInterval(updateStatus, 1000);
-    setInterval(listVideos, 5000);
+    // Load initial state
+    await Promise.all([
+        updateStatus(),
+        listVideos()
+    ]);
+    
+    // Set up periodic updates with different intervals
+    setInterval(updateStatus, 1000);  // Check status every second
+    setInterval(listVideos, 5000);    // Update video list every 5 seconds
 }); 
