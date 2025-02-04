@@ -133,18 +133,26 @@ def start():
         filename = f"video_{timestamp}_%03d.mp4"
         filepath = os.path.join("/app/videorecordings", filename)
         
+        # Fixed GStreamer pipeline with proper element separation
         command = [
             "gst-launch-1.0", "-e",
-            "v4l2src device=/dev/video2 ! video/x-raw,width=1920,height=1080,framerate=30/1 ! videoconvert ! x264enc ! splitmuxsink location=" + filepath + " max-size-time=" + str(split_duration * 1000000000)
+            "v4l2src device=/dev/video2 ! "
+            "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
+            "h264parse ! "
+            "splitmuxsink location=" + filepath + " max-size-time=" + str(split_duration * 1000000000)
         ]
         
-        process = subprocess.Popen(command)
+        logger.info(f"Starting recording with command: {' '.join(command)}")
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         recording = True
         start_time = datetime.now()
         
         return jsonify({"success": True})
     except Exception as e:
         logger.error(f"Error in start endpoint: {str(e)}")
+        recording = False
+        start_time = None
+        process = None
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/stop', methods=['GET'])
