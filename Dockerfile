@@ -11,6 +11,10 @@ RUN apt-get update && apt-get install -y \
     python3-gi \
     python3-gi-cairo \
     gir1.2-gstreamer-1.0 \
+    libgirepository1.0-dev \
+    gcc \
+    pkg-config \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
@@ -20,7 +24,7 @@ WORKDIR /app
 COPY app/ .
 
 # Install Python dependencies
-RUN pip install flask
+RUN pip install flask PyGObject
 
 # Create directory for video recordings
 RUN mkdir -p /app/videorecordings
