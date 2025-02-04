@@ -5,6 +5,11 @@ import subprocess
 import glob
 import logging
 from datetime import datetime, timezone
+import signal
+import time
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GLib
 
 # Get the directory containing the current file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,13 +21,26 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Initialize GStreamer
+Gst.init(None)
+
 # Global variables
-process = None
+pipeline = None
 recording = False
 start_time = None
+mainloop = None
+
+def on_eos(bus, message):
+    global recording, pipeline, start_time
+    logger.info("Received EOS")
+    if pipeline:
+        pipeline.set_state(Gst.State.NULL)
+    recording = False
+    start_time = None
+    return True
 
 def start_recording():
-    global recording, process, start_time
+    global recording, pipeline, start_time
     try:
         if recording:
             return False
@@ -44,7 +62,20 @@ def start_recording():
             "max-size-time=30000000000"
         ]
         
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pipeline_str = ' '.join(command)
+        
+        logger.info(f"Creating pipeline: {pipeline_str}")
+        
+        pipeline = Gst.parse_launch(pipeline_str)
+        bus = pipeline.get_bus()
+        bus.add_signal_watch()
+        bus.connect('message::eos', on_eos)
+        
+        # Start the pipeline
+        ret = pipeline.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            raise Exception("Failed to start pipeline")
+            
         recording = True
         start_time = datetime.now(timezone.utc)
         return True
@@ -52,34 +83,35 @@ def start_recording():
     except Exception as e:
         logger.error(f"Failed to start recording: {str(e)}")
         recording = False
-        process = None
+        pipeline = None
         start_time = None
         return False
 
 def stop_recording():
-    global recording, process, start_time
+    global recording, pipeline, start_time
     try:
         if not recording:
             return True  # Return success if already stopped
             
-        if process:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()  # Force kill if terminate doesn't work
-                process.wait()
+        if pipeline:
+            logger.info("Sending EOS event")
+            pipeline.send_event(Gst.Event.new_eos())
+            # Wait briefly for EOS to be processed
+            time.sleep(1)
+            # Force cleanup if EOS doesn't complete
+            pipeline.set_state(Gst.State.NULL)
+            pipeline = None
             
         recording = False
-        process = None
         start_time = None
+        pipeline = None
         return True
         
     except Exception as e:
         logger.error(f"Failed to stop recording: {str(e)}")
         # Reset state even if there's an error
         recording = False
-        process = None
+        pipeline = None
         start_time = None
         return False
 
@@ -103,11 +135,14 @@ def register_service():
 
 @app.route('/status', methods=['GET'])
 def get_status():
+    global pipeline, recording, start_time
     try:
-        if process and process.poll() is not None:
-            global recording, start_time
-            recording = False
-            start_time = None
+        if pipeline:
+            state = pipeline.get_state(0)[1]
+            if state != Gst.State.PLAYING:
+                recording = False
+                start_time = None
+                pipeline = None
             
         return jsonify({
             "recording": recording,
@@ -119,7 +154,7 @@ def get_status():
 
 @app.route('/start', methods=['GET'])
 def start():
-    global process, recording, start_time
+    global pipeline, recording, start_time, mainloop
     try:
         if recording:
             return jsonify({"success": False, "message": "Already recording"}), 400
@@ -133,29 +168,23 @@ def start():
         filename = f"video_{timestamp}_%03d.mp4"
         filepath = os.path.join("/app/videorecordings", filename)
         
-        # Construct the command as a proper list for subprocess
-        command = [
-            "gst-launch-1.0",
-            "-e",
-            f"v4l2src device=/dev/video2 ! video/x-h264,width=1920,height=1080,framerate=30/1 ! h264parse ! splitmuxsink location={filepath} max-size-time={split_duration * 1000000000}"
-        ]
+        # Create GStreamer pipeline
+        pipeline_str = f'''v4l2src device=/dev/video2 ! 
+            video/x-h264,width=1920,height=1080,framerate=30/1 ! 
+            h264parse ! 
+            splitmuxsink location={filepath} max-size-time={split_duration * 1000000000}'''
         
-        logger.info(f"Starting recording with command: {' '.join(command)}")
+        logger.info(f"Creating pipeline: {pipeline_str}")
         
-        # Use shell=True to properly handle the GStreamer pipeline string
-        process = subprocess.Popen(
-            ' '.join(command),
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
+        pipeline = Gst.parse_launch(pipeline_str)
+        bus = pipeline.get_bus()
+        bus.add_signal_watch()
+        bus.connect('message::eos', on_eos)
         
-        # Check if the process started successfully
-        if process.poll() is not None:
-            # Process failed to start or terminated immediately
-            stdout, stderr = process.communicate()
-            logger.error(f"Process failed to start. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
-            raise Exception(f"Failed to start recording: {stderr.decode()}")
+        # Start the pipeline
+        ret = pipeline.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            raise Exception("Failed to start pipeline")
             
         recording = True
         start_time = datetime.now()
@@ -165,38 +194,38 @@ def start():
         logger.error(f"Error in start endpoint: {str(e)}")
         recording = False
         start_time = None
-        if process:
-            try:
-                process.kill()
-            except:
-                pass
-        process = None
+        if pipeline:
+            pipeline.set_state(Gst.State.NULL)
+            pipeline = None
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/stop', methods=['GET'])
 def stop():
-    global process, recording, start_time
+    global pipeline, recording, start_time
     try:
         if not recording:
             return jsonify({"success": True})
         
-        if process:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
+        if pipeline:
+            logger.info("Sending EOS event")
+            pipeline.send_event(Gst.Event.new_eos())
+            # Wait briefly for EOS to be processed
+            time.sleep(1)
+            # Force cleanup if EOS doesn't complete
+            pipeline.set_state(Gst.State.NULL)
+            pipeline = None
         
         recording = False
         start_time = None
-        process = None
         
         return jsonify({"success": True})
     except Exception as e:
         logger.error(f"Error in stop endpoint: {str(e)}")
         recording = False
         start_time = None
-        process = None
+        if pipeline:
+            pipeline.set_state(Gst.State.NULL)
+            pipeline = None
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/list', methods=['GET'])

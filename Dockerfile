@@ -1,25 +1,23 @@
 FROM python:3.11-slim-bullseye
 
-# Install dependencies in a single RUN command with proper error handling
-RUN set -ex && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-        gstreamer1.0-tools \
-        gstreamer1.0-plugins-base \
-        gstreamer1.0-plugins-good \
-        gstreamer1.0-plugins-bad \
-        python3-minimal && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
+    python3-gst-1.0 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
 WORKDIR /app
 
-# Install Python dependencies directly
-RUN pip install --no-cache-dir flask requests
-
 # Copy app files
 COPY app/ .
+
+# Install Python dependencies
+RUN pip install flask
 
 # Create directory for video recordings
 RUN mkdir -p /app/videorecordings
