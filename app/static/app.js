@@ -11,6 +11,7 @@ async function updateStatus() {
         const statusElement = document.getElementById("recordingStatus");
         const startButton = document.getElementById("startButton");
         const stopButton = document.getElementById("stopButton");
+        const errorMsg = document.getElementById("errorMessage");
         
         isRecording = data.recording;
         
@@ -19,6 +20,7 @@ async function updateStatus() {
             statusElement.style.color = "red";
             startButton.disabled = true;
             stopButton.disabled = false;
+            errorMsg.style.display = "none";
         } else {
             statusElement.textContent = "Stopped";
             statusElement.style.color = "black";
@@ -27,63 +29,81 @@ async function updateStatus() {
         }
     } catch (error) {
         console.error("Error updating status:", error);
+        document.getElementById("errorMessage").textContent = "Error updating status: " + error.message;
+        document.getElementById("errorMessage").style.display = "block";
     }
 }
 
 async function startRecording() {
+    const errorMsg = document.getElementById("errorMessage");
+    const startButton = document.getElementById("startButton");
+    const stopButton = document.getElementById("stopButton");
+    
     try {
+        startButton.disabled = true; // Disable immediately to prevent double-clicks
         const splitDuration = document.getElementById("splitDuration").value;
         const response = await fetch(`/start?split_duration=${splitDuration}`, {
             method: 'GET'
         });
         
+        const data = await response.json();
+        
         if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+            throw new Error(data.message || `HTTP error! status: ${response.status}`);
         }
         
-        const data = await response.json();
         if (data.success) {
-            document.getElementById("errorMessage").style.display = "none";
-            await updateStatus();
+            errorMsg.style.display = "none";
+            stopButton.disabled = false;
         } else {
             throw new Error(data.message || "Failed to start recording");
         }
     } catch (error) {
         console.error("Error starting recording:", error);
-        const errorMsg = document.getElementById("errorMessage");
-        errorMsg.textContent = error.message || "Error starting recording";
+        errorMsg.textContent = "Error starting recording: " + error.message;
         errorMsg.style.display = "block";
+        startButton.disabled = false;
+        stopButton.disabled = true;
     }
+    
+    await updateStatus();
 }
 
 async function stopRecording() {
+    const errorMsg = document.getElementById("errorMessage");
+    const stopButton = document.getElementById("stopButton");
+    
     try {
+        stopButton.disabled = true; // Disable immediately to prevent double-clicks
         const response = await fetch('/stop', {
             method: 'GET'
         });
         
+        const data = await response.json();
+        
         if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+            throw new Error(data.message || `HTTP error! status: ${response.status}`);
         }
         
-        const data = await response.json();
         if (data.success) {
-            document.getElementById("errorMessage").style.display = "none";
-            await updateStatus();
+            errorMsg.style.display = "none";
             await listVideos();
         } else {
             throw new Error(data.message || "Failed to stop recording");
         }
     } catch (error) {
         console.error("Error stopping recording:", error);
-        const errorMsg = document.getElementById("errorMessage");
-        errorMsg.textContent = error.message || "Error stopping recording";
+        errorMsg.textContent = "Error stopping recording: " + error.message;
         errorMsg.style.display = "block";
     }
+    
+    await updateStatus();
 }
 
 async function listVideos() {
     const videoList = document.getElementById("videoList");
+    const errorMsg = document.getElementById("errorMessage");
+    
     try {
         const response = await fetch('/list');
         if (!response.ok) {
@@ -102,15 +122,15 @@ async function listVideos() {
                 li.appendChild(a);
                 videoList.appendChild(li);
             });
-            document.getElementById("errorMessage").style.display = "none";
+            errorMsg.style.display = "none";
         } else {
             videoList.innerHTML = '<li><em>No videos found</em></li>';
         }
     } catch (error) {
         console.error("Error listing videos:", error);
-        videoList.innerHTML = '<li><em>Loading videos...</em></li>';
-        // Retry once after a short delay
-        setTimeout(listVideos, 1000);
+        videoList.innerHTML = '<li><em>Error loading videos</em></li>';
+        errorMsg.textContent = "Error loading videos: " + error.message;
+        errorMsg.style.display = "block";
     }
 }
 
