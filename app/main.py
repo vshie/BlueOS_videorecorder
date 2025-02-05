@@ -42,7 +42,8 @@ def start():
         if recording:
             return jsonify({"success": False, "message": "Already recording"}), 400
             
-        split_duration = request.args.get('split_duration', default=30, type=int)
+        # Get split duration in minutes (default 5 minutes), convert to seconds
+        split_duration = request.args.get('split_duration', default=5, type=int) * 60
         
         # Ensure the video directory exists
         os.makedirs("/app/videorecordings", exist_ok=True)
