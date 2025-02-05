@@ -103,7 +103,7 @@ def stop():
             
             # Kill all gst-launch-1.0 processes
             try:
-                subprocess.run(['pkill', '-9', 'gst-launch-1.0'], check=False)
+                subprocess.run(['killall', '-9', 'gst-launch-1.0'], check=False)
             except Exception as e:
                 logger.warning(f"Error killing gst-launch: {str(e)}")
             
@@ -124,7 +124,7 @@ def stop():
         logger.error(f"Error in stop endpoint: {str(e)}")
         # One final attempt to kill everything
         try:
-            subprocess.run(['pkill', '-9', 'gst-launch-1.0'], check=False)
+            subprocess.run(['killall', '-9', 'gst-launch-1.0'], check=False)
         except:
             pass
         recording = False
