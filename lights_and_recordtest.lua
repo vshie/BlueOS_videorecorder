@@ -1,8 +1,14 @@
 -- Configuration
 --LIGHTS1_SERVO = 13  -- Servo function for lights
-PWM_Lightoff = 1400  -- PWM value for lights off
+PWM_Lightoff = 1000  -- PWM value for lights off
 PWM_Lightmed = 1600  -- PWM value for medium brightness
-
+WINCH_SERVO = 13
+-- from https://ardupilot.org/rover/docs/parameters.html#servo14-function-servo-output-function
+WINCH_FUNCTION = 88
+winch_channel = SRV_Channels:find_channel(WINCH_FUNCTION)
+if winch_channel == nil then
+    gcs:send_text(6, "Set a SERVO_FUNCTION to WINCH and try restart vehicle")
+end
 -- States
 STANDBY = 0
 LIGHTS_ON = 1
@@ -15,10 +21,10 @@ HTTP_HOST = "localhost"
 HTTP_PORT = 5423
 
 -- Timing constants (in milliseconds)
-LIGHTS_ON_DELAY = 5000
+LIGHTS_ON_DELAY = 10000
 START_RECORDING_DELAY = 10000
 LIGHTS_OFF_DELAY = 30000
-STOP_RECORDING_DELAY = 50000
+STOP_RECORDING_DELAY = 60000
 
 -- Global variables
 local state = STANDBY
@@ -50,8 +56,9 @@ function start_video_recording()
         return false
     end
 
-    local request = "GET /start?split_duration=20 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=20", HTTP_HOST, HTTP_PORT))
+    -- Updated to use split_duration=5 for 5 minutes
+    local request = "GET /start?split_duration=5 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=5", HTTP_HOST, HTTP_PORT))
     sock:send(request, string.len(request))
     sock:close()
     gcs:send_text(6, "Video recording started")

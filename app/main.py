@@ -92,7 +92,7 @@ def start():
         process = None
         return jsonify({"success": False, "message": str(e)}), 500
 
-@app.route('/stop', methods=['GET'])
+""" @app.route('/stop', methods=['GET'])
 def stop():
     global process, recording, start_time
     try:
@@ -104,7 +104,8 @@ def stop():
             
             # Kill all gst-launch-1.0 processes
             try:
-                subprocess.run(['killall', '-9', 'gst-launch-1.0'], check=False)
+                #subprocess.run(['killall', '-9', 'gst-launch-1.0'], check=False)
+                subprocess.run(['killall', '-2', 'gst-launch-1.0'], check=False)       
             except Exception as e:
                 logger.warning(f"Error killing gst-launch: {str(e)}")
             
@@ -131,7 +132,46 @@ def stop():
         recording = False
         start_time = None
         process = None
+        return jsonify({"success": False, "message": str(e)}), 500 """
+
+@app.route('/stop', methods=['GET'])
+def stop():
+    global process, recording, start_time
+    try:
+        if not recording:
+            return jsonify({"success": True})
+        
+        if process:
+            logger.info("Stopping recording process gracefully...")
+            
+            # Send SIGINT to the process so that gst-launch-1.0 can flush EOS.
+            try:
+                process.send_signal(signal.SIGINT)
+                # Optionally, wait a bit longer for a graceful shutdown.
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("Process did not exit gracefully, force killing")
+                process.kill()
+                process.wait(timeout=1)
+        
+        recording = False
+        start_time = None
+        process = None
+        
+        logger.info("Recording stopped successfully")
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error in stop endpoint: {str(e)}")
+        # Fallback in case something goes wrong.
+        try:
+            subprocess.run(['killall', '-SIGINT', 'gst-launch-1.0'], check=False)
+        except Exception as ex:
+            logger.warning(f"Fallback error sending SIGINT: {str(ex)}")
+        recording = False
+        start_time = None
+        process = None
         return jsonify({"success": False, "message": str(e)}), 500
+
 
 @app.route('/status', methods=['GET'])
 def get_status():
