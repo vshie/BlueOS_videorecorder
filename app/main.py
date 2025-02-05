@@ -34,7 +34,6 @@ def register_service():
         "api": "https://github.com/bluerobotics/BlueOS-docker"
     }
     '''
-
 @app.route('/start', methods=['GET'])
 def start():
     global process, recording, start_time
@@ -56,12 +55,11 @@ def start():
         command = [
             "gst-launch-1.0",
             "-e",
-            f"v4l2src device=/dev/video2 ! video/x-h264,width=1920,height=1080,framerate=30/1 ! h264parse ! splitmuxsink location={filepath} max-size-time={split_duration * 1000000000}"
+            f"v4l2src device=/dev/video2 ! video/x-h264,width=1920,height=1080,framerate=30/1 ! h264parse ! splitmuxsink location={filepath} max-size-time={split_duration * 1000000000} post-messages=true"
         ]
         
         logger.info(f"Starting recording with command: {' '.join(command)}")
         
-        # Use shell=True to properly handle the GStreamer pipeline string
         process = subprocess.Popen(
             ' '.join(command),
             shell=True,
@@ -69,9 +67,7 @@ def start():
             stderr=subprocess.PIPE
         )
         
-        # Check if the process started successfully
         if process.poll() is not None:
-            # Process failed to start or terminated immediately
             stdout, stderr = process.communicate()
             logger.error(f"Process failed to start. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
             raise Exception(f"Failed to start recording: {stderr.decode()}")
@@ -89,6 +85,40 @@ def start():
                 process.kill()
             except:
                 pass
+        process = None
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route('/stop', methods=['GET'])
+def stop():
+    global process, recording, start_time
+    try:
+        if not recording:
+            return jsonify({"success": True})
+        
+        if process:
+            logger.info("Stopping recording process gracefully...")
+            
+            # Send SIGINT (Ctrl+C) to GStreamer for EOS
+            process.send_signal(signal.SIGINT)
+            
+            # Wait for the process to handle EOS
+            try:
+                process.wait(timeout=7)
+            except subprocess.TimeoutExpired:
+                logger.warning("Process did not exit gracefully, force killing")
+                process.kill()
+                process.wait()
+        
+        recording = False
+        start_time = None
+        process = None
+        
+        logger.info("Recording stopped successfully")
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error in stop endpoint: {str(e)}")
+        recording = False
+        start_time = None
         process = None
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -133,53 +163,6 @@ def stop():
         start_time = None
         process = None
         return jsonify({"success": False, "message": str(e)}), 500 """
-
-@app.route('/stop', methods=['GET'])
-def stop():
-    global process, recording, start_time
-    try:
-        if not recording:
-            return jsonify({"success": True})
-        
-        if process:
-            logger.info("Stopping recording process gracefully...")
-            
-            # First try sending SIGINT (Ctrl+C) to GStreamer for EOS
-            try:
-                subprocess.run(['killall', '-INT', 'gst-launch-1.0'], check=False)
-                # Give GStreamer a moment to handle EOS
-                time.sleep(5)
-            except Exception as e:
-                logger.warning(f"Error sending SIGINT to gst-launch: {str(e)}")
-            
-            # Check if process exited gracefully
-            if process.poll() is None:
-                logger.warning("Process did not exit gracefully, force killing")
-                # Force kill if still running
-                try:
-                    subprocess.run(['killall', '-9', 'gst-launch-1.0'], check=False)
-                except Exception as e:
-                    logger.warning(f"Error force killing gst-launch: {str(e)}")
-            
-            # Clean up our subprocess
-            try:
-                process.kill()
-                process.wait(timeout=1)
-            except:
-                pass
-        
-        recording = False
-        start_time = None
-        process = None
-        
-        logger.info("Recording stopped successfully")
-        return jsonify({"success": True})
-    except Exception as e:
-        logger.error(f"Error in stop endpoint: {str(e)}")
-        recording = False
-        start_time = None
-        process = None
-        return jsonify({"success": False, "message": str(e)}), 500
 
 
 @app.route('/status', methods=['GET'])
