@@ -54,7 +54,7 @@ def start():
         # Construct the command as a proper list for subprocess
         command = [
             "gst-launch-1.0",
-            "v4l2src device=/dev/video2 ! video/x-h264,width=1920,height=1080,framerate=30/1 ! h264parse ! splitmuxsink location={filepath} max-size-time={split_duration * 1000000000} async-finalize=true"
+            "v4l2src device=/dev/video2 ! video/x-h264,width=1920,height=1080,framerate=30/1 ! h264parse ! splitmuxsink location={filepath} max-size-time={split_duration * 1000000000} async-finalize=true",
             "-e"
         ]
         
