@@ -62,7 +62,7 @@ def start():
         
         process = subprocess.Popen(
             ' '.join(command),
-            shell=True,
+            #shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
@@ -103,7 +103,7 @@ def stop():
             
             # Wait for the process to handle EOS
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 logger.warning("Process did not exit gracefully, force killing")
                 process.kill()
