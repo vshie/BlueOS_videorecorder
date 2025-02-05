@@ -144,15 +144,29 @@ def stop():
         if process:
             logger.info("Stopping recording process gracefully...")
             
-            # Send SIGINT to the process so that gst-launch-1.0 can flush EOS.
+            # First try sending SIGINT (Ctrl+C) to GStreamer for EOS
             try:
-                process.send_signal(signal.SIGINT)
-                # Optionally, wait a bit longer for a graceful shutdown.
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+                subprocess.run(['killall', '-INT', 'gst-launch-1.0'], check=False)
+                # Give GStreamer a moment to handle EOS
+                time.sleep(5)
+            except Exception as e:
+                logger.warning(f"Error sending SIGINT to gst-launch: {str(e)}")
+            
+            # Check if process exited gracefully
+            if process.poll() is None:
                 logger.warning("Process did not exit gracefully, force killing")
+                # Force kill if still running
+                try:
+                    subprocess.run(['killall', '-9', 'gst-launch-1.0'], check=False)
+                except Exception as e:
+                    logger.warning(f"Error force killing gst-launch: {str(e)}")
+            
+            # Clean up our subprocess
+            try:
                 process.kill()
                 process.wait(timeout=1)
+            except:
+                pass
         
         recording = False
         start_time = None
@@ -162,11 +176,6 @@ def stop():
         return jsonify({"success": True})
     except Exception as e:
         logger.error(f"Error in stop endpoint: {str(e)}")
-        # Fallback in case something goes wrong.
-        try:
-            subprocess.run(['killall', '-SIGINT', 'gst-launch-1.0'], check=False)
-        except Exception as ex:
-            logger.warning(f"Fallback error sending SIGINT: {str(ex)}")
         recording = False
         start_time = None
         process = None

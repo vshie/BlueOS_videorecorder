@@ -56,9 +56,9 @@ function start_video_recording()
         return false
     end
 
-    -- Updated to use split_duration=5 for 5 minutes
-    local request = "GET /start?split_duration=5 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=5", HTTP_HOST, HTTP_PORT))
+    -- Explicitly set split_duration=1 in the request URL
+    local request = string.format("GET /start?split_duration=1 HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", HTTP_HOST)
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=1", HTTP_HOST, HTTP_PORT))
     sock:send(request, string.len(request))
     sock:close()
     gcs:send_text(6, "Video recording started")
