@@ -54,7 +54,7 @@ end
 -- Function to handle incoming MAVLink messages
 function handle_mavlink_message(message)
     local msg_id = message.msgid
-    if msg_id == VFR_HUD_ID then  -- Replace with the actual ID for VFR_HUD
+    if msg_id == VFR_HUD then  -- Replace with the actual ID for VFR_HUD
         local vfr_hud_data = decode_vfr_hud(message)
         global_altitude = vfr_hud_data.alt
         global_climb_rate = vfr_hud_data.climb_rate
