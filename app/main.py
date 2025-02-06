@@ -62,7 +62,7 @@ def start():
         
         process = subprocess.Popen(
             ' '.join(command),
-            shell=True,
+            ##shell=True, maybe causing problems with sigint
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
