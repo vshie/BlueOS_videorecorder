@@ -5,6 +5,7 @@ from datetime import datetime
 import logging
 import signal
 import time
+import shlex
 
 app = Flask(__name__)
 
@@ -51,21 +52,19 @@ def start():
         filename = f"video_{timestamp}_%03d.mp4"
         filepath = os.path.join("/app/videorecordings", filename)
         
-        # Construct the command as a proper list for subprocess
-        command = [
-            "gst-launch-1.0",
-            f"v4l2src device=/dev/video2 ! video/x-h264,width=1920,height=1080,framerate=30/1 ! h264parse ! splitmuxsink location={filepath} max-size-time={split_duration * 1000000000} post-messages=true",
-            "-e"
-        ]
+       pipeline = ("v4l2src device=/dev/video2 ! "
+            "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
+            "h264parse ! "
+            "splitmuxsink location=/app/videorecordings/video_20250206_205811_%03d.mp4 "
+            "max-size-time=1200000000000 post-messages=true")
+
+        command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
+
+        process = subprocess.Popen(command,
+                           stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE)
         
         logger.info(f"Starting recording with command: {' '.join(command)}")
-        
-        process = subprocess.Popen(
-            ' '.join(command),
-            ##shell=True, maybe causing problems with sigint
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
         
         if process.poll() is not None:
             stdout, stderr = process.communicate()
