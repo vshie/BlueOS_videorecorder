@@ -1,14 +1,8 @@
 -- Configuration
 --LIGHTS1_SERVO = 13  -- Servo function for lights
 PWM_Lightoff = 1000  -- PWM value for lights off
-PWM_Lightmed = 1600  -- PWM value for medium brightness
-WINCH_SERVO = 13
--- from https://ardupilot.org/rover/docs/parameters.html#servo14-function-servo-output-function
-WINCH_FUNCTION = 88
-winch_channel = SRV_Channels:find_channel(WINCH_FUNCTION)
-if winch_channel == nil then
-    gcs:send_text(6, "Set a SERVO_FUNCTION to WINCH and try restart vehicle")
-end
+PWM_Lightmed = 1350  -- PWM value for medium brightness
+
 -- States
 STANDBY = 0
 LIGHTS_ON = 1
@@ -21,10 +15,10 @@ HTTP_HOST = "localhost"
 HTTP_PORT = 5423
 
 -- Timing constants (in milliseconds)
-LIGHTS_ON_DELAY = 10000
-START_RECORDING_DELAY = 10000
-LIGHTS_OFF_DELAY = 30000
-STOP_RECORDING_DELAY = 60000
+LIGHTS_ON_DELAY = 5000
+START_RECORDING_DELAY = 6000
+LIGHTS_OFF_DELAY = 40000
+STOP_RECORDING_DELAY = 80000
 
 -- Global variables
 local state = STANDBY
@@ -56,8 +50,7 @@ function start_video_recording()
         return false
     end
 
-    -- Explicitly set split_duration=1 in the request URL
-    local request = string.format("GET /start?split_duration=1 HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", HTTP_HOST)
+    local request = "GET /start?split_duration=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=1", HTTP_HOST, HTTP_PORT))
     sock:send(request, string.len(request))
     sock:close()
@@ -93,9 +86,9 @@ function handle_sequence()
         -- Start the sequence by turning on lights after delay
         if millis() > (timer + LIGHTS_ON_DELAY) then
             set_lights(true)
-            state = LIGHTS_ON
             timer = millis()
             gcs:send_text(6, "State: LIGHTS ON")
+            state = LIGHTS_ON
         end
     elseif state == LIGHTS_ON then
         -- Start recording after lights have been on
@@ -104,10 +97,6 @@ function handle_sequence()
                 state = RECORDING
                 timer = millis()
                 gcs:send_text(6, "State: RECORDING")
-            else
-                gcs:send_text(6, "Failed to start recording - retrying in 5 seconds")
-                timer = millis() - (START_RECORDING_DELAY - 5000)  -- Retry in 5 seconds
-            end
         end
     elseif state == RECORDING then
         -- Turn off lights while still recording
@@ -124,10 +113,6 @@ function handle_sequence()
                 state = COMPLETE
                 gcs:send_text(6, "Test sequence complete!")
                 return
-            else
-                gcs:send_text(6, "Failed to stop recording - retrying in 5 seconds")
-                timer = millis() - (STOP_RECORDING_DELAY - 5000)  -- Retry in 5 seconds
-            end
         end
     end
 end
