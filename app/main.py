@@ -122,49 +122,6 @@ def stop():
         process = None
         return jsonify({"success": False, "message": str(e)}), 500
 
-""" @app.route('/stop', methods=['GET'])
-def stop():
-    global process, recording, start_time
-    try:
-        if not recording:
-            return jsonify({"success": True})
-        
-        if process:
-            logger.info("Stopping recording process...")
-            
-            # Kill all gst-launch-1.0 processes
-            try:
-                #subprocess.run(['killall', '-9', 'gst-launch-1.0'], check=False)
-                subprocess.run(['killall', '-2', 'gst-launch-1.0'], check=False)       
-            except Exception as e:
-                logger.warning(f"Error killing gst-launch: {str(e)}")
-            
-            # Also terminate our subprocess
-            try:
-                process.kill()
-                process.wait(timeout=1)
-            except:
-                pass
-        
-        recording = False
-        start_time = None
-        process = None
-        
-        logger.info("Recording stopped successfully")
-        return jsonify({"success": True})
-    except Exception as e:
-        logger.error(f"Error in stop endpoint: {str(e)}")
-        # One final attempt to kill everything
-        try:
-            subprocess.run(['killall', '-9', 'gst-launch-1.0'], check=False)
-        except:
-            pass
-        recording = False
-        start_time = None
-        process = None
-        return jsonify({"success": False, "message": str(e)}), 500 """
-
-
 @app.route('/status', methods=['GET'])
 def get_status():
     global process, recording, start_time
