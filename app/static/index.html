@@ -116,7 +116,6 @@
         <p>Status: <span id="recordingStatus">Stopped</span></p>
     </div>
     <div class="input-group">
-
         <label for="splitDuration">Split Duration (minutes):</label>
         <input type="number" id="splitDuration" value="1" min="1">
     </div>
@@ -127,6 +126,9 @@
     <div id="errorMessage" class="error"></div>
     <h2>Recorded Videos</h2>
     <ul id="videoList"></ul>
+
+    <!-- Iframe to embed the BlueOS file browser -->
+    <iframe src="http://localhost/tools/file-browser" style="width: 100%; height: 500px; border: none;"></iframe>
 </body>
 </html>
 
