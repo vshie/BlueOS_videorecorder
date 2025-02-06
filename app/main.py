@@ -52,7 +52,7 @@ def start():
         filename = f"video_{timestamp}_%03d.mp4"
         filepath = os.path.join("/app/videorecordings", filename)
         
-       pipeline = ("v4l2src device=/dev/video2 ! "
+        pipeline = ("v4l2src device=/dev/video2 ! "
             "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
             "h264parse ! "
             "splitmuxsink location=/app/videorecordings/video_20250206_205811_%03d.mp4 "
