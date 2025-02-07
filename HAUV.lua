@@ -19,12 +19,17 @@ assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 32), 'could not add 
 
 -- Add configurable parameters with defaults
 dive_delay_s = bind_add_param('DELAY_S', 1, 15)      -- Countdown before dive
-light_depth = bind_add_param('LIGHT_D', 2, 10.0)     -- Depth to turn on lights
+light_depth = bind_add_param('LIGHT_D', 2, 10.0)     -- Depth to turn on lights (m)
 hover_time = bind_add_param('HOVER_M', 3, 1.0)       -- Minutes to hover
 surf_depth = bind_add_param('SURF_D', 4, 2.0)        -- Surface threshold
 max_ah = bind_add_param('MAX_AH', 5, 12.0)           -- Max amp-hours
 min_voltage = bind_add_param('MIN_V', 6, 13.0)       -- Min battery voltage
-recording_depth = bind_add_param('REC_D', 7, 5.0)    -- Depth to start recording
+recording_depth = bind_add_param('REC_DEPTH', 7, 5.0)    -- Depth to start recording
+video_split_duration = bind_add_param('REC_SPLIT', 8, 2)    -- Duration of each video split (m)
+descent_speed = bind_add_param('DESC_SPEED',9,1) --Target speed to descend at (m/s)
+target_depth = bind_add_param('TARGET_DEPTH',10,35) --Max depth 
+
+predicted_divetime = dive_delay_s/60 +  hover_time + (target_depth/descend)/60 -- calculate dive time, if exceeded abort
 
 -- PID Controller parameters
 local Kp = 1.0  -- Proportional gain

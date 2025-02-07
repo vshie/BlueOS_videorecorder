@@ -128,7 +128,7 @@
     <ul id="videoList"></ul>
 
     <!-- Iframe to embed the BlueOS file browser -->
-    <iframe src="`http://${window.location.host}:7777/filebrowser/files/extensions/videorecorder`" style="width: 100%; height: 500px; border: none;"></iframe>
+    <iframe src="`http://${window.location.host}:7777/filebrowser/files/extensions/videorecorder`" style="width: 100%; height: 600px; border: none;"></iframe>
 </html>
 
 <script>
@@ -197,7 +197,7 @@ fileListTimer = setInterval(fetchVideos, 5000);
  // Set the iframe source dynamically based on the current host
  window.addEventListener('load', () => {
         const iframe = document.querySelector('iframe');
-        iframe.src = `http://${window.location.hostname}:7777/filebrowser/files/extensions/videorecorder`;
+        iframe.src = `http://${window.location.hostname}:7777/files/extensions/videorecorder`;
     });
 // Clean up timer when page is unloaded
 window.addEventListener('unload', () => {
