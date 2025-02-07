@@ -52,14 +52,11 @@ function decode_vfr_hud(message)
 end
 
 -- Function to handle incoming MAVLink messages
-function handle_mavlink_message(message)
-    local msg_id = message.msgid
-    if msg_id == VFR_HUD then  -- Replace with the actual ID for VFR_HUD
-        local vfr_hud_data = decode_vfr_hud(message)
-        global_altitude = vfr_hud_data.alt
-        global_climb_rate = vfr_hud_data.climb_rate
-        gcs:send_text(6, string.format("Altitude: %.2f meters, Climb Rate: %.2f m/s", global_altitude, global_climb_rate))
-    end
+function getvehicledata()
+    local position = ahrs:get_position()
+    global_altitude = position:alt()
+    global_climb_rate =  -ahrs:get_velocity_NED():z()
+    gcs:send_text(6, string.format("Altitude: %.2f meters, Climb Rate: %.2f m/s", global_altitude, global_climb_rate))
 end
 
 -- Function to control lights
@@ -164,7 +161,7 @@ function loop()
 
     -- Report altitude and climb rate every 5 seconds
     if millis() > (last_report_time + 5000) then
-        gcs:send_text(6, string.format("Current Altitude: %.2f meters, Climb Rate: %.2f m/s", global_altitude, global_climb_rate))
+        getvehicledata()
         last_report_time = millis()  -- Update the last report time
     end
 
