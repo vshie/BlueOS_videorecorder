@@ -194,7 +194,11 @@ fetchVideos();
 
 // Set up periodic refresh of video list (every 5 seconds)
 fileListTimer = setInterval(fetchVideos, 5000);
-
+ // Set the iframe source dynamically based on the current host
+ window.addEventListener('load', () => {
+        const iframe = document.querySelector('iframe');
+        iframe.src = `http://${window.location.hostname}:7777/filebrowser/files/extensions/videorecorder`;
+    });
 // Clean up timer when page is unloaded
 window.addEventListener('unload', () => {
     clearInterval(fileListTimer);
