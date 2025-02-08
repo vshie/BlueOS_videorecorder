@@ -91,7 +91,7 @@ end
 
 -- Function to read inputs we control vehicle off of
 function get_data() 
-    -- need working depth code
+    local depth = baro:get_altitude()
     local descent_rate =  -ahrs:get_velocity_NED():z() --m/s (?)
     local mah = battery:consumed_mah()
     local batV = battery:voltage()
@@ -145,7 +145,7 @@ function control_dive_mission()
                 gcs:send_text(6, "Video recording started at depth")
             end
         end
-        if climb_rate < 0.1 --@willian need to check signs here - you put a - in front of the code used to fetch. If descending # will be positive then? Maybe I shoul take abs value?
+        if climb_rate < 0.1 --@willian need to check signs here - you put a - in front of the code used to fetch. If descending # will be positive then? Maybe I shoul take abs v
     elseif state == HOVERING then
         local depth, roll, mah = get_data()
         local setpoint = hover_depth  -- Assuming hover_depth is the desired depth

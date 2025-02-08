@@ -30,23 +30,21 @@ global_altitude = 0
 global_climb_rate = 0
 local last_report_time = 0  -- Variable to track the last report time
 
+-- Define the VFR_HUD message map
+VFR_HUD = {
+    fields = {
+        {"alt", "<f"},        -- Altitude in meters (float)
+        {"climb_rate", "<f"}, -- Climb rate in m/s (float)
+        -- Add other fields as necessary
+    }
+}
 
--- Function to decode VFR_HUD message
-function decode_vfr_hud(message)
-    local result = {}
-    local read_marker = 1  -- Start reading from the first byte
-
-    -- Unpack altitude and climb rate from the VFR_HUD message
-    result.alt, read_marker = string.unpack("<f", message, read_marker)
-    result.climb_rate, read_marker = string.unpack("<f", message, read_marker)
-
-    return result
-end
 
 -- Function to handle incoming MAVLink messages
 function getvehicledata()
-    --local curr_loc = ahrs:get_location()
-    --global_altitude = -curr_loc:alt() * 0.01 
+    -- try and get true position, but don't fail for no GPS lock
+  
+    global_altitude = baro:get_altitude()
     global_climb_rate =  -ahrs:get_velocity_NED():z()
     gcs:send_text(6, string.format("Altitude: %.2f meters, Climb Rate: %.2f m/s", global_altitude, global_climb_rate))
 end
