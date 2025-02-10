@@ -1,7 +1,7 @@
 -- Configuration
 --LIGHTS1_SERVO = 13  -- Servo function for lights
 PWM_Lightoff = 1000  -- PWM value for lights off
-PWM_Lightmed = 1350  -- PWM value for medium brightness
+PWM_Lightmed = 1550  -- PWM value for medium brightness
 
 -- States
 STANDBY = 0
@@ -9,19 +9,19 @@ LIGHTS_ON = 1
 RECORDING = 2
 LIGHTS_OFF = 3
 COMPLETE = 4
-
+firstrun = 1
 -- HTTP Configuration
 HTTP_HOST = "localhost"
 HTTP_PORT = 5423
 
 -- Timing constants (in milliseconds)
-LIGHTS_ON_DELAY = 5000
+LIGHTS_ON_DELAY = 2000
 START_RECORDING_DELAY = 6000
 LIGHTS_OFF_DELAY = 40000
-STOP_RECORDING_DELAY = 80000
+STOP_RECORDING_DELAY = 50000
 
 -- Global variables
-local state = STANDBY
+local state = COMPLETE
 local timer = 0
 local RC9 = rc:get_channel(9)
 
@@ -30,20 +30,10 @@ global_altitude = 0
 global_climb_rate = 0
 local last_report_time = 0  -- Variable to track the last report time
 
--- Define the VFR_HUD message map
-VFR_HUD = {
-    fields = {
-        {"alt", "<f"},        -- Altitude in meters (float)
-        {"climb_rate", "<f"}, -- Climb rate in m/s (float)
-        -- Add other fields as necessary
-    }
-}
-
-
 -- Function to handle incoming MAVLink messages
 function getvehicledata()
     -- try and get true position, but don't fail for no GPS lock
-  
+
     global_altitude = baro:get_altitude()
     global_climb_rate =  -ahrs:get_velocity_NED():z()
     gcs:send_text(6, string.format("Altitude: %.2f meters, Climb Rate: %.2f m/s", global_altitude, global_climb_rate))
@@ -58,6 +48,22 @@ function set_lights(on)
         RC9:set_override(PWM_Lightoff)
         gcs:send_text(6, "Lights turned OFF")
     end
+end
+
+
+gpio:pinMode(51,0) --setup standard Navigator leak detection pin
+function updateswitch()
+
+    if gpio:read(51) and firstrun == 1 then 
+        gcs:send_text(6, "starting!") 
+        firstrun = 0
+        state = STANDBY
+    else
+        state = COMPLETE
+        gcs:send_text(6, "complete!")
+
+    end
+    return update, 1000
 end
 
 -- Function to start video recording
@@ -149,12 +155,12 @@ function loop()
         handle_sequence()
     end
 
-    -- Report altitude and climb rate every 5 seconds
-    if millis() > (last_report_time + 5000) then
+    -- Report altitude and climb rate every 15 seconds
+    if millis() > (last_report_time + 15000) then
         getvehicledata()
         last_report_time = millis()  -- Update the last report time
     end
-
+    updateswitch() -- run in loop
     -- Add any additional logic to handle MAVLink messages here
     return loop, 100
 end

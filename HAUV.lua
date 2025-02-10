@@ -91,10 +91,10 @@ end
 
 -- Function to read inputs we control vehicle off of
 function get_data() 
-    local depth = baro:get_altitude()
-    local descent_rate =  -ahrs:get_velocity_NED():z() --m/s (?)
-    local mah = battery:consumed_mah()
-    local batV = battery:voltage()
+    depth = baro:get_altitude()
+    descent_rate =  -ahrs:get_velocity_NED():z() --m/s (?)
+    mah = battery:consumed_mah()
+    batV = battery:voltage()
     return depth, descent_rate, mah
 end
 
@@ -115,11 +115,14 @@ function motor_output(throttle)
     end
 end
 
-
 -- State machine to control dive mission! When diving, we arm and go to alt_hold, and command a constant descent throttle determined experimentally. Then after detecting low descent rate from hitting bottom, we go to stabilize mode. When we cross hoverdepth, we revertback to alt_hold for hover time then manual mode to ascend to surface passively! 
 function control_dive_mission()
     if not updateswitch() and state ~= STANDBY then --@willian do I need to make that updateswitch function return true/false for this to work? 
         gcs:send_text(6, "Mission switch opened - aborting")
+        state = ABORT
+    end
+    if batV < 13 || mah >14000 then
+        gcs:send_text(6, "Battery low - aborting")
         state = ABORT
     end
     
@@ -135,8 +138,10 @@ function control_dive_mission()
             gcs:send_text(6, "Starting descent")
         end
     elseif state == DESCENDING then
+        vehicle:arm()
+        vehicle:set_mode(MODE_ALT_HOLD)
         motor_output(descent_throttle)
-        local depth = get_data()
+
         if depth > light_depth:get() then
             set_lights(on)
         end
@@ -145,33 +150,31 @@ function control_dive_mission()
                 gcs:send_text(6, "Video recording started at depth")
             end
         end
-        if descent_rate < 0.1 then  --@willian need to check signs here - you put a - in front of the code used to fetch. If descending # will be positive then? Maybe I shoul take abs v
+        if descent_rate < 0.2 then  --@willian need to check signs here - you put a - in front of the code used to fetch. If descending # will be positive then? Maybe I shoul take abs v
             transition_to_hovering()
         end
         end
 
     elseif state == HOVERING then       
-
         -- Check if hover time has elapsed
         if millis() > (hover_start_time + hover_time:get() * 60000) then
             gcs:send_text(6, "Hover time elapsed, transitioning to SURFACING")
+            vehicle:set_mode(MODE_MANUAL)
             state = SURFACING
         end
     elseif state == SURFACING then
         if depth < surf_depth:get() then
             if stop_video_recording() then
                 gcs:send_text(6, "Video recording stopped during surfacing")
+                set_lights(false)
             end
-        end
-        set_lights(false)
-        if stop_video_recording() then
-            gcs:send_text(6, "Video recording stopped during surfacing")
         end
     elseif state == ABORT then
         set_lights(false)
         stop_video_recording()
-        vehicle:disarm()
+        vehicle:set_mode(MODE_MANUAL)
     end
+end
     
     gcs:send_named_float("State", state)
     gcs:send_named_float("Depth", depth)
@@ -180,12 +183,15 @@ end
 
 -- Transition to HOVERING state
 function transition_to_hovering()
-    hover_start_time = millis()  -- Record the start time of hovering
-    target_depth = depth
+    target_depth = depth - hover_offset:get()
     RC5:set_override(1500)
     RC6:set_override(1500)
-    state = HOVERING
-    gcs:send_text(6, "Transitioning to HOVERING state")
+    vehicle:set_mode(MODE_MANUAL)
+    if depth < (target_depth) then 
+        vehicle:set_mode(MODE_ALT_HOLD)
+        gcs:send_text(6, "Transitioning to HOVERING state")
+        hover_start_time = millis()  -- Record the start time of hovering
+    end
 end
 
   
@@ -238,5 +244,11 @@ function stop_video_recording()
     gcs:send_text(6, "Video recording stopped")
     return true
 end
-  
+
+function loop()
+    get_data() 
+    updateswitch()
+    control_dive_mission()
+    return loop, 100
+end
 
