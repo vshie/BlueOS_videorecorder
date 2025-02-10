@@ -116,7 +116,7 @@ function motor_output(throttle)
 end
 
 
--- State machine to control dive mission!
+-- State machine to control dive mission! When diving, we arm and go to alt_hold, and command a constant descent throttle determined experimentally. Then after detecting low descent rate from hitting bottom, we go to stabilize mode. When we cross hoverdepth, we revertback to alt_hold for hover time then manual mode to ascend to surface passively! 
 function control_dive_mission()
     if not updateswitch() and state ~= STANDBY then --@willian do I need to make that updateswitch function return true/false for this to work? 
         gcs:send_text(6, "Mission switch opened - aborting")
@@ -145,25 +145,12 @@ function control_dive_mission()
                 gcs:send_text(6, "Video recording started at depth")
             end
         end
-        if climb_rate < 0.1 --@willian need to check signs here - you put a - in front of the code used to fetch. If descending # will be positive then? Maybe I shoul take abs v
-    elseif state == HOVERING then
-        local depth, roll, mah = get_data()
-        local setpoint = hover_depth  -- Assuming hover_depth is the desired depth
-
-        -- Calculate PID output
-        local pid_output = calculate_pid(setpoint, depth)
-
-        -- Modulate RC5 and RC6 with PID output
-        local throttle = 1500 + pid_output  -- Centered at 1500, adjust with PID
-        RC5:set_override(throttle)
-        RC6:set_override(throttle)
-
-        -- Stop recording if back at surface depth
-        if depth < surf_depth:get() then
-            if stop_video_recording() then
-                gcs:send_text(6, "Video recording stopped during surfacing")
-            end
+        if descent_rate < 0.1 then  --@willian need to check signs here - you put a - in front of the code used to fetch. If descending # will be positive then? Maybe I shoul take abs v
+            transition_to_hovering()
         end
+        end
+
+    elseif state == HOVERING then       
 
         -- Check if hover time has elapsed
         if millis() > (hover_start_time + hover_time:get() * 60000) then
@@ -171,6 +158,11 @@ function control_dive_mission()
             state = SURFACING
         end
     elseif state == SURFACING then
+        if depth < surf_depth:get() then
+            if stop_video_recording() then
+                gcs:send_text(6, "Video recording stopped during surfacing")
+            end
+        end
         set_lights(false)
         if stop_video_recording() then
             gcs:send_text(6, "Video recording stopped during surfacing")
@@ -189,6 +181,9 @@ end
 -- Transition to HOVERING state
 function transition_to_hovering()
     hover_start_time = millis()  -- Record the start time of hovering
+    target_depth = depth
+    RC5:set_override(1500)
+    RC6:set_override(1500)
     state = HOVERING
     gcs:send_text(6, "Transitioning to HOVERING state")
 end
