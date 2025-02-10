@@ -51,10 +51,10 @@ function set_lights(on)
 end
 
 
-gpio:pinMode(51,0) --setup standard Navigator leak detection pin
+gpio:pinMode(18,0) --setup pwm0 pin for switch
 function updateswitch()
 
-    if gpio:read(51) and firstrun == 1 then 
+    if gpio:read(18) and firstrun == 1 then 
         gcs:send_text(6, "starting!") 
         firstrun = 0
         state = STANDBY
