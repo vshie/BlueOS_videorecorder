@@ -18,7 +18,7 @@ end
 assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 32), 'could not add param table')
 
 -- Add configurable parameters with defaults
-dive_delay_s = bind_add_param('DELAY_S', 1, 30)      -- Countdown before dive
+dive_delay_s = bind_add_param('DELAY_S', 1, 10)      -- Countdown before dive
 light_depth = bind_add_param('LIGHT_D', 2, 10.0)     -- Depth to turn on lights (m)
 hover_time = bind_add_param('HOVER_M', 3, 1.0)       -- Minutes to hover
 surf_depth = bind_add_param('SURF_D', 4, 2.0)        -- Surface threshold
@@ -45,13 +45,13 @@ timer = 0
 hover_depth = target_depth-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
 last_depth = 0 --used to track depth to detect collision with bottom
 descent_rate = 0 --m/s
-descent_throttle = 1650 -- initial guess
+descent_throttle = 1800 -- initial guess
 start_ah = 0 -- track power consumption
 hover_start_time = 0  --  variable to track hover start time, determine duration
 switch_state = 0
 is_recording = 0
 impact_threshold = 0.2-- in m/s, speed of descent is positive
-dive_timeout = 1 --minutes
+dive_timeout = 4 --minutes
 
 gpio:pinMode(18,0) -- set pwm0 to input, used to connect external "arming" switch
 function updateswitch()
@@ -78,7 +78,7 @@ end
 
 -- Function to read inputs we control vehicle off of
 function get_data() 
-    depth = baro:get_altitude() -- positive downwards
+    depth = -baro:get_altitude() -- positive downwards
     velocity = ahrs:get_velocity_NED() 
     if velocity ~= nil then
         descent_rate =  ahrs:get_velocity_NED():z() --positive downward
@@ -108,8 +108,7 @@ timer = millis()-- remember to move this when leaving SITL!
 
 -- State machine to control dive mission! When diving, we arm and go to alt_hold, and command a constant descent throttle determined experimentally. Then after detecting low descent rate from hitting bottom, we go to stabilize mode. When we cross hoverdepth, we revertback to alt_hold for hover time then manual mode to ascend to surface passively! 
 function control_dive_mission()
-    if  switch_state and state ~= STANDBY and state ~= COMPLETE then --@willian do I need to make that updateswitch function return true/false for this to work? 
-        gcs:send_text(6, "Mission switch opened - aborting")
+    if  switch_state == 0 and state ~= STANDBY and state ~= COMPLETE then 
         state = ABORT
     end
     if batV < min_voltage:get() and state ~= STANDBY and state ~= COUNTDOWN then --or (mah - start_mah) >(max_ah:get() * 1000) and state ~= COMPLETE then
@@ -124,7 +123,7 @@ function control_dive_mission()
     if state == STANDBY and switch_state == 1 then
         state = COUNTDOWN
         start_mah = battery:consumed_mah(0)
-        timer = millis()
+        timer = millis() -- start overall dive clock
 
     elseif state == COUNTDOWN then
         if millis() > (timer + dive_delay_s:get() * 1000) then
@@ -132,12 +131,12 @@ function control_dive_mission()
             gcs:send_text(6, "Starting descent")
         end
     elseif state == DESCENDING then
-        vehicle:arm()
-        vehicle:set_mode(MANUAL)
+        arming:arm()
+        vehicle:set_mode(MODE_MANUAL)
         motor_output(descent_throttle)
 
         if depth > light_depth:get() then
-            set_lights(on)
+            set_lights(true)
         end
         if depth > recording_depth:get() and is_recording == 0 then
             if start_video_recording() then
@@ -149,7 +148,7 @@ function control_dive_mission()
             state = ABORT
             gcs:send_text(6, "Dive duration timeout")
         end
-        if descent_rate < impact_threshold then  
+        if depth > 7 and descent_rate < impact_threshold then  
             transition_to_hovering()
         end
 
@@ -186,6 +185,8 @@ end
 -- Transition to HOVERING state
 function transition_to_hovering()
     target_depth = depth - hover_offset:get()
+    hover_start_time = millis()
+    state = ASCEND_TOHOVER
     RC3:set_override(1500)
 end
 
@@ -248,7 +249,7 @@ function loop()
     -- Increment the iteration counter
     iteration_counter = iteration_counter + 1
     if iteration_counter % 50 == 0 then
-        gcs:send_text(6,string.format("state:%d", state))
+        gcs:send_text(6,string.format("state:%d %.1f %.1f", state, depth, descent_rate))
         gcs:send_named_float("State", state)
         gcs:send_named_float("Depth", depth)
     end
