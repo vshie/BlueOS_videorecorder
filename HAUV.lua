@@ -19,7 +19,7 @@ assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 32), 'could not add 
 
 -- Add configurable parameters with defaults
 dive_delay_s = bind_add_param('DELAY_S', 1, 30)      -- Countdown before dive
-light_depth = bind_add_param('LIGHT_D', 2, 10.0)     -- Depth to turn on lights (m)
+light_depth = bind_add_param('LIGHT_D', 2, 7.0)     -- Depth to turn on lights (m)
 hover_time = bind_add_param('HOVER_M', 3, 1.0)       -- Minutes to hover
 surf_depth = bind_add_param('SURF_D', 4, 2.0)        -- Surface threshold
 max_ah = bind_add_param('MAX_AH', 5, 12.0)           -- Max amp-hours
@@ -44,7 +44,7 @@ timer = 0
 hover_depth = target_depth-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
 last_depth = 0 --used to track depth to detect collision with bottom
 descent_rate = 0 --m/s
-descent_throttle = 1700 -- initial guess
+--descent_throttle = 1700 -- initial guess
 start_ah = 0 -- track power consumption
 hover_start_time = 0  --  variable to track hover start time, determine duration
 switch_state = 0
@@ -56,6 +56,9 @@ gpio:pinMode(27,0) -- set pwm0 to input, used to connect external "arming" switc
 function updateswitch()
     --switch_state = 1-- for testing sitl
     switch_state = gpio:read(27)
+    if not switch_state and state == DESCENDING or state == HOVERING then
+        state = ABORT
+    end
 end
 
 -- Configuration for lights
@@ -71,7 +74,7 @@ function set_lights(on)
         gcs:send_text(6, "Lights turned ON")
     else
         RC9:set_override(PWM_Lightoff)
-        gcs:send_text(6, "Lights turned OFF")
+        --gcs:send_text(6, "Lights turned OFF")
     end
 end
 
@@ -82,7 +85,7 @@ function get_data()
     if velocity ~= nil then
         descent_rate =  ahrs:get_velocity_NED():z() --positive downward
     end
-    mah = battery:consumed_mah(0)
+    --mah = battery:consumed_mah(0)
     batV = battery:voltage(0)
 end
 
@@ -93,12 +96,14 @@ MODE_ALT_HOLD = 2
 
 --function to control motors - will this conflict with alt_hode mode? Does not require vehicle to be armed...
 
-function motor_output(throttle)
-    SRV_Channels:set_output_pwm_chan_timeout(5-1, throttle, 100)
-    SRV_Channels:set_output_pwm_chan_timeout(6-1, throttle, 100)
+function motor_output()
+    
     if state == ABORT then-- turn motors off!!
         SRV_Channels:set_output_pwm_chan_timeout(5-1, 1500, 100)
         SRV_Channels:set_output_pwm_chan_timeout(6-1, 1500, 100)
+    else
+        SRV_Channels:set_output_pwm_chan_timeout(5-1, 1700, 100)
+        SRV_Channels:set_output_pwm_chan_timeout(6-1, 1300, 100) --opposite because reverse parameter doesn't carry over
     end
 end
 
@@ -106,13 +111,13 @@ end
 
 -- State machine to control dive mission! When diving, we arm and go to alt_hold, and command a constant descent throttle determined experimentally. Then after detecting low descent rate from hitting bottom, we go to stabilize mode. When we cross hoverdepth, we revertback to alt_hold for hover time then manual mode to ascend to surface passively! 
 function control_dive_mission()
-    if  switch_state == 0 and state ~= STANDBY and state ~= COMPLETE then 
-        state = ABORT
-    end
-    if batV < min_voltage:get() and state ~= STANDBY and state ~= COUNTDOWN then --or (mah - start_mah) >(max_ah:get() * 1000) and state ~= COMPLETE then
-        gcs:send_text(6, "Battery low - aborting")
-        state = ABORT
-    end
+    -- if  not switch_state and state ~= STANDBY or state ~=COMPLETE then
+    --     state = ABORT
+    -- end
+    -- if batV < min_voltage:get() and state ~= STANDBY and state ~= COUNTDOWN then --or (mah - start_mah) >(max_ah:get() * 1000) and state ~= COMPLETE then
+    --     gcs:send_text(6, "Battery low - aborting")
+    --     state = ABORT
+    -- end
   
     if state == STANDBY then
         set_lights(false)
@@ -120,7 +125,7 @@ function control_dive_mission()
     
     if state == STANDBY and switch_state then
         state = COUNTDOWN
-        start_mah = battery:consumed_mah(0)
+        --start_mah = battery:consumed_mah(0)
         timer = millis() -- start overall dive clock
 
     elseif state == COUNTDOWN then
@@ -131,7 +136,7 @@ function control_dive_mission()
     elseif state == DESCENDING then
         arming:arm()
         vehicle:set_mode(MODE_MANUAL)
-        motor_output(descent_throttle)
+        motor_output()
 
         if depth > light_depth:get() then
             set_lights(true)
@@ -175,9 +180,12 @@ function control_dive_mission()
         end
     elseif state == ABORT then
         set_lights(false)
-        stop_video_recording()
+        motor_output()
+        if is_recording == 1 then
+            stop_video_recording()
+            is_recording = 0
+        end
         vehicle:set_mode(MODE_MANUAL)
-        state = COMPLETE
     end
 end
 -- Transition to HOVERING state
