@@ -18,15 +18,14 @@ end
 assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 32), 'could not add param table')
 
 -- Add configurable parameters with defaults
-dive_delay_s = bind_add_param('DELAY_S', 1, 10)      -- Countdown before dive
+dive_delay_s = bind_add_param('DELAY_S', 1, 30)      -- Countdown before dive
 light_depth = bind_add_param('LIGHT_D', 2, 10.0)     -- Depth to turn on lights (m)
 hover_time = bind_add_param('HOVER_M', 3, 1.0)       -- Minutes to hover
 surf_depth = bind_add_param('SURF_D', 4, 2.0)        -- Surface threshold
 max_ah = bind_add_param('MAX_AH', 5, 12.0)           -- Max amp-hours
 min_voltage = bind_add_param('MIN_V', 6, 13.0)       -- Min battery voltage
 recording_depth = bind_add_param('REC_DEPTH', 7, 5.0)    -- Depth to start recording
-video_split_duration = bind_add_param('REC_SPLIT', 8, 2)    -- Duration of each video split (m)
-target_depth = 100
+target_depth = 40
 hover_offset = bind_add_param('HOVER_OFF',11,3) --hover this far above of target depth or impact (actual) max depth
 
 -- States
@@ -45,18 +44,18 @@ timer = 0
 hover_depth = target_depth-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
 last_depth = 0 --used to track depth to detect collision with bottom
 descent_rate = 0 --m/s
-descent_throttle = 1800 -- initial guess
+descent_throttle = 1700 -- initial guess
 start_ah = 0 -- track power consumption
 hover_start_time = 0  --  variable to track hover start time, determine duration
 switch_state = 0
 is_recording = 0
 impact_threshold = 0.2-- in m/s, speed of descent is positive
-dive_timeout = 4 --minutes
+dive_timeout = 5 --minutes
 
-gpio:pinMode(18,0) -- set pwm0 to input, used to connect external "arming" switch
+gpio:pinMode(27,0) -- set pwm0 to input, used to connect external "arming" switch
 function updateswitch()
-    switch_state = 1-- for testing sitl
-    --switch_state = gpio:read(18)
+    --switch_state = 1-- for testing sitl
+    switch_state = gpio:read(27)
 end
 
 -- Configuration for lights
@@ -102,9 +101,8 @@ function motor_output(throttle)
         SRV_Channels:set_output_pwm_chan_timeout(6-1, 1500, 100)
     end
 end
-state = COUNTDOWN
-start_mah = battery:consumed_mah(0)
-timer = millis()-- remember to move this when leaving SITL!
+
+--timer = millis()-- remember to move this when leaving SITL!
 
 -- State machine to control dive mission! When diving, we arm and go to alt_hold, and command a constant descent throttle determined experimentally. Then after detecting low descent rate from hitting bottom, we go to stabilize mode. When we cross hoverdepth, we revertback to alt_hold for hover time then manual mode to ascend to surface passively! 
 function control_dive_mission()
@@ -120,7 +118,7 @@ function control_dive_mission()
         set_lights(false)
     end
     
-    if state == STANDBY and switch_state == 1 then
+    if state == STANDBY and switch_state then
         state = COUNTDOWN
         start_mah = battery:consumed_mah(0)
         timer = millis() -- start overall dive clock
