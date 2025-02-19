@@ -1,15 +1,20 @@
-FROM python:3.11-slim-bullseye
+FROM debian:bullseye-slim
 
-# Install system dependencies with additional repository
+# Install system dependencies in separate steps to avoid QEMU issues
 RUN apt-get update --fix-missing && \
-    apt-get install -y software-properties-common && \
-    apt-get update --fix-missing && \
+    apt-get install -y python3 python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update --fix-missing && \
+    apt-get install -y gstreamer1.0-tools && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update --fix-missing && \
     apt-get install -y \
-        gstreamer1.0-tools \
-        gstreamer1.0-plugins-base \
-        gstreamer1.0-plugins-good \
-        gstreamer1.0-plugins-bad \
-    && rm -rf /var/lib/apt/lists/*
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad && \
+    rm -rf /var/lib/apt/lists/*
 
 # Create app directory
 WORKDIR /app
@@ -18,7 +23,7 @@ WORKDIR /app
 COPY app/ .
 
 # Install Python dependencies
-RUN pip install flask
+RUN pip3 install flask
 
 # Create directory for video recordings
 RUN mkdir -p /app/videorecordings
