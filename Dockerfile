@@ -1,15 +1,11 @@
 FROM python:3.11-slim-bullseye
 
-# Install system dependencies with retry mechanism and proper package lists update
-RUN apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    apt-get update -y && \
-    apt-get install -y \
-        gstreamer1.0-tools \
-        gstreamer1.0-plugins-base \
-        gstreamer1.0-plugins-good \
-        gstreamer1.0-plugins-bad \
-        psmisc \
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
