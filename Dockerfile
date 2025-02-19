@@ -1,11 +1,14 @@
 FROM python:3.11-slim-bullseye
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gstreamer1.0-tools \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
+# Install system dependencies with additional repository
+RUN apt-get update --fix-missing && \
+    apt-get install -y software-properties-common && \
+    apt-get update --fix-missing && \
+    apt-get install -y \
+        gstreamer1.0-tools \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-bad \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
