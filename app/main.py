@@ -42,21 +42,16 @@ def start():
         if recording:
             return jsonify({"success": False, "message": "Already recording"}), 400
             
-        # Get split duration in minutes (default 5 minutes), convert to seconds
-        split_duration = request.args.get('split_duration', default=1, type=int) * 60
-        
         # Ensure the video directory exists
         os.makedirs("/app/videorecordings", exist_ok=True)
             
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"video_{timestamp}_%03d.mp4"
+        filename = f"video_{timestamp}.mp4"
         filepath = os.path.join("/app/videorecordings", filename)
         
         pipeline = ("v4l2src device=/dev/video2 ! "
             "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
-            "h264parse ! "
-            "splitmuxsink location=/app/videorecordings/video_20250206_205811_%03d.mp4 "
-            "max-size-time=1200000000000 post-messages=true")
+            f"h264parse ! mp4mux ! filesink location={filepath}")
 
         command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
 

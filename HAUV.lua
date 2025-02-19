@@ -1,3 +1,18 @@
+--TODO - use all params in script, add necessary ones for quick Configuration
+-- fix video extension to actually make a new recording each time, and not split recordings since graceful record stop working
+-- Make each state change gcs:text print the reason for it. Also add variable tracking (relevant to abort call) to bin log via lua example from Willian:
+-- care must be taken when selecting a name, must be less than four characters and not clash with an existing log type
+  -- format characters specify the type of variable to be logged, see AP_Logger/README.md
+  -- https://github.com/ArduPilot/ardupilot/tree/master/libraries/AP_Logger
+  -- not all format types are supported by scripting only: i, L, e, f, n, M, B, I, E, and N
+  -- lua automatically adds a timestamp in micro seconds
+ -- logger:write('SCR1','roll(deg),pitch(deg),yaw(deg)','fff',interesting_data[roll],interesting_data[pitch],interesting_data[yaw])
+
+  -- it is also possible to give units and multipliers
+ -- logger:write('SCR2','roll,pitch,yaw','fff','ddd','---',interesting_data[roll],interesting_data[pitch],interesting_data[yaw])
+
+
+
 -- Configuration parameters
 PARAM_TABLE_KEY = 91
 PARAM_TABLE_PREFIX = 'HOVER_'
@@ -25,9 +40,10 @@ surf_depth = bind_add_param('SURF_D', 4, 2.0)        -- Surface threshold
 max_ah = bind_add_param('MAX_AH', 5, 12.0)           -- Max amp-hours
 min_voltage = bind_add_param('MIN_V', 6, 13.0)       -- Min battery voltage
 recording_depth = bind_add_param('REC_DEPTH', 7, 5.0)    -- Depth to start recording
-target_depth = 40
-hover_offset = bind_add_param('HOVER_OFF',11,3) --hover this far above of target depth or impact (actual) max depth
-
+hover_offset = bind_add_param('H_OFF',8,3) --hover this far above of target depth or impact (actual) max depth
+target_depth = bind_add_param('T_DEPTH',9,40) --mqx depth, hover above this if reached
+hover_depth = target_depth:get()-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
+descent_throttle = bind_add_param('D_THRTL',10,1700) --mqx depth, hover above this if reached1700 -- initial guess
 -- States
 STANDBY = 0
 COUNTDOWN = 1
@@ -39,15 +55,14 @@ ABORT = 6
 COMPLETE = 7
 
 -- Initialize variables
-state = STANDBY
+state = COUNTDOWN
 timer = 0
-hover_depth = target_depth-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
 last_depth = 0 --used to track depth to detect collision with bottom
 descent_rate = 0 --m/s
---descent_throttle = 1700 -- initial guess
+
 start_ah = 0 -- track power consumption
 hover_start_time = 0  --  variable to track hover start time, determine duration
-switch_state = 0
+switch_state = 1
 is_recording = 0
 impact_threshold = 0.2-- in m/s, speed of descent is positive
 dive_timeout = 5 --minutes
@@ -56,7 +71,7 @@ gpio:pinMode(27,0) -- set pwm0 to input, used to connect external "arming" switc
 function updateswitch()
     --switch_state = 1-- for testing sitl
     switch_state = gpio:read(27)
-    if not switch_state and state == DESCENDING or state == HOVERING then
+    if not switch_state then
         state = ABORT
     end
 end
@@ -71,7 +86,7 @@ local RC3 = rc:get_channel(3)  -- Using Navigator inpout channel 3 for vertical 
 function set_lights(on)
     if on then
         RC9:set_override(PWM_Lightmed)
-        gcs:send_text(6, "Lights turned ON")
+        -- gcs:send_text(6, "Lights turned ON")
     else
         RC9:set_override(PWM_Lightoff)
         --gcs:send_text(6, "Lights turned OFF")
@@ -102,8 +117,8 @@ function motor_output()
         SRV_Channels:set_output_pwm_chan_timeout(5-1, 1500, 100)
         SRV_Channels:set_output_pwm_chan_timeout(6-1, 1500, 100)
     else
-        SRV_Channels:set_output_pwm_chan_timeout(5-1, 1700, 100)
-        SRV_Channels:set_output_pwm_chan_timeout(6-1, 1300, 100) --opposite because reverse parameter doesn't carry over
+        SRV_Channels:set_output_pwm_chan_timeout(5-1, descent_throttle:get(), 100)
+        SRV_Channels:set_output_pwm_chan_timeout(6-1, descent_throttle:get(), 100) --opposite because reverse parameter doesn't carry over
     end
 end
 
@@ -125,6 +140,7 @@ function control_dive_mission()
     
     if state == STANDBY and switch_state then
         state = COUNTDOWN
+        arming:arm()
         --start_mah = battery:consumed_mah(0)
         timer = millis() -- start overall dive clock
 
@@ -134,7 +150,6 @@ function control_dive_mission()
             gcs:send_text(6, "Starting descent")
         end
     elseif state == DESCENDING then
-        arming:arm()
         vehicle:set_mode(MODE_MANUAL)
         motor_output()
 
@@ -151,13 +166,18 @@ function control_dive_mission()
             state = ABORT
             gcs:send_text(6, "Dive duration timeout")
         end
-        if depth > 7 and descent_rate < impact_threshold then  
+        if depth > 5 and descent_rate < impact_threshold then  
             transition_to_hovering()
         end
+        if depth > target_depth then
+            transition_to_hovering()
+        end
+
 
     elseif state == ASCEND_TOHOVER then
         if depth < (target_depth) then 
             vehicle:set_mode(MODE_ALT_HOLD)
+            hover_start_time = millis()
             gcs:send_text(6, "Transitioning to HOVERING state")
             hover_start_time = millis()  -- Record the start time of hovering
             state = HOVERING
@@ -175,6 +195,7 @@ function control_dive_mission()
             if stop_video_recording() then
                 gcs:send_text(6, "Video recording stopped during surfacing")
                 set_lights(false)
+                arming:disarm()
                 state = COMPLETE
             end
         end
@@ -186,6 +207,7 @@ function control_dive_mission()
             is_recording = 0
         end
         vehicle:set_mode(MODE_MANUAL)
+        gcs:send_text(6, "Abort triggered")
     end
 end
 -- Transition to HOVERING state
@@ -258,8 +280,9 @@ function loop()
         gcs:send_text(6,string.format("state:%d %.1f %.1f", state, depth, descent_rate))
         gcs:send_named_float("State", state)
         gcs:send_named_float("Depth", depth)
+        iteration_counter = 0
     end
-    return loop, 100
+    return loop, 50
 end
 
 return loop()

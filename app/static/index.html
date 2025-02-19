@@ -115,10 +115,6 @@
     <div class="status-container">
         <p>Status: <span id="recordingStatus">Stopped</span></p>
     </div>
-    <div class="input-group">
-        <label for="splitDuration">Split Duration (minutes):</label>
-        <input type="number" id="splitDuration" value="1" min="1">
-    </div>
     <div class="controls">
         <button id="startButton" onclick="startRecording()">Start Recording</button>
         <button id="stopButton" onclick="stopRecording()" disabled>Stop Recording</button>
@@ -129,7 +125,7 @@
 
     <!-- Iframe to embed the BlueOS file browser -->
     <iframe src="`http://${window.location.host}:7777/filebrowser/files/extensions/videorecorder`" style="width: 100%; height: 600px; border: none;"></iframe>
-</html>
+</body>
 
 <script>
 let recordingTimer;
@@ -138,8 +134,7 @@ let fileListTimer;
 
 async function startRecording() {
     try {
-        const splitDuration = document.getElementById("splitDuration").value;
-        await axios.get(`/start?split_duration=${splitDuration}`);
+        await axios.get('/start');
         document.getElementById("errorMessage").innerText = "";
         startTime = new Date();
         document.getElementById("recordingTime").style.display = "block";
