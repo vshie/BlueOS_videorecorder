@@ -2,7 +2,7 @@ FROM debian:bullseye-slim
 
 # Install system dependencies in separate steps to avoid QEMU issues
 RUN apt-get update --fix-missing && \
-    apt-get install -y python3 python3-pip && \
+    apt-get install -y python3-minimal python3-pip --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update --fix-missing && \
