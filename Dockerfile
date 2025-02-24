@@ -1,24 +1,27 @@
-FROM --platform=$TARGETPLATFORM python:3.11-slim-bullseye
+FROM ubuntu:20.04
 
 # Avoid prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install minimal GStreamer dependencies
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+# Install Python and minimal dependencies first
+RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install GStreamer dependencies in separate steps
+RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
     && rm -rf /var/lib/apt/lists/*
 
-# Install additional GStreamer plugins in separate steps
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     gstreamer1.0-plugins-good \
     && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     gstreamer1.0-plugins-bad \
+    psmisc \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
@@ -28,7 +31,7 @@ WORKDIR /app
 COPY app/ .
 
 # Install Python dependencies
-RUN pip install flask
+RUN pip3 install flask
 
 # Create directory for video recordings
 RUN mkdir -p /app/videorecordings
