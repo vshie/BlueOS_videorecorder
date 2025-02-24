@@ -1,24 +1,24 @@
-FROM python:3.11-slim-bullseye
+FROM --platform=$TARGETPLATFORM python:3.11-slim-bullseye
 
 # Avoid prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies in separate steps
-RUN apt-get update && apt-get install -y \
+# Install minimal GStreamer dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
     gstreamer1.0-tools \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN apt-get update && apt-get install -y \
     gstreamer1.0-plugins-base \
     && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y \
+# Install additional GStreamer plugins in separate steps
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
     gstreamer1.0-plugins-good \
     && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
     gstreamer1.0-plugins-bad \
-    psmisc \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
