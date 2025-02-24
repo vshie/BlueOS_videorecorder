@@ -30,5 +30,3 @@ jobs:
           author-email: ${{ vars.MY_EMAIL }}
           maintainer: ${{ vars.ORG_NAME }}
           maintainer-email: ${{ vars.ORG_EMAIL }}
-          # Add no-cache option to avoid caching issues
-          build-args: '--no-cache'
