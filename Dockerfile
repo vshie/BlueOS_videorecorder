@@ -1,4 +1,7 @@
-FROM python:3.11-slim-bullseye
+FROM --platform=$TARGETPLATFORM python:3.11-slim-bullseye
+
+# Avoid prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
