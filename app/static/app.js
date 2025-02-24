@@ -41,8 +41,7 @@ async function startRecording() {
     
     try {
         startButton.disabled = true; // Disable immediately to prevent double-clicks
-        const splitDuration = document.getElementById("splitDuration").value;
-        const response = await fetch(`/start?split_duration=${splitDuration}`, {
+        const response = await fetch('/start', {
             method: 'GET'
         });
         
