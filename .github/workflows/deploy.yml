@@ -14,6 +14,11 @@ jobs:
   deploy-docker-image:
     runs-on: ubuntu-latest
     steps:
+      - name: Clear Docker cache
+        run: |
+          docker builder prune -f
+          docker buildx prune -f
+
       - name: Deploy BlueOS Extension
         uses: BlueOS-community/Deploy-BlueOS-Extension@v1.2.0
         with:
@@ -25,3 +30,5 @@ jobs:
           author-email: ${{ vars.MY_EMAIL }}
           maintainer: ${{ vars.ORG_NAME }}
           maintainer-email: ${{ vars.ORG_EMAIL }}
+          # Add no-cache option to avoid caching issues
+          build-args: '--no-cache'
