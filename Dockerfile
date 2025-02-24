@@ -1,16 +1,12 @@
-FROM --platform=$TARGETPLATFORM ubuntu:20.04
+FROM python:3.11-slim-bullseye
 
-# Avoid prompts during package installation
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install Python and GStreamer in one step
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
+    psmisc \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
@@ -20,7 +16,7 @@ WORKDIR /app
 COPY app/ .
 
 # Install Python dependencies
-RUN pip3 install flask
+RUN pip install flask
 
 # Create directory for video recordings
 RUN mkdir -p /app/videorecordings
@@ -89,4 +85,4 @@ LABEL requirements="core >= 1.1"
 # Mark /dev/video2 as a volume
 VOLUME ["/dev/video2"]
 
-ENTRYPOINT ["python", "-u", "/app/main.py"]
+ENTRYPOINT ["python3", "-u", "/app/main.py"]

@@ -1,5 +1,4 @@
 --TODO - use all params in script, add necessary ones for quick Configuration
--- fix video extension to actually make a new recording each time, and not split recordings since graceful record stop working
 -- Make each state change gcs:text print the reason for it. Also add variable tracking (relevant to abort call) to bin log via lua example from Willian:
 -- care must be taken when selecting a name, must be less than four characters and not clash with an existing log type
   -- format characters specify the type of variable to be logged, see AP_Logger/README.md
@@ -271,7 +270,7 @@ end
 iteration_counter = 0
 
 function loop()
-    get_data() 
+    get_data()
     updateswitch()
     control_dive_mission()
     -- Increment the iteration counter
@@ -285,4 +284,4 @@ function loop()
     return loop, 50
 end
 
-return loop()
+return loop()   
