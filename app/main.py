@@ -44,11 +44,26 @@ def start():
             
         # Ensure the video directory exists
         os.makedirs("/app/videorecordings", exist_ok=True)
-            
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"video_{timestamp}.mp4"
         filepath = os.path.join("/app/videorecordings", filename)
         
+        # Add camera initialization commands
+        init_pipeline = ("v4l2src device=/dev/video2 ! "
+            "video/x-h264,width=1920,height=1080,framerate=30/1 ! fakesink")
+        
+        # Run initialization pipeline briefly
+        try:
+            init_command = ["gst-launch-1.0", "-e"] + shlex.split(init_pipeline)
+            init_process = subprocess.Popen(init_command)
+            time.sleep(1)  # Let camera adjust
+            init_process.terminate()
+            init_process.wait()
+        except Exception as e:
+            logger.warning(f"Camera init sequence failed: {str(e)}")
+        
+        # Now start the actual recording
         pipeline = ("v4l2src device=/dev/video2 ! "
             "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
             f"h264parse ! mp4mux ! filesink location={filepath}")

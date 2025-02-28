@@ -1,17 +1,14 @@
 --TODO - use all params in script, add necessary ones for quick Configuration
--- Make each state change gcs:text print the reason for it. Also add variable tracking (relevant to abort call) to bin log via lua example from Willian:
+-- Make each state change gcs:text print the reason for it. 
+--Add variable tracking (relevant to abort call) to bin log via lua example from Willian:
 -- care must be taken when selecting a name, must be less than four characters and not clash with an existing log type
   -- format characters specify the type of variable to be logged, see AP_Logger/README.md
   -- https://github.com/ArduPilot/ardupilot/tree/master/libraries/AP_Logger
   -- not all format types are supported by scripting only: i, L, e, f, n, M, B, I, E, and N
   -- lua automatically adds a timestamp in micro seconds
  -- logger:write('SCR1','roll(deg),pitch(deg),yaw(deg)','fff',interesting_data[roll],interesting_data[pitch],interesting_data[yaw])
-
   -- it is also possible to give units and multipliers
  -- logger:write('SCR2','roll,pitch,yaw','fff','ddd','---',interesting_data[roll],interesting_data[pitch],interesting_data[yaw])
-
-
-
 -- Configuration parameters
 PARAM_TABLE_KEY = 91
 PARAM_TABLE_PREFIX = 'HOVER_'
@@ -43,7 +40,7 @@ hover_offset = bind_add_param('H_OFF',8,3) --hover this far above of target dept
 target_depth = bind_add_param('T_DEPTH',9,40) --mqx depth, hover above this if reached
 hover_depth = target_depth:get()-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
 descent_throttle = bind_add_param('D_THRTL',10,1700) --descend at this throttle
-ascent_throttle = bind_add_param('A_THRTL',10,1400) --ascend at this throttle, only if climb rate not sufficient?
+ascent_throttle = bind_add_param('A_THRTL',11,1400) --ascend at this throttle, only if climb rate not sufficient?
 
 -- States
 STANDBY = 0
@@ -56,10 +53,11 @@ ABORT = 6
 COMPLETE = 7
 
 -- Initialize variables
-state = COUNTDOWN
+state = STANDBY
 timer = 0
 last_depth = 0 --used to track depth to detect collision with bottom
 descent_rate = 0 --m/s
+has_disarmed = false  -- Add this new variable to track disarm status
 
 start_ah = 0 -- track power consumption
 hover_start_time = 0  --  variable to track hover start time, determine duration
@@ -72,7 +70,7 @@ gpio:pinMode(27,0) -- set pwm0 to input, used to connect external "arming" switc
 function updateswitch()
     --switch_state = 1-- for testing sitl
     switch_state = gpio:read(27)
-    if not switch_state then
+    if not switch_state and state ~= STANDBY and state ~= COMPLETE then
         state = ABORT
     end
 end
@@ -142,9 +140,8 @@ function control_dive_mission()
     if state == STANDBY and switch_state then
         state = COUNTDOWN
         arming:arm()
-        --start_mah = battery:consumed_mah(0)
+        gcs:send_text(6, "Switch closed - starting countdown")
         timer = millis() -- start overall dive clock
-
     elseif state == COUNTDOWN then
         if millis() > (timer + dive_delay_s:get() * 1000) then
             state = DESCENDING
@@ -167,16 +164,19 @@ function control_dive_mission()
             state = ABORT
             gcs:send_text(6, "Dive duration timeout")
         end
-        if depth > 5 and descent_rate < impact_threshold then  
+        if depth > 5 and descent_rate < impact_threshold then --handles impact detection
+            gcs:send_text(6, "Impact detected, transitioning to Ascend to hover")
             transition_to_hovering()
         end
-        if depth > target_depth then
+        if depth > target_depth:get() then --handles target depth reached
+            gcs:send_text(6, "Target depth reached")
+            
             transition_to_hovering()
         end
 
 
     elseif state == ASCEND_TOHOVER then
-        if depth < (target_depth) then 
+        if depth < hover_depth then 
             vehicle:set_mode(MODE_ALT_HOLD)
             hover_start_time = millis()
             gcs:send_text(6, "Transitioning to HOVERING state")
@@ -208,12 +208,15 @@ function control_dive_mission()
             is_recording = 0
         end
         vehicle:set_mode(MODE_MANUAL)
-        gcs:send_text(6, "Abort triggered")
+        if not has_disarmed then
+            arming:disarm()
+            has_disarmed = true
+        end
     end
 end
 -- Transition to HOVERING state
 function transition_to_hovering()
-    target_depth = depth - hover_offset:get()
+    hover_depth = depth - hover_offset:get()
     hover_start_time = millis()
     state = ASCEND_TOHOVER
     RC3:set_override(1500)
@@ -279,11 +282,17 @@ function loop()
     iteration_counter = iteration_counter + 1
     if iteration_counter % 50 == 0 then
         gcs:send_text(6,string.format("state:%d %.1f %.1f", state, depth, descent_rate))
+        if state == ABORT then
+            gcs:send_text(6, "Abort active")
+        end
         gcs:send_named_float("State", state)
         gcs:send_named_float("Depth", depth)
+        -- Log state to bin log
+        logger:write('STA', 'State', 'i', state)
+        logger:write('DCR', 'DescentRate', 'f', descent_rate)
         iteration_counter = 0
     end
     return loop, 50
 end
 
-return loop()   
+return loop()
