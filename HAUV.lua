@@ -1,15 +1,8 @@
---TODO - use all params in script, add necessary ones for quick Configuration
--- Make each state change gcs:text print the reason for it. 
---Add variable tracking (relevant to abort call) to bin log via lua example from Willian:
--- care must be taken when selecting a name, must be less than four characters and not clash with an existing log type
-  -- format characters specify the type of variable to be logged, see AP_Logger/README.md
-  -- https://github.com/ArduPilot/ardupilot/tree/master/libraries/AP_Logger
-  -- not all format types are supported by scripting only: i, L, e, f, n, M, B, I, E, and N
-  -- lua automatically adds a timestamp in micro seconds
- -- logger:write('SCR1','roll(deg),pitch(deg),yaw(deg)','fff',interesting_data[roll],interesting_data[pitch],interesting_data[yaw])
-  -- it is also possible to give units and multipliers
- -- logger:write('SCR2','roll,pitch,yaw','fff','ddd','---',interesting_data[roll],interesting_data[pitch],interesting_data[yaw])
--- Configuration parameters
+-- This script controls the dive mission of a hovering AUV. The vehicle must have the video recorder extension installed,
+-- and the USB video device providing h264 on video 2, and removed from the Video Streams BlueOS page.
+-- The script is executed each time the autopilot starts.
+-- Follow the code to understand the structure, many comments are included...
+
 PARAM_TABLE_KEY = 91
 PARAM_TABLE_PREFIX = 'HOVER_'
 
