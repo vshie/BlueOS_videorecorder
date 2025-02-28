@@ -42,6 +42,14 @@ hover_depth = target_depth:get()-hover_offset:get() -- this may be set shallower
 descent_throttle = bind_add_param('D_THRTL',10,1670) --descend at this throttle
 ascent_throttle = bind_add_param('A_THRTL',11,1400) --ascend at this throttle, only if climb rate not sufficient?
 
+-- Add simulation mode parameter
+sim_mode = bind_add_param('SIM_MODE', 12, 0)  -- 0=normal, 1=simulation - change here and restart autopilot with SITL active
+
+-- Simulation variables
+sim_start_time = 0
+sim_cycle_state = 0  -- 0=not started, 1=waiting to close, 2=closed, 3=waiting to open after surface, 4=open
+sim_switch_timer = 0
+
 -- States
 STANDBY = 0
 COUNTDOWN = 1
@@ -65,14 +73,52 @@ hover_start_time = 0  --  variable to track hover start time, determine duration
 switch_state = 1
 is_recording = 0
 impact_threshold = 0.2-- in m/s, speed of descent is positive
-dive_timeout = 5 --minutes
+dive_timeout = 10 --minutes - need to set based on descent rate measured in deployment 2
 
 gpio:pinMode(27,0) -- set pwm0 to input, used to connect external "arming" switch
 function updateswitch()
-    --switch_state = 1-- for testing sitl
-    switch_state = gpio:read(27)
+    if sim_mode:get() == 1 then
+        -- Simulation mode
+        if sim_cycle_state == 0 then
+            -- Initialize simulation timers
+            sim_start_time = millis()
+            sim_cycle_state = 1
+            switch_state = 0  -- Start with switch open
+            gcs:send_text(6, "Simulation mode active, waiting 5s to close switch")
+        elseif sim_cycle_state == 1 and (millis() > (sim_start_time + 5000)) then
+            -- Close switch after 5 seconds
+            switch_state = 1
+            sim_cycle_state = 2
+            gcs:send_text(6, "Simulation: switch closed")
+        elseif sim_cycle_state == 2 and state == COMPLETE then
+            -- If we've just completed a mission, start the open timer
+            sim_switch_timer = millis()
+            sim_cycle_state = 3
+            gcs:send_text(6, "Simulation: mission complete, switch opening for 10s")
+            switch_state = 0
+        elseif sim_cycle_state == 3 and (millis() > (sim_switch_timer + 10000)) then
+            -- After 10 seconds in the open state, close switch again
+            switch_state = 1
+            sim_cycle_state = 2
+            gcs:send_text(6, "Simulation: switch closed for next mission")
+        end
+    else
+        -- Normal physical switch mode
+        switch_state = gpio:read(27)
+    end
+    
+    -- Common switch handling logic
     if not switch_state and state ~= STANDBY and state ~= COMPLETE then
-       state = ABORT
+        state = ABORT
+        gcs:send_text(6, "Switch opened - aborting mission")
+    end
+    
+    -- Allow restart from COMPLETE or ABORT if switch is closed and we're shallow
+    if switch_state and (state == COMPLETE or state == ABORT) and depth < 3.0 then
+        state = STANDBY
+        has_disarmed = false  -- Reset disarm flag
+        abort_timer = 0       -- Reset abort timer
+        gcs:send_text(6, "Switch closed at shallow depth - ready for new mission")
     end
 end
 
@@ -161,7 +207,7 @@ function control_dive_mission()
                 gcs:send_text(6, "Video recording started at depth")
             end
         end
-        if millis() > (dive_timeout*60000) then 
+        if sim_mode:get() == 0 and millis() > (dive_timeout*60000) then 
             state = ABORT
             gcs:send_text(6, "Dive duration timeout")
         end
@@ -296,11 +342,14 @@ function loop()
         if state == ABORT then
             gcs:send_text(6, "Abort active")
         end
+        if sim_mode:get() == 1 then
+            gcs:send_text(6, string.format("Sim mode: cycle=%d switch=%d", sim_cycle_state, switch_state))
+        end
         gcs:send_named_float("State", state)
         gcs:send_named_float("Depth", depth)
         -- Log state to bin log
         logger:write('STA', 'State', 'i', state)
-        logger:write('DCR', 'DescentRate', 'f', descent_rate)
+        logger:write('DCR', 'DescentRate', 'f', 'm', '-', descent_rate)
         iteration_counter = 0
     end
     return loop, 50
