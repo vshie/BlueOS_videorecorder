@@ -39,7 +39,7 @@ recording_depth = bind_add_param('REC_DEPTH', 7, 5.0)    -- Depth to start recor
 hover_offset = bind_add_param('H_OFF',8,3) --hover this far above of target depth or impact (actual) max depth
 target_depth = bind_add_param('T_DEPTH',9,40) --mqx depth, hover above this if reached
 hover_depth = target_depth:get()-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
-descent_throttle = bind_add_param('D_THRTL',10,1700) --descend at this throttle
+descent_throttle = bind_add_param('D_THRTL',10,1670) --descend at this throttle
 ascent_throttle = bind_add_param('A_THRTL',11,1400) --ascend at this throttle, only if climb rate not sufficient?
 
 -- States
@@ -71,7 +71,7 @@ function updateswitch()
     --switch_state = 1-- for testing sitl
     switch_state = gpio:read(27)
     if not switch_state and state ~= STANDBY and state ~= COMPLETE then
-        state = ABORT
+       state = ABORT
     end
 end
 
@@ -139,10 +139,10 @@ function control_dive_mission()
     
     if state == STANDBY and switch_state then
         state = COUNTDOWN
-        arming:arm()
         gcs:send_text(6, "Switch closed - starting countdown")
         timer = millis() -- start overall dive clock
     elseif state == COUNTDOWN then
+        arming:arm()
         if millis() > (timer + dive_delay_s:get() * 1000) then
             state = DESCENDING
             gcs:send_text(6, "Starting descent")
