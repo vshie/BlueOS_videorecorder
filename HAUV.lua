@@ -58,6 +58,7 @@ timer = 0
 last_depth = 0 --used to track depth to detect collision with bottom
 descent_rate = 0 --m/s
 has_disarmed = false  -- Add this new variable to track disarm status
+abort_timer = 0  -- Add timer for abort sequence
 
 start_ah = 0 -- track power consumption
 hover_start_time = 0  --  variable to track hover start time, determine duration
@@ -201,16 +202,26 @@ function control_dive_mission()
             end
         end
     elseif state == ABORT then
-        set_lights(false)
-        motor_output()
-        if is_recording == 1 then
-            stop_video_recording()
-            is_recording = 0
+        if abort_timer == 0 then
+            -- Initialize abort timer when first entering ABORT state
+            abort_timer = millis()
+            vehicle:set_mode(MODE_MANUAL)
+            if not has_disarmed then
+                arming:disarm()
+                has_disarmed = true
+            end
         end
-        vehicle:set_mode(MODE_MANUAL)
-        if not has_disarmed then
-            arming:disarm()
-            has_disarmed = true
+        
+        motor_output()  -- Keep motors in safe state
+        
+        -- Wait 60 seconds before stopping recording and lights
+        if millis() > (abort_timer + 60000) then
+            if is_recording == 1 then
+                stop_video_recording()
+                is_recording = 0
+            end
+            set_lights(false)
+            abort_timer = 0  -- Reset timer for next abort if it happens
         end
     end
 end
@@ -242,8 +253,8 @@ function start_video_recording()
         return false
     end
 
-    local request = "GET /start?split_duration=2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-    gcs:send_text(6, string.format("Sending request to http://%s:%d/start?split_duration=2", HTTP_HOST, HTTP_PORT))
+    local request = "GET /start HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/start", HTTP_HOST, HTTP_PORT))
     sock:send(request, string.len(request))
     sock:close()
     gcs:send_text(6, "Video recording started")
