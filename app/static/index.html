@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Video Recorder</title>
     <script defer src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
-    <script defer src="/static/app.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -172,23 +171,24 @@
                 <div class="telemetry-item-value" id="telemetryTemp">--</div>
             </div>
             <div class="telemetry-item">
-                <div class="telemetry-item-label">Last Update</div>
+                <div class="telemetry-item-label">Time</div>
                 <div class="telemetry-item-value" id="telemetryTime">--</div>
             </div>
         </div>
     </div>
+
+    <div class="error" id="errorMessage"></div>
     
     <div class="controls">
         <button id="startButton" onclick="startRecording()">Start Recording</button>
         <button id="stopButton" onclick="stopRecording()" disabled>Stop Recording</button>
     </div>
-    <div id="errorMessage" class="error"></div>
+    
     <h2>Recorded Videos</h2>
     <ul id="videoList"></ul>
 
     <!-- Iframe to embed the BlueOS file browser -->
     <iframe src="" style="width: 100%; height: 600px; border: none;"></iframe>
-</body>
 
 <script>
 let recordingTimer;
@@ -254,8 +254,28 @@ function updateRecordingTime() {
     const hours = Math.floor(diff / 3600000);
     const minutes = Math.floor((diff % 3600000) / 60000);
     const seconds = Math.floor((diff % 60000) / 1000);
-    const timeString = `Recording Time: ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    const timeString = ` (${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')})`;
     document.getElementById("recordingTime").innerText = timeString;
+}
+
+async function fetchTelemetry() {
+    try {
+        console.log("Fetching telemetry data...");
+        const response = await axios.get('/telemetry');
+        console.log("Telemetry response:", response.data);
+        
+        if (response.data.success) {
+            document.getElementById("telemetryDepth").textContent = `${response.data.depth} m`;
+            document.getElementById("telemetryClimb").textContent = `${response.data.climb} m/s`;
+            document.getElementById("telemetryTemp").textContent = `${response.data.temperature} °C`;
+            document.getElementById("telemetryTime").textContent = response.data.timestamp;
+        } else {
+            console.error("Telemetry request failed:", response.data.message);
+        }
+    } catch (error) {
+        console.error("Failed to fetch telemetry:", error);
+        // Don't show error on UI as this happens frequently and we don't want to alarm users
+    }
 }
 
 async function fetchVideos() {
@@ -272,30 +292,21 @@ async function fetchVideos() {
             videoList.appendChild(li);
         });
     } catch (error) {
-        document.getElementById("errorMessage").innerText = error.response?.data?.error || "Error fetching videos";
-    }
-}
-
-async function fetchTelemetry() {
-    try {
-        const response = await axios.get('/telemetry');
-        if (response.data.success) {
-            document.getElementById("telemetryDepth").textContent = response.data.depth;
-            document.getElementById("telemetryClimb").textContent = response.data.climb;
-            document.getElementById("telemetryTemp").textContent = response.data.temperature;
-            document.getElementById("telemetryTime").textContent = response.data.timestamp;
-        }
-    } catch (error) {
-        document.getElementById("errorMessage").textContent = error.response?.data?.error || "Error fetching telemetry";
-        document.getElementById("errorMessage").style.display = "block";
+        console.error("Error fetching videos:", error);
     }
 }
 
 // Initial video list fetch
 fetchVideos();
 
+// Initial telemetry fetch
+fetchTelemetry();
+
 // Set up periodic refresh of video list (every 5 seconds)
 fileListTimer = setInterval(fetchVideos, 5000);
+
+// Set up periodic refresh of telemetry (every 5 seconds)
+telemetryTimer = setInterval(fetchTelemetry, 5000);
 
 // Set the iframe source dynamically based on the current host
 window.addEventListener('load', () => {
@@ -310,3 +321,5 @@ window.addEventListener('unload', () => {
     clearInterval(telemetryTimer);
 });
 </script>
+</body>
+</html>
