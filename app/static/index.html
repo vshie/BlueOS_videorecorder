@@ -171,6 +171,10 @@
                 <div class="telemetry-item-value" id="telemetryTemp">--</div>
             </div>
             <div class="telemetry-item">
+                <div class="telemetry-item-label">Lights</div>
+                <div class="telemetry-item-value" id="telemetryLights">--</div>
+            </div>
+            <div class="telemetry-item">
                 <div class="telemetry-item-label">Time</div>
                 <div class="telemetry-item-value" id="telemetryTime">--</div>
             </div>
@@ -268,6 +272,7 @@ async function fetchTelemetry() {
             document.getElementById("telemetryDepth").textContent = `${response.data.depth} m`;
             document.getElementById("telemetryClimb").textContent = `${response.data.climb} m/s`;
             document.getElementById("telemetryTemp").textContent = `${response.data.temperature} °C`;
+            document.getElementById("telemetryLights").textContent = `${response.data.lights}%`;
             document.getElementById("telemetryTime").textContent = response.data.timestamp;
         } else {
             console.error("Telemetry request failed:", response.data.message);

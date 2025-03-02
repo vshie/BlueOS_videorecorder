@@ -149,18 +149,31 @@ end
 
 -- Configuration for lights
 PWM_Lightoff = 1000  -- PWM value for lights off
-PWM_Lightmed = 1850  
+PWM_Lightmed = 1300  -- Changed from 1850 to 1300 as requested
+PWM_Lightmax = 1900  -- Maximum brightness
 local RC9 = rc:get_channel(9)  -- Using Navigator input channel 9 for lights
-local RC3 = rc:get_channel(3)  -- Using Navigator inpout channel 3 for vertical control
+local RC3 = rc:get_channel(3)  -- Using Navigator input channel 3 for vertical control
+
+-- Variables for light control
+local hover_steps = 7
+local current_light_step = 0
+local last_light_change_time = 0
 
 -- Function to control lights
-function set_lights(on)
+function set_lights(on, brightness_override)
+    local pwm_value = PWM_Lightoff
+    
     if on then
-        RC9:set_override(PWM_Lightmed)
-        -- gcs:send_text(6, "Lights turned ON")
+        if brightness_override then
+            -- Use the provided brightness value
+            pwm_value = brightness_override
+        else
+            -- Default behavior when no override provided
+            pwm_value = PWM_Lightmed
+        end
+        RC9:set_override(pwm_value)
     else
         RC9:set_override(PWM_Lightoff)
-        --gcs:send_text(6, "Lights turned OFF")
     end
 end
 
@@ -387,7 +400,34 @@ function control_dive_mission()
             state = HOVERING
         end
 
-    elseif state == HOVERING then       
+    elseif state == HOVERING then
+        -- Calculate light intensity based on hover duration
+        local hover_elapsed = (millis() - hover_start_time) / 1000  -- elapsed time in seconds
+        local hover_duration = hover_time:get() * 60  -- total hover time in seconds
+        local step_duration = hover_duration / hover_steps  -- time for each step in seconds
+        
+        -- Calculate which step we're on
+        local target_step = math.min(math.floor(hover_elapsed / step_duration), hover_steps - 1)
+        
+        -- Update light intensity if step has changed
+        if target_step ~= current_light_step then
+            current_light_step = target_step
+            
+            -- Calculate new PWM value
+            local pwm_range = PWM_Lightmax - PWM_Lightmed
+            local pwm_step = pwm_range / (hover_steps - 1)
+            local new_pwm = math.floor(PWM_Lightmed + (current_light_step * pwm_step))
+            
+            -- Apply new light setting
+            set_lights(true, new_pwm)
+            
+            -- Log the light change
+            gcs:send_text(6, string.format("Light step %d of %d: PWM=%d", 
+                current_light_step + 1, hover_steps, new_pwm))
+            
+            last_light_change_time = millis()
+        end
+        
         if millis() > (hover_start_time + hover_time:get() * 60000) then
             gcs:send_text(6, "Hover time elapsed, transitioning to SURFACING")
             vehicle:set_mode(MODE_MANUAL)

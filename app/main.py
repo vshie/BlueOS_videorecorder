@@ -27,6 +27,7 @@ current_subtitle_file = None
 ahrs2_url = 'http://host.docker.internal/mavlink2rest/mavlink/vehicles/1/components/1/messages/AHRS2'
 vfr_hud_url = 'http://host.docker.internal/mavlink2rest/mavlink/vehicles/1/components/1/messages/VFR_HUD'
 baro_url = 'http://host.docker.internal/mavlink2rest/mavlink/vehicles/1/components/1/messages/SCALED_PRESSURE2'
+rc_channels_url = 'http://host.docker.internal/mavlink2rest/mavlink/vehicles/1/components/1/messages/RC_CHANNELS'
 
 def create_subtitle_file(video_path):
     """Create a new .ass subtitle file and write the header"""
@@ -73,9 +74,10 @@ def update_subtitles():
                 depth = get_depth_data()
                 vfr_data = get_vfr_hud_data()
                 baro_data = get_baro_data()
+                light_percentage = get_light_output()
                 
                 # Format subtitle text - using alignment tag \an8 for top center
-                subtitle_text = f"Dialogue: 0,{start_timestamp},{end_timestamp},Telemetry,,0,0,0,,{{\\an8}}Depth: {depth:.1f}m | Climb: {vfr_data:.2f}m/s | Temp: {baro_data:.1f}°C | Time: {datetime.now().strftime('%H:%M:%S')}"
+                subtitle_text = f"Dialogue: 0,{start_timestamp},{end_timestamp},Telemetry,,0,0,0,,{{\\an8}}Depth: {depth:.1f}m | Climb: {vfr_data:.2f}m/s | Temp: {baro_data:.1f}°C | Lights: {light_percentage}% | Time: {datetime.now().strftime('%H:%M:%S')}"
                 
                 # Append to subtitle file
                 with open(current_subtitle_file, 'a') as f:
@@ -129,6 +131,28 @@ def get_baro_data():
     except Exception as e:
         logger.error(f"Error fetching baro data: {str(e)}")
     return 0.0
+
+def get_light_output():
+    try:
+        response = requests.get(rc_channels_url, timeout=1)
+        data = response.json()
+        
+        if 'message' in data and 'chan9_raw' in data['message']:
+            raw_value = data['message']['chan9_raw']
+            
+            # Convert from 1100-1900 range to 0-100%
+            if raw_value <= 1100:
+                percentage = 0
+            elif raw_value >= 1900:
+                percentage = 100
+            else:
+                percentage = round((raw_value - 1100) / 8.0)  # 800 range / 8 = percentage
+                
+            return percentage
+        return 0  # Default to 0% if not available
+    except Exception as e:
+        logger.error(f"Error getting light output: {str(e)}")
+        return 0
 
 @app.route('/')
 def index():
@@ -295,12 +319,16 @@ def get_telemetry():
         depth = get_depth_data()
         vfr_data = get_vfr_hud_data()
         baro_data = get_baro_data()
+        light_percentage = get_light_output()
+        
+        logger.info(f"Sending telemetry: depth={depth}, climb={vfr_data}, temp={baro_data}, lights={light_percentage}%")
         
         return jsonify({
             "success": True,
             "depth": round(depth, 1),
             "climb": round(vfr_data, 2),
             "temperature": round(baro_data, 1),
+            "lights": light_percentage,
             "timestamp": datetime.now().strftime('%H:%M:%S')
         })
     except Exception as e:
