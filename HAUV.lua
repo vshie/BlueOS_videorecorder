@@ -269,7 +269,7 @@ function motor_output()
             
             -- Only log when the throttle actually changes
             if old_throttle ~= current_ascent_throttle then
-                gcs:send_text(6, string.format("Increasing ascent power: throttle=%d->%d", 
+                gcs:send_text(6, string.format("Increasing a pow: throttle=%d->%d", 
                     old_throttle, current_ascent_throttle))
             end
         elseif current_ascent_rate > target_ascent_rate * 1.5 then
@@ -517,7 +517,6 @@ function loop()
         -- Log state to bin log (5x more frequently)
         logger:write('STA', 'State', 'i', state)
         logger:write('DCR', 'DescentRate', 'f', 'm', '-', descent_rate)
-        logger:write('THR', 'Throttle', 'i', current_descent_throttle)
     end
   
     -- GCS messages and other status checks (original frequency - every 50 iterations)

@@ -105,6 +105,45 @@
             border: 1px solid #ccc;
             background-color: white;
         }
+        
+        .telemetry-container {
+            margin: 20px 0;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background-color: #f9f9f9;
+        }
+        
+        .telemetry-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        
+        .telemetry-data {
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+        }
+        
+        .telemetry-item {
+            flex: 1;
+            min-width: 120px;
+            margin: 5px;
+            padding: 8px;
+            background-color: white;
+            border-radius: 4px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .telemetry-item-label {
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .telemetry-item-value {
+            font-size: 1.2em;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
@@ -113,8 +152,32 @@
         <p>Using camera device: <strong>/dev/video2</strong></p>
     </div>
     <div class="status-container">
-        <p>Status: <span id="recordingStatus">Stopped</span></p>
+        <p>Status: <span id="recordingStatus">Stopped</span><span id="recordingTime" style="display: none;"></span></p>
     </div>
+    
+    <!-- Telemetry Panel -->
+    <div class="telemetry-container">
+        <div class="telemetry-title">Live Telemetry</div>
+        <div class="telemetry-data">
+            <div class="telemetry-item">
+                <div class="telemetry-item-label">Depth</div>
+                <div class="telemetry-item-value" id="telemetryDepth">--</div>
+            </div>
+            <div class="telemetry-item">
+                <div class="telemetry-item-label">Climb Rate</div>
+                <div class="telemetry-item-value" id="telemetryClimb">--</div>
+            </div>
+            <div class="telemetry-item">
+                <div class="telemetry-item-label">Temperature</div>
+                <div class="telemetry-item-value" id="telemetryTemp">--</div>
+            </div>
+            <div class="telemetry-item">
+                <div class="telemetry-item-label">Last Update</div>
+                <div class="telemetry-item-value" id="telemetryTime">--</div>
+            </div>
+        </div>
+    </div>
+    
     <div class="controls">
         <button id="startButton" onclick="startRecording()">Start Recording</button>
         <button id="stopButton" onclick="stopRecording()" disabled>Stop Recording</button>
@@ -124,35 +187,64 @@
     <ul id="videoList"></ul>
 
     <!-- Iframe to embed the BlueOS file browser -->
-    <iframe src="`http://${window.location.host}:7777/filebrowser/files/extensions/videorecorder`" style="width: 100%; height: 600px; border: none;"></iframe>
+    <iframe src="" style="width: 100%; height: 600px; border: none;"></iframe>
 </body>
 
 <script>
 let recordingTimer;
 let startTime;
 let fileListTimer;
+let telemetryTimer;
 
 async function startRecording() {
     try {
-        await axios.get('/start');
-        document.getElementById("errorMessage").innerText = "";
-        startTime = new Date();
-        document.getElementById("recordingTime").style.display = "block";
-        recordingTimer = setInterval(updateRecordingTime, 1000);
+        const response = await axios.get('/start');
+        if (response.data.success) {
+            document.getElementById("errorMessage").style.display = "none";
+            document.getElementById("recordingStatus").textContent = "Recording";
+            document.getElementById("recordingStatus").className = "recording";
+            document.getElementById("startButton").disabled = true;
+            document.getElementById("stopButton").disabled = false;
+            
+            startTime = new Date();
+            document.getElementById("recordingTime").style.display = "inline";
+            recordingTimer = setInterval(updateRecordingTime, 1000);
+            
+            // Start more frequent telemetry updates when recording
+            clearInterval(telemetryTimer);
+            telemetryTimer = setInterval(fetchTelemetry, 1000);
+        } else {
+            document.getElementById("errorMessage").textContent = response.data.message || "Failed to start recording";
+            document.getElementById("errorMessage").style.display = "block";
+        }
     } catch (error) {
-        document.getElementById("errorMessage").innerText = error.response?.data?.error || "An unknown error occurred";
+        document.getElementById("errorMessage").textContent = error.response?.data?.message || "An unknown error occurred";
+        document.getElementById("errorMessage").style.display = "block";
     }
 }
 
 async function stopRecording() {
     try {
-        await axios.get('/stop');
-        document.getElementById("errorMessage").innerText = "";
-        clearInterval(recordingTimer);
-        document.getElementById("recordingTime").style.display = "none";
-        await fetchVideos();
+        const response = await axios.get('/stop');
+        if (response.data.success) {
+            document.getElementById("errorMessage").style.display = "none";
+            document.getElementById("recordingStatus").textContent = "Stopped";
+            document.getElementById("recordingStatus").className = "";
+            document.getElementById("startButton").disabled = false;
+            document.getElementById("stopButton").disabled = true;
+            
+            clearInterval(recordingTimer);
+            document.getElementById("recordingTime").style.display = "none";
+            
+            // Slow down telemetry updates when not recording
+            clearInterval(telemetryTimer);
+            telemetryTimer = setInterval(fetchTelemetry, 5000);
+            
+            await fetchVideos();
+        }
     } catch (error) {
-        document.getElementById("errorMessage").innerText = error.response?.data?.error || "An unknown error occurred";
+        document.getElementById("errorMessage").textContent = error.response?.data?.error || "An unknown error occurred";
+        document.getElementById("errorMessage").style.display = "block";
     }
 }
 
@@ -184,19 +276,37 @@ async function fetchVideos() {
     }
 }
 
+async function fetchTelemetry() {
+    try {
+        const response = await axios.get('/telemetry');
+        if (response.data.success) {
+            document.getElementById("telemetryDepth").textContent = response.data.depth;
+            document.getElementById("telemetryClimb").textContent = response.data.climb;
+            document.getElementById("telemetryTemp").textContent = response.data.temperature;
+            document.getElementById("telemetryTime").textContent = response.data.timestamp;
+        }
+    } catch (error) {
+        document.getElementById("errorMessage").textContent = error.response?.data?.error || "Error fetching telemetry";
+        document.getElementById("errorMessage").style.display = "block";
+    }
+}
+
 // Initial video list fetch
 fetchVideos();
 
 // Set up periodic refresh of video list (every 5 seconds)
 fileListTimer = setInterval(fetchVideos, 5000);
- // Set the iframe source dynamically based on the current host
- window.addEventListener('load', () => {
-        const iframe = document.querySelector('iframe');
-        iframe.src = `http://${window.location.hostname}:7777/files/extensions/videorecorder`;
-    });
+
+// Set the iframe source dynamically based on the current host
+window.addEventListener('load', () => {
+    const iframe = document.querySelector('iframe');
+    iframe.src = `http://${window.location.hostname}:7777/files/extensions/videorecorder`;
+});
+
 // Clean up timer when page is unloaded
 window.addEventListener('unload', () => {
     clearInterval(fileListTimer);
     clearInterval(recordingTimer);
+    clearInterval(telemetryTimer);
 });
 </script>
