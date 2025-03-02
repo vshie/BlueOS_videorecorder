@@ -31,7 +31,7 @@ WORKDIR /app
 COPY app/ .
 
 # Install Python dependencies
-RUN pip3 install flask
+RUN pip3 install flask requests
 
 # Create directory for video recordings
 RUN mkdir -p /app/videorecordings
