@@ -2,9 +2,8 @@
 -- and the USB video device providing h264 on video 2, and removed from the Video Streams BlueOS page.
 -- The script is executed each time the autopilot starts.
 -- Follow the code to understand the structure, many comments are included...
-
 PARAM_TABLE_KEY = 91
-PARAM_TABLE_PREFIX = 'HOVER_'
+PARAM_TABLE_PREFIX = 'HAUV_'
 
 -- Parameter binding helper functions
 function bind_param(name)
@@ -23,20 +22,26 @@ assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 32), 'could not add 
 
 -- Add configurable parameters with defaults
 dive_delay_s = bind_add_param('DELAY_S', 1, 30)      -- Countdown before dive
-light_depth = bind_add_param('LIGHT_D', 2, 7.0)     -- Depth to turn on lights (m)
+light_depth = bind_add_param('LIGHT_D', 2, 35.0)     -- Depth to turn on lights (m)
 hover_time = bind_add_param('HOVER_M', 3, 1.0)       -- Minutes to hover
 surf_depth = bind_add_param('SURF_D', 4, 2.0)        -- Surface threshold
 max_ah = bind_add_param('MAX_AH', 5, 12.0)           -- Max amp-hours
-min_voltage = bind_add_param('MIN_V', 6, 13.0)       -- Min battery voltage
-recording_depth = bind_add_param('REC_DEPTH', 7, 5.0)    -- Depth to start recording
+min_voltage = bind_add_param('MIN_V', 6, 13.5)       -- Min battery voltage
+recording_depth = bind_add_param('REC_DEPTH', 7, 15.0)    -- Depth to start recording
 hover_offset = bind_add_param('H_OFF',8,3) --hover this far above of target depth or impact (actual) max depth
-target_depth = bind_add_param('T_DEPTH',9,40) --mqx depth, hover above this if reached
+target_depth = bind_add_param('T_DEPTH',9,410) --max depth, hover above this if reached (updated from 40 to 410)
 hover_depth = target_depth:get()-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
-descent_throttle = bind_add_param('D_THRTL',10,1670) --descend at this throttle
+descent_throttle = bind_add_param('D_THRTL',10,1700) --descend at this throttle
 ascent_throttle = bind_add_param('A_THRTL',11,1400) --ascend at this throttle, only if climb rate not sufficient?
 
 -- Add simulation mode parameter
 sim_mode = bind_add_param('SIM_MODE', 12, 0)  -- 0=normal, 1=simulation - change here and restart autopilot with SITL active
+-- New parameters for dynamic throttle control
+max_descent_rate = bind_add_param('MAX_D_RATE',13,1.0) -- Maximum descent rate (m/s)
+min_ascent_rate = bind_add_param('MIN_A_RATE',14,0.5) -- Minimum ascent rate (m/s)
+target_ascent_rate = bind_add_param('TGT_A_RATE',15,1.25) -- Target ascent rate (m/s)
+throttle_step = bind_add_param('THRTL_STEP',16,10) -- Throttle adjustment step
+timeout_buffer = bind_add_param('T_BUFFER',17,1.5) -- Buffer multiplier for timeout calculation
 
 -- Simulation variables
 sim_start_time = 0
@@ -87,10 +92,10 @@ function updateswitch()
             -- If we've just completed a mission, start the open timer
             sim_switch_timer = millis()
             sim_cycle_state = 3
-            gcs:send_text(6, "Simulation: mission complete, switch opening for 10s")
+            gcs:send_text(6, "Simulation: mission complete, switch opening for 30s")
             switch_state = 0
-        elseif sim_cycle_state == 3 and (millis() > (sim_switch_timer + 10000)) then
-            -- After 10 seconds in the open state, close switch again
+        elseif sim_cycle_state == 3 and (millis() > (sim_switch_timer + 30000)) then
+            -- After 30 seconds in the open state, close switch again
             switch_state = 1
             sim_cycle_state = 2
             gcs:send_text(6, "Simulation: switch closed for next mission")
@@ -117,7 +122,7 @@ end
 
 -- Configuration for lights
 PWM_Lightoff = 1000  -- PWM value for lights off
-PWM_Lightmed = 1600  -- PWM value for medium brightness
+PWM_Lightmed = 1850  
 local RC9 = rc:get_channel(9)  -- Using Navigator input channel 9 for lights
 local RC3 = rc:get_channel(3)  -- Using Navigator inpout channel 3 for vertical control
 
@@ -148,38 +153,79 @@ MODE_MANUAL = 19
 MODE_STABILIZE = 0
 MODE_ALT_HOLD = 2
 
+-- Variables for dynamic throttle control
+current_descent_throttle = descent_throttle:get()
+current_ascent_throttle = ascent_throttle:get()
+
 --function to control motors - will this conflict with alt_hode mode? Does not require vehicle to be armed...
 
 function motor_output()
-    
     if state == ABORT then-- turn motors off!!
         SRV_Channels:set_output_pwm_chan_timeout(5-1, 1500, 100)
         SRV_Channels:set_output_pwm_chan_timeout(6-1, 1500, 100)
+    elseif state == DESCENDING then
+        -- Apply dynamic throttle control during descent
+        if descent_rate > max_descent_rate:get() then
+            -- Descent too fast, reduce throttle
+            current_descent_throttle = math.max(1500, current_descent_throttle - throttle_step:get())
+            gcs:send_text(6, string.format("Reducing descent throttle to %d, rate: %.2f", current_descent_throttle, descent_rate))
+        else
+            -- Gradually restore to parameter value
+            current_descent_throttle = math.min(descent_throttle:get(), current_descent_throttle + throttle_step:get()/2)
+        end
+        
+        SRV_Channels:set_output_pwm_chan_timeout(5-1, current_descent_throttle, 100)
+        SRV_Channels:set_output_pwm_chan_timeout(6-1, current_descent_throttle, 100)
+    elseif state == ASCEND_TOHOVER or state == SURFACING then
+        -- Check if ascent rate is too slow (descent_rate > -min_ascent_rate means not climbing fast enough)
+        if descent_rate > -min_ascent_rate:get() then --add negative because climb rate is positive downwards when fetched
+            -- Not ascending fast enough, increase throttle (decrease PWM value)
+            current_ascent_throttle = math.max(1000, current_ascent_throttle - throttle_step:get())
+            gcs:send_text(6, string.format("Increasing ascent throttle to %d, rate: %.2f", current_ascent_throttle, descent_rate))
+        elseif descent_rate < -target_ascent_rate:get() then
+            -- Ascending too fast, decrease throttle (increase PWM value)
+            current_ascent_throttle = math.min(1500, current_ascent_throttle + throttle_step:get()/2)
+        end
+        
+        SRV_Channels:set_output_pwm_chan_timeout(5-1, current_ascent_throttle, 100)
+        SRV_Channels:set_output_pwm_chan_timeout(6-1, current_ascent_throttle, 100)
     else
-        SRV_Channels:set_output_pwm_chan_timeout(5-1, descent_throttle:get(), 100)
-        SRV_Channels:set_output_pwm_chan_timeout(6-1, descent_throttle:get(), 100) --opposite because reverse parameter doesn't carry over
+        -- Default behavior for other states
+        SRV_Channels:set_output_pwm_chan_timeout(5-1, 1500, 100)
+        SRV_Channels:set_output_pwm_chan_timeout(6-1, 1500, 100)
     end
 end
 
 --timer = millis()-- remember to move this when leaving SITL!
 
+-- Calculate dive timeout based on target depth and rates
+-- Formula: timeout = (descent_time + hover_time + ascent_time) * buffer
+function calculate_dive_timeout()
+    local descent_time_min = target_depth:get() / (max_descent_rate:get() * 60) -- Convert to minutes
+    local ascent_time_min = target_depth:get() / (min_ascent_rate:get() * 60)   -- Convert to minutes
+    local hover_time_min = hover_time:get()
+    
+    local estimated_total_min = descent_time_min + hover_time_min + ascent_time_min
+    local timeout_with_buffer = estimated_total_min * timeout_buffer:get()
+    
+    -- Set a minimum timeout of 10 minutes
+    return math.max(10, timeout_with_buffer)
+end
+
+-- Calculate the initial dive timeout
+dive_timeout = calculate_dive_timeout()
+
 -- State machine to control dive mission! When diving, we arm and go to alt_hold, and command a constant descent throttle determined experimentally. Then after detecting low descent rate from hitting bottom, we go to stabilize mode. When we cross hoverdepth, we revertback to alt_hold for hover time then manual mode to ascend to surface passively! 
 function control_dive_mission()
-    -- if  not switch_state and state ~= STANDBY or state ~=COMPLETE then
-    --     state = ABORT
-    -- end
-    -- if batV < min_voltage:get() and state ~= STANDBY and state ~= COUNTDOWN then --or (mah - start_mah) >(max_ah:get() * 1000) and state ~= COMPLETE then
-    --     gcs:send_text(6, "Battery low - aborting")
-    --     state = ABORT
-    -- end
-  
     if state == STANDBY then
         set_lights(false)
     end
     
     if state == STANDBY and switch_state then
+        -- Only recalculate timeout when starting a new mission
+        dive_timeout = calculate_dive_timeout()
         state = COUNTDOWN
-        gcs:send_text(6, "Switch closed - starting countdown")
+        gcs:send_text(6, string.format("Switch closed - starting countdown. Timeout: %.1f min", dive_timeout))
         timer = millis() -- start overall dive clock
     elseif state == COUNTDOWN then
         arming:arm()
@@ -188,6 +234,12 @@ function control_dive_mission()
             gcs:send_text(6, "Starting descent")
         end
     elseif state == DESCENDING then
+        -- Check battery voltage during descent
+        if batV < min_voltage:get() then
+            state = ABORT
+            gcs:send_text(6, string.format("Low battery voltage: %.1fV - aborting mission", batV))
+        end
+        
         vehicle:set_mode(MODE_MANUAL)
         motor_output()
 
@@ -200,7 +252,7 @@ function control_dive_mission()
                 gcs:send_text(6, "Video recording started at depth")
             end
         end
-        if sim_mode:get() == 0 and millis() > (dive_timeout*60000) then 
+        if millis() > (timer + dive_timeout*60000) then 
             state = ABORT
             gcs:send_text(6, "Dive duration timeout")
         end
@@ -237,6 +289,7 @@ function control_dive_mission()
                 gcs:send_text(6, "Video recording stopped during surfacing")
                 set_lights(false)
                 arming:disarm()
+                is_recording = 0
                 state = COMPLETE
             end
         end
@@ -262,6 +315,12 @@ function control_dive_mission()
             set_lights(false)
             abort_timer = 0  -- Reset timer for next abort if it happens
         end
+    end
+
+    -- Reset throttle values when transitioning states
+    if state == COUNTDOWN then
+        current_descent_throttle = descent_throttle:get()
+        current_ascent_throttle = ascent_throttle:get()
     end
 end
 -- Transition to HOVERING state
@@ -330,6 +389,15 @@ function loop()
     control_dive_mission()
     -- Increment the iteration counter
     iteration_counter = iteration_counter + 1
+    -- Log data to bin log at higher frequency (every 10 iterations)
+    if iteration_counter % 10 == 0 then
+        -- Log state to bin log (5x more frequently)
+        logger:write('STA', 'State', 'i', state)
+        logger:write('DCR', 'DescentRate', 'f', 'm', '-', descent_rate)
+        logger:write('THR', 'Throttle', 'i', current_descent_throttle)
+    end
+  
+    -- GCS messages and other status checks (original frequency - every 50 iterations)
     if iteration_counter % 50 == 0 then
         gcs:send_text(6,string.format("state:%d %.1f %.1f", state, depth, descent_rate))
         if state == ABORT then
@@ -340,11 +408,11 @@ function loop()
         end
         gcs:send_named_float("State", state)
         gcs:send_named_float("Depth", depth)
-        -- Log state to bin log
-        logger:write('STA', 'State', 'i', state)
-        logger:write('DCR', 'DescentRate', 'f', 'm', '-', descent_rate)
+        
+        -- Only reset counter after completing a full cycle
         iteration_counter = 0
     end
+    
     return loop, 50
 end
 
