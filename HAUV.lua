@@ -22,17 +22,17 @@ assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 32), 'could not add 
 
 -- Add configurable parameters with defaults
 dive_delay_s = bind_add_param('DELAY_S', 1, 30)      -- Countdown before dive
-light_depth = bind_add_param('LIGHT_D', 2, 35.0)     -- Depth to turn on lights (m)
+light_depth = bind_add_param('LIGHT_D', 2, 7.0)     -- Depth to turn on lights (m)
 hover_time = bind_add_param('HOVER_M', 3, 1.0)       -- Minutes to hover
 surf_depth = bind_add_param('SURF_D', 4, 2.0)        -- Surface threshold
 max_ah = bind_add_param('MAX_AH', 5, 12.0)           -- Max amp-hours
-min_voltage = bind_add_param('MIN_V', 6, 13.5)       -- Min battery voltage
-recording_depth = bind_add_param('REC_DEPTH', 7, 15.0)    -- Depth to start recording
+min_voltage = bind_add_param('MIN_V', 6, 13.0)       -- Min battery voltage
+recording_depth = bind_add_param('REC_DEPTH', 7, 5.0)    -- Depth to start recording
 hover_offset = bind_add_param('H_OFF',8,3) --hover this far above of target depth or impact (actual) max depth
 target_depth = bind_add_param('T_DEPTH',9,410) --max depth, hover above this if reached (updated from 40 to 410)
 hover_depth = target_depth:get()-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
-descent_throttle = bind_add_param('D_THRTL',10,1700) --descend at this throttle
-ascent_throttle = bind_add_param('A_THRTL',11,1400) --ascend at this throttle, only if climb rate not sufficient?
+descent_throttle = bind_add_param('D_THRTL',10,1740 ) --descend at this throttle
+ascent_throttle = bind_add_param('A_THRTL',11,1460) --ascend at this throttle, only if climb rate not sufficient?
 
 -- Add simulation mode parameter
 sim_mode = bind_add_param('SIM_MODE', 12, 0)  -- 0=normal, 1=simulation - change here and restart autopilot with SITL active
@@ -41,7 +41,7 @@ max_descent_rate = bind_add_param('MAX_D_RATE',13,1.0) -- Maximum descent rate (
 min_ascent_rate = bind_add_param('MIN_A_RATE',14,0.5) -- Minimum ascent rate (m/s)
 target_ascent_rate = bind_add_param('TGT_A_RATE',15,1.25) -- Target ascent rate (m/s)
 throttle_step = bind_add_param('THRTL_STEP',16,10) -- Throttle adjustment step
-timeout_buffer = bind_add_param('T_BUFFER',17,1.5) -- Buffer multiplier for timeout calculation
+timeout_buffer = bind_add_param('T_BUFFER',17,1.3) -- Buffer multiplier for timeout calculation
 
 -- Simulation variables
 sim_start_time = 0
@@ -65,15 +65,15 @@ last_depth = 0 --used to track depth to detect collision with bottom
 descent_rate = 0 --m/s
 has_disarmed = false  -- Add this new variable to track disarm status
 abort_timer = 0  -- Add timer for abort sequence
-
 start_ah = 0 -- track power consumption
 hover_start_time = 0  --  variable to track hover start time, determine duration
 switch_state = 1
 is_recording = 0
 impact_threshold = 0.2-- in m/s, speed of descent is positive
 dive_timeout = 10 --minutes - need to set based on descent rate measured in deployment 2
-
 gpio:pinMode(27,0) -- set pwm0 to input, used to connect external "arming" switch
+switch_opened_after_complete = false -- Flag to track if switch was opened after mission completion
+
 function updateswitch()
     if sim_mode:get() == 1 then
         -- Simulation mode
@@ -106,13 +106,28 @@ function updateswitch()
     end
     
     -- Common switch handling logic
-    if not switch_state and state ~= STANDBY and state ~= COMPLETE then
-        state = ABORT
-        gcs:send_text(6, "Switch opened - aborting mission")
+    if not switch_state then
+        if state == COMPLETE then
+            -- Mark that the switch has been opened after completion
+            switch_opened_after_complete = true
+            gcs:send_text(6, "Switch opened after mission completion - ready for reset")
+        elseif state ~= STANDBY then
+            state = ABORT
+            gcs:send_text(6, "Switch opened - aborting mission")
+        end
     end
     
-    -- Allow restart from COMPLETE or ABORT if switch is closed and we're shallow
-    if switch_state and (state == COMPLETE or state == ABORT) and depth < 3.0 then
+    -- Allow restart from COMPLETE only if switch was opened and then closed
+    if switch_state and state == COMPLETE and switch_opened_after_complete and depth < 3.0 then
+        state = STANDBY
+        has_disarmed = false  -- Reset disarm flag
+        abort_timer = 0       -- Reset abort timer
+        switch_opened_after_complete = false  -- Reset the switch toggle flag
+        gcs:send_text(6, "Switch closed after reset - ready for new mission")
+    end
+    
+    -- Allow restart from ABORT if switch is closed and we're shallow
+    if switch_state and state == ABORT and depth < 3.0 then
         state = STANDBY
         has_disarmed = false  -- Reset disarm flag
         abort_timer = 0       -- Reset abort timer
@@ -122,7 +137,7 @@ end
 
 -- Configuration for lights
 PWM_Lightoff = 1000  -- PWM value for lights off
-PWM_Lightmed = 1850  
+PWM_Lightmed = 1600  
 local RC9 = rc:get_channel(9)  -- Using Navigator input channel 9 for lights
 local RC3 = rc:get_channel(3)  -- Using Navigator inpout channel 3 for vertical control
 
@@ -180,7 +195,7 @@ function motor_output()
         -- Check if ascent rate is too slow (descent_rate > -min_ascent_rate means not climbing fast enough)
         if descent_rate > -min_ascent_rate:get() then --add negative because climb rate is positive downwards when fetched
             -- Not ascending fast enough, increase throttle (decrease PWM value)
-            current_ascent_throttle = math.max(1000, current_ascent_throttle - throttle_step:get())
+            current_ascent_throttle = math.max(1200, current_ascent_throttle - throttle_step:get())
             gcs:send_text(6, string.format("Increasing ascent throttle to %d, rate: %.2f", current_ascent_throttle, descent_rate))
         elseif descent_rate < -target_ascent_rate:get() then
             -- Ascending too fast, decrease throttle (increase PWM value)
@@ -195,8 +210,6 @@ function motor_output()
         SRV_Channels:set_output_pwm_chan_timeout(6-1, 1500, 100)
     end
 end
-
---timer = millis()-- remember to move this when leaving SITL!
 
 -- Calculate dive timeout based on target depth and rates
 -- Formula: timeout = (descent_time + hover_time + ascent_time) * buffer
@@ -234,10 +247,10 @@ function control_dive_mission()
             gcs:send_text(6, "Starting descent")
         end
     elseif state == DESCENDING then
-        -- Check battery voltage during descent
-        if batV < min_voltage:get() then
+        -- Check battery voltage during descent - using fixed 13.5V threshold
+        if batV < 13.5 then
             state = ABORT
-            gcs:send_text(6, string.format("Low battery voltage: %.1fV - aborting mission", batV))
+            gcs:send_text(6, string.format("Low battery voltage during descent: %.1fV - aborting mission", batV))
         end
         
         vehicle:set_mode(MODE_MANUAL)
@@ -291,6 +304,9 @@ function control_dive_mission()
                 arming:disarm()
                 is_recording = 0
                 state = COMPLETE
+                -- Reset switch_opened_after_complete when entering COMPLETE state
+                switch_opened_after_complete = false
+                gcs:send_text(6, "Mission complete - open switch to reset")
             end
         end
     elseif state == ABORT then

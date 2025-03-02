@@ -18,45 +18,6 @@ process = None
 recording = False
 start_time = None
 
-def init_camera():
-    """Initialize camera by recording a short test video"""
-    logger.info("Initializing camera with test recording...")
-    try:
-        os.makedirs("/app/videorecordings", exist_ok=True)
-        test_file = "/app/videorecordings/camera_init.mp4"
-        
-        # Remove old test file if it exists
-        if os.path.exists(test_file):
-            os.remove(test_file)
-            
-        pipeline = ("v4l2src device=/dev/video2 ! "
-            "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
-            f"h264parse ! mp4mux ! filesink location={test_file}")
-
-        command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
-        
-        proc = subprocess.Popen(command,
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE)
-        
-        # Record for 2 seconds
-        time.sleep(2)
-        
-        # Gracefully stop recording
-        proc.send_signal(signal.SIGINT)
-        proc.wait(timeout=7)
-        
-        # Clean up test file
-        if os.path.exists(test_file):
-            os.remove(test_file)
-            
-        logger.info("Camera initialization complete")
-    except Exception as e:
-        logger.error(f"Camera initialization failed: {str(e)}")
-
-# Run initialization when the app starts
-init_camera()
-
 @app.route('/')
 def index():
     return app.send_static_file('index.html')
