@@ -3,7 +3,7 @@
 -- The script is executed each time the autopilot starts.
 -- Follow the code to understand the structure, many comments are included...
 PARAM_TABLE_KEY = 91
-PARAM_TABLE_PREFIX = 'HAUV_'
+PARAM_TABLE_PREFIX = 'HOVER_'
 
 -- Parameter binding helper functions
 function bind_param(name)
@@ -29,17 +29,16 @@ max_ah = bind_add_param('MAX_AH', 5, 12.0)           -- Max amp-hours
 min_voltage = bind_add_param('MIN_V', 6, 13.0)       -- Min battery voltage
 recording_depth = bind_add_param('REC_DEPTH', 7, 5.0)    -- Depth to start recording
 hover_offset = bind_add_param('H_OFF',8,3) --hover this far above of target depth or impact (actual) max depth
-target_depth = bind_add_param('T_DEPTH',9,410) --max depth, hover above this if reached (updated from 40 to 410)
+target_depth = bind_add_param('T_DEPTH',9,60) --max depth, hover above this if reached (updated from 40 to 410)
 hover_depth = target_depth:get()-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
-descent_throttle = bind_add_param('D_THRTL',10,1740 ) --descend at this throttle
+descent_throttle = bind_add_param('D_THRTL',10,1800 ) --descend at this throttle
 ascent_throttle = bind_add_param('A_THRTL',11,1460) --ascend at this throttle, only if climb rate not sufficient?
 
 -- Add simulation mode parameter
 sim_mode = bind_add_param('SIM_MODE', 12, 0)  -- 0=normal, 1=simulation - change here and restart autopilot with SITL active
 -- New parameters for dynamic throttle control
 max_descent_rate = bind_add_param('MAX_D_RATE',13,1.0) -- Maximum descent rate (m/s)
-min_ascent_rate = bind_add_param('MIN_A_RATE',14,0.5) -- Minimum ascent rate (m/s)
-target_ascent_rate = bind_add_param('TGT_A_RATE',15,1.25) -- Target ascent rate (m/s)
+min_ascent_rate = bind_add_param('MIN_A_RATE',14,0.7) -- Minimum ascent rate (m/s)
 throttle_step = bind_add_param('THRTL_STEP',16,10) -- Throttle adjustment step
 timeout_buffer = bind_add_param('T_BUFFER',17,1.3) -- Buffer multiplier for timeout calculation
 
@@ -70,6 +69,10 @@ hover_start_time = 0  --  variable to track hover start time, determine duration
 switch_state = 1
 is_recording = 0
 impact_threshold = 0.2-- in m/s, speed of descent is positive
+impact_detection_count = 0  -- Count consecutive slow readings
+slow_zone_entered = false   -- Flag to track if we've entered slow zone
+slow_zone_time = 0          -- Time when we entered slow zone
+slow_zone_grace_period = 5000  -- 5 second grace period after throttle change
 dive_timeout = 10 --minutes - need to set based on descent rate measured in deployment 2
 gpio:pinMode(27,0) -- set pwm0 to input, used to connect external "arming" switch
 switch_opened_after_complete = false -- Flag to track if switch was opened after mission completion
@@ -99,6 +102,15 @@ function updateswitch()
             switch_state = 1
             sim_cycle_state = 2
             gcs:send_text(6, "Simulation: switch closed for next mission")
+            
+            -- Force reset to STANDBY state
+            if state == COMPLETE then
+                state = STANDBY
+                has_disarmed = false
+                abort_timer = 0
+                switch_opened_after_complete = false
+                gcs:send_text(6, "Simulation: state reset for new mission")
+            end
         end
     else
         -- Normal physical switch mode
@@ -137,7 +149,7 @@ end
 
 -- Configuration for lights
 PWM_Lightoff = 1000  -- PWM value for lights off
-PWM_Lightmed = 1600  
+PWM_Lightmed = 1850  
 local RC9 = rc:get_channel(9)  -- Using Navigator input channel 9 for lights
 local RC3 = rc:get_channel(3)  -- Using Navigator inpout channel 3 for vertical control
 
@@ -161,6 +173,11 @@ function get_data()
     end
     --mah = battery:consumed_mah(0)
     batV = battery:voltage(0)
+    
+    -- Override battery voltage in simulation mode
+    if sim_mode:get() == 1 then
+        batV = 14.0  -- Simulate full battery in sim mode
+    end
 end
 
 -- Mode definitions
@@ -179,29 +196,95 @@ function motor_output()
         SRV_Channels:set_output_pwm_chan_timeout(5-1, 1500, 100)
         SRV_Channels:set_output_pwm_chan_timeout(6-1, 1500, 100)
     elseif state == DESCENDING then
+        -- Calculate distance to target depth
+        local remaining_distance = target_depth:get() - depth
+        local slow_descent_zone = 40 -- slow down when within 40m of target depth
+        
         -- Apply dynamic throttle control during descent
-        if descent_rate > max_descent_rate:get() then
-            -- Descent too fast, reduce throttle
-            current_descent_throttle = math.max(1500, current_descent_throttle - throttle_step:get())
-            gcs:send_text(6, string.format("Reducing descent throttle to %d, rate: %.2f", current_descent_throttle, descent_rate))
+        if remaining_distance < slow_descent_zone then
+            -- Track when we first enter the slow zone
+            if not slow_zone_entered then
+                slow_zone_entered = true
+                slow_zone_time = millis()
+                gcs:send_text(6, "Entering slow descent zone")
+            end
+            -- Within 40m of target depth - reduce to 50% descent speed
+            -- Calculate 50% between neutral (1500) and full descent throttle
+            local reduced_throttle = 1500 + (descent_throttle:get() - 1500) * 0.5
+            current_descent_throttle = reduced_throttle
+            
+            if descent_rate > max_descent_rate:get() * 0.5 then
+                -- Still descending too fast, reduce throttle further
+                current_descent_throttle = math.max(1500, current_descent_throttle - throttle_step:get())
+                gcs:send_text(6, string.format("Reducing throttle in slow zone: %d, rate: %.2f", current_descent_throttle, descent_rate))
+            end
         else
-            -- Gradually restore to parameter value
-            current_descent_throttle = math.min(descent_throttle:get(), current_descent_throttle + throttle_step:get()/2)
+            slow_zone_entered = false  -- Reset flag when outside slow zone
+            
+            -- Normal descent rate control
+            if descent_rate > max_descent_rate:get() then
+                -- Descent too fast, reduce throttle
+                current_descent_throttle = math.max(1500, current_descent_throttle - throttle_step:get())
+                gcs:send_text(6, string.format("Reducing descent throttle to %d, rate: %.2f", current_descent_throttle, descent_rate))
+            else
+                -- Gradually restore to parameter value
+                current_descent_throttle = math.min(descent_throttle:get(), current_descent_throttle + throttle_step:get()/2)
+            end
         end
         
         SRV_Channels:set_output_pwm_chan_timeout(5-1, current_descent_throttle, 100)
         SRV_Channels:set_output_pwm_chan_timeout(6-1, current_descent_throttle, 100)
     elseif state == ASCEND_TOHOVER or state == SURFACING then
-        -- Check if ascent rate is too slow (descent_rate > -min_ascent_rate means not climbing fast enough)
-        if descent_rate > -min_ascent_rate:get() then --add negative because climb rate is positive downwards when fetched
-            -- Not ascending fast enough, increase throttle (decrease PWM value)
-            current_ascent_throttle = math.max(1200, current_ascent_throttle - throttle_step:get())
-            gcs:send_text(6, string.format("Increasing ascent throttle to %d, rate: %.2f", current_ascent_throttle, descent_rate))
-        elseif descent_rate < -target_ascent_rate:get() then
-            -- Ascending too fast, decrease throttle (increase PWM value)
-            current_ascent_throttle = math.min(1500, current_ascent_throttle + throttle_step:get()/2)
+        -- Set different target ascent rates for each state
+        local target_ascent_rate
+        if state == ASCEND_TOHOVER then
+            -- Use half the ascent rate for the more controlled ascent to hover
+            target_ascent_rate = min_ascent_rate:get() * 0.5
+        else -- SURFACING
+            -- Use full ascent rate parameter for surfacing
+            target_ascent_rate = min_ascent_rate:get()
         end
         
+        -- Initialize current throttle value if needed
+        if not current_ascent_throttle or current_ascent_throttle == 1500 then
+            current_ascent_throttle = ascent_throttle:get()
+            gcs:send_text(6, string.format("Initializing ascent throttle: %d", current_ascent_throttle))
+        end
+        
+        -- In ArduSub, descent_rate is positive when going down, negative when going up
+        -- So current_ascent_rate should be the negative of descent_rate
+        local current_ascent_rate = -descent_rate
+        
+        -- Log ascent status periodically rather than every iteration
+        if iteration_counter % 50 == 0 then
+            gcs:send_text(6, string.format("Ascent status: state=%d, rate=%.2f, target=%.2f, throttle=%d", 
+                state, current_ascent_rate, target_ascent_rate, current_ascent_throttle))
+        end
+        
+        -- Adjust throttle if needed
+        if current_ascent_rate < target_ascent_rate then
+            -- Not ascending fast enough, increase throttle (reduce PWM)
+            local old_throttle = current_ascent_throttle
+            current_ascent_throttle = math.max(1200, current_ascent_throttle - throttle_step:get())
+            
+            -- Only log when the throttle actually changes
+            if old_throttle ~= current_ascent_throttle then
+                gcs:send_text(6, string.format("Increasing ascent power: throttle=%d->%d", 
+                    old_throttle, current_ascent_throttle))
+            end
+        elseif current_ascent_rate > target_ascent_rate * 1.5 then
+            -- Ascending too fast, gradually reduce throttle
+            local old_throttle = current_ascent_throttle
+            current_ascent_throttle = math.min(1500, current_ascent_throttle + throttle_step:get()/2)
+            
+            -- Only log when the throttle actually changes
+            if old_throttle ~= current_ascent_throttle then
+                gcs:send_text(6, string.format("Reducing ascent power: throttle=%d->%d", 
+                    old_throttle, current_ascent_throttle))
+            end
+        end
+        
+        -- Apply current throttle value to both motors
         SRV_Channels:set_output_pwm_chan_timeout(5-1, current_ascent_throttle, 100)
         SRV_Channels:set_output_pwm_chan_timeout(6-1, current_ascent_throttle, 100)
     else
@@ -222,7 +305,12 @@ function calculate_dive_timeout()
     local timeout_with_buffer = estimated_total_min * timeout_buffer:get()
     
     -- Set a minimum timeout of 10 minutes
-    return math.max(10, timeout_with_buffer)
+    local final_timeout = math.max(10, timeout_with_buffer)
+    
+    -- Print just the final calculated timeout
+    gcs:send_text(6, string.format("Calculated dive timeout: %.1f minutes", final_timeout))
+    
+    return final_timeout
 end
 
 -- Calculate the initial dive timeout
@@ -247,8 +335,8 @@ function control_dive_mission()
             gcs:send_text(6, "Starting descent")
         end
     elseif state == DESCENDING then
-        -- Check battery voltage during descent - using fixed 13.5V threshold
-        if batV < 13.5 then
+        -- Check battery voltage during descent - using parameter value, not hardcoded
+        if batV < min_voltage:get() then
             state = ABORT
             gcs:send_text(6, string.format("Low battery voltage during descent: %.1fV - aborting mission", batV))
         end
@@ -269,9 +357,17 @@ function control_dive_mission()
             state = ABORT
             gcs:send_text(6, "Dive duration timeout")
         end
-        if depth > 5 and descent_rate < impact_threshold then --handles impact detection
-            gcs:send_text(6, "Impact detected, transitioning to Ascend to hover")
-            transition_to_hovering()
+        if depth > 5 and descent_rate < impact_threshold then
+            -- Don't detect impact during the grace period after entering slow zone
+            if not (slow_zone_entered and (millis() - slow_zone_time < slow_zone_grace_period)) then
+                impact_detection_count = impact_detection_count + 1
+                if impact_detection_count >= 3 then  -- Require 3 consecutive detections
+                    gcs:send_text(6, string.format("Impact detected at %.1fm, rate: %.2f", depth, descent_rate))
+                    transition_to_hovering()
+                end
+            end
+        else
+            impact_detection_count = 0  -- Reset counter if descent rate is normal
         end
         if depth > target_depth:get() then --handles target depth reached
             gcs:send_text(6, "Target depth reached")
@@ -281,22 +377,29 @@ function control_dive_mission()
 
 
     elseif state == ASCEND_TOHOVER then
+        vehicle:set_mode(MODE_MANUAL)  -- Set to MANUAL to allow direct motor control
+        motor_output()  -- Add call to motor_output for ASCEND_TOHOVER state
         if depth < hover_depth then 
             vehicle:set_mode(MODE_ALT_HOLD)
             hover_start_time = millis()
             gcs:send_text(6, "Transitioning to HOVERING state")
-            hover_start_time = millis()  -- Record the start time of hovering
+            hover_start_time = millis()
             state = HOVERING
         end
 
     elseif state == HOVERING then       
-        
         if millis() > (hover_start_time + hover_time:get() * 60000) then
             gcs:send_text(6, "Hover time elapsed, transitioning to SURFACING")
             vehicle:set_mode(MODE_MANUAL)
             state = SURFACING
+            -- Ensure ascent throttle is properly initialized when entering SURFACING state
+            current_ascent_throttle = ascent_throttle:get()
+            gcs:send_text(6, string.format("Starting surfacing with throttle: %d", current_ascent_throttle))
         end
     elseif state == SURFACING then
+        vehicle:set_mode(MODE_MANUAL)  --Set to MANUAL to allow direct motor control
+        motor_output()  -- Add call to motor_output for SURFACING state
+        
         if depth < surf_depth:get() then
             if stop_video_recording() then
                 gcs:send_text(6, "Video recording stopped during surfacing")
@@ -337,6 +440,8 @@ function control_dive_mission()
     if state == COUNTDOWN then
         current_descent_throttle = descent_throttle:get()
         current_ascent_throttle = ascent_throttle:get()
+        impact_detection_count = 0
+        slow_zone_entered = false
     end
 end
 -- Transition to HOVERING state
@@ -344,6 +449,8 @@ function transition_to_hovering()
     hover_depth = depth - hover_offset:get()
     hover_start_time = millis()
     state = ASCEND_TOHOVER
+    current_ascent_throttle = ascent_throttle:get()  -- Initialize ascent throttle when transitioning
+    gcs:send_text(6, string.format("Transitioning to ascend, initial throttle: %d", current_ascent_throttle))
     RC3:set_override(1500)
 end
 
