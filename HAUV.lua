@@ -76,6 +76,7 @@ slow_zone_grace_period = 5000  -- 5 second grace period after throttle change
 dive_timeout = 10 --minutes - need to set based on descent rate measured in deployment 2
 gpio:pinMode(27,0) -- set pwm0 to input, used to connect external "arming" switch
 switch_opened_after_complete = false -- Flag to track if switch was opened after mission completion
+lights_off_reported = false  -- Reset the reporting flag
 
 function updateswitch()
     if sim_mode:get() == 1 then
@@ -333,6 +334,7 @@ dive_timeout = calculate_dive_timeout()
 function control_dive_mission()
     if state == STANDBY then
         set_lights(false)
+        lights_off_reported = false  -- Reset the reporting flag
     end
     
     if state == STANDBY and switch_state then
@@ -450,6 +452,18 @@ function control_dive_mission()
                 -- Reset switch_opened_after_complete when entering COMPLETE state
                 switch_opened_after_complete = false
                 gcs:send_text(6, "Mission complete - open switch to reset")
+            end
+        end
+        
+        -- Calculate depth difference from the actual hover depth
+        local depth_difference = hover_depth - depth
+        
+        -- Turn off lights if we're 50m or more above hover depth
+        if depth_difference >= 50 then
+            set_lights(false)
+            if not lights_off_reported then
+                gcs:send_text(6, "Lights turned off at 50m above hover depth")
+                lights_off_reported = true
             end
         end
     elseif state == ABORT then
