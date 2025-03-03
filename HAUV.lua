@@ -76,7 +76,20 @@ slow_zone_grace_period = 5000  -- 5 second grace period after throttle change
 dive_timeout = 10 --minutes - need to set based on descent rate measured in deployment 2
 gpio:pinMode(27,0) -- set pwm0 to input, used to connect external "arming" switch
 switch_opened_after_complete = false -- Flag to track if switch was opened after mission completion
-lights_off_reported = false  -- Reset the reporting flag
+lights_off_reported = false  -- Flag to track if we've reported turning off lights
+last_log_time = 0  -- For tracking light intensity logging
+
+-- Add these initializations near the other global variables
+hover_iteration_count = 0
+hover_total_iterations = 0
+
+-- Completely change how we manage light PWM
+-- Create a dedicated light control table that can't be accidentally overwritten
+light_control = {
+    current_pwm = PWM_Lightoff,
+    last_change_time = 0,
+    last_step = -1
+}
 
 function updateswitch()
     if sim_mode:get() == 1 then
@@ -166,8 +179,8 @@ function set_lights(on, brightness_override)
     
     if on then
         if brightness_override then
-            -- Use the provided brightness value
-            pwm_value = brightness_override
+            -- Use the provided brightness value, converted to a plain number
+            pwm_value = brightness_override + 0  -- Adding zero forces conversion to regular number
         else
             -- Default behavior when no override provided
             pwm_value = PWM_Lightmed
@@ -398,49 +411,78 @@ function control_dive_mission()
             vehicle:set_mode(MODE_ALT_HOLD)
             hover_start_time = millis()
             gcs:send_text(6, "Transitioning to HOVERING state")
-            hover_start_time = millis()
             state = HOVERING
         end
 
     elseif state == HOVERING then
-        -- Calculate light intensity based on hover duration
-        local hover_elapsed = (millis() - hover_start_time) / 1000  -- elapsed time in seconds
-        local hover_duration = hover_time:get() * 60  -- total hover time in seconds
-        local step_duration = hover_duration / hover_steps  -- time for each step in seconds
-        
-        -- Calculate which step we're on
-        local target_step = math.min(math.floor(hover_elapsed / step_duration), hover_steps - 1)
-        
-        -- Update light intensity if step has changed
-        if target_step ~= current_light_step then
-            current_light_step = target_step
+        -- First time entering this state, initialize
+        if hover_start_time == 0 then
+            hover_start_time = millis()
+            light_control.last_change_time = millis()
+            light_control.current_pwm = PWM_Lightmed
+            light_control.last_step = 0
             
-            -- Calculate new PWM value
-            local pwm_range = PWM_Lightmax - PWM_Lightmed
-            local pwm_step = pwm_range / (hover_steps - 1)
-            local new_pwm = math.floor(PWM_Lightmed + (current_light_step * pwm_step))
-            
-            -- Apply new light setting
-            set_lights(true, new_pwm)
-            
-            -- Log the light change
-            gcs:send_text(6, string.format("Light step %d of %d: PWM=%d", 
-                current_light_step + 1, hover_steps, new_pwm))
-            
-            last_light_change_time = millis()
+            -- Start with first light setting
+            set_lights(true, PWM_Lightmed)
+            gcs:send_text(6, string.format("Hover started - lights at %d", PWM_Lightmed))
         end
         
-        if millis() > (hover_start_time + hover_time:get() * 60000) then
-            gcs:send_text(6, "Hover time elapsed, transitioning to SURFACING")
+        -- Always apply the current light setting on every loop iteration
+        set_lights(true, light_control.current_pwm)
+        
+        -- Current time
+        local current_time = millis()
+        
+        -- Simple light control: 10 steps from PWM_Lightmed to PWM_Lightmax
+        local hover_duration_ms = hover_time:get() * 60 * 1000
+        local step_interval_ms = hover_duration_ms / 10
+        local step_increment = (PWM_Lightmax - PWM_Lightmed) / 10
+        
+        -- Check if it's time for the next step
+        if current_time - hover_start_time > (light_control.last_step + 1) * step_interval_ms then
+            -- Move to next step (max 10 steps)
+            light_control.last_step = math.min(light_control.last_step + 1, 10)
+            
+            -- Calculate new PWM - simple arithmetic
+            local new_pwm = PWM_Lightmed + (step_increment * light_control.last_step)
+            new_pwm = math.floor(new_pwm)
+            
+            -- Set the new value
+            light_control.current_pwm = new_pwm
+            
+            gcs:send_text(6, string.format("Light step %d/10: PWM=%d", 
+                light_control.last_step, new_pwm))
+        end
+        
+        -- Check if hover time is complete
+        if current_time > (hover_start_time + hover_duration_ms) then
+            -- Ensure final light value is maximum
+            set_lights(true, PWM_Lightmax)
+            gcs:send_text(6, "Hover complete - lights at maximum")
+            
             vehicle:set_mode(MODE_MANUAL)
             state = SURFACING
-            -- Ensure ascent throttle is properly initialized when entering SURFACING state
+            hover_start_time = 0  -- Reset for next time
+            
+            -- Ensure ascent throttle is properly initialized
             current_ascent_throttle = ascent_throttle:get()
             gcs:send_text(6, string.format("Starting surfacing with throttle: %d", current_ascent_throttle))
         end
     elseif state == SURFACING then
         vehicle:set_mode(MODE_MANUAL)  --Set to MANUAL to allow direct motor control
         motor_output()  -- Add call to motor_output for SURFACING state
+        
+        -- Calculate depth difference from the actual hover depth
+        local depth_difference = hover_depth - depth
+        
+        -- Turn off lights if we're 50m or more above hover depth
+        if depth_difference >= 50 then
+            set_lights(false)
+            if not lights_off_reported then
+                gcs:send_text(6, "Lights turned off at 50m above hover depth")
+                lights_off_reported = true
+            end
+        end
         
         if depth < surf_depth:get() then
             if stop_video_recording() then
@@ -452,18 +494,6 @@ function control_dive_mission()
                 -- Reset switch_opened_after_complete when entering COMPLETE state
                 switch_opened_after_complete = false
                 gcs:send_text(6, "Mission complete - open switch to reset")
-            end
-        end
-        
-        -- Calculate depth difference from the actual hover depth
-        local depth_difference = hover_depth - depth
-        
-        -- Turn off lights if we're 50m or more above hover depth
-        if depth_difference >= 50 then
-            set_lights(false)
-            if not lights_off_reported then
-                gcs:send_text(6, "Lights turned off at 50m above hover depth")
-                lights_off_reported = true
             end
         end
     elseif state == ABORT then
@@ -501,7 +531,6 @@ end
 -- Transition to HOVERING state
 function transition_to_hovering()
     hover_depth = depth - hover_offset:get()
-    hover_start_time = millis()
     state = ASCEND_TOHOVER
     current_ascent_throttle = ascent_throttle:get()  -- Initialize ascent throttle when transitioning
     gcs:send_text(6, string.format("Transitioning to ascend, initial throttle: %d", current_ascent_throttle))

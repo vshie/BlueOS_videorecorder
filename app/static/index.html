@@ -199,24 +199,14 @@ let recordingTimer;
 let startTime;
 let fileListTimer;
 let telemetryTimer;
+let statusCheckTimer;
 
 async function startRecording() {
     try {
         const response = await axios.get('/start');
         if (response.data.success) {
             document.getElementById("errorMessage").style.display = "none";
-            document.getElementById("recordingStatus").textContent = "Recording";
-            document.getElementById("recordingStatus").className = "recording";
-            document.getElementById("startButton").disabled = true;
-            document.getElementById("stopButton").disabled = false;
-            
-            startTime = new Date();
-            document.getElementById("recordingTime").style.display = "inline";
-            recordingTimer = setInterval(updateRecordingTime, 1000);
-            
-            // Start more frequent telemetry updates when recording
-            clearInterval(telemetryTimer);
-            telemetryTimer = setInterval(fetchTelemetry, 1000);
+            updateUIToRecording();
         } else {
             document.getElementById("errorMessage").textContent = response.data.message || "Failed to start recording";
             document.getElementById("errorMessage").style.display = "block";
@@ -232,24 +222,45 @@ async function stopRecording() {
         const response = await axios.get('/stop');
         if (response.data.success) {
             document.getElementById("errorMessage").style.display = "none";
-            document.getElementById("recordingStatus").textContent = "Stopped";
-            document.getElementById("recordingStatus").className = "";
-            document.getElementById("startButton").disabled = false;
-            document.getElementById("stopButton").disabled = true;
-            
-            clearInterval(recordingTimer);
-            document.getElementById("recordingTime").style.display = "none";
-            
-            // Slow down telemetry updates when not recording
-            clearInterval(telemetryTimer);
-            telemetryTimer = setInterval(fetchTelemetry, 5000);
-            
+            updateUIToStopped();
             await fetchVideos();
         }
     } catch (error) {
         document.getElementById("errorMessage").textContent = error.response?.data?.error || "An unknown error occurred";
         document.getElementById("errorMessage").style.display = "block";
     }
+}
+
+// New function to update UI when recording starts
+function updateUIToRecording() {
+    document.getElementById("recordingStatus").textContent = "Recording";
+    document.getElementById("recordingStatus").className = "recording";
+    document.getElementById("startButton").disabled = true;
+    document.getElementById("stopButton").disabled = false;
+    
+    startTime = new Date();
+    document.getElementById("recordingTime").style.display = "inline";
+    clearInterval(recordingTimer);
+    recordingTimer = setInterval(updateRecordingTime, 1000);
+    
+    // Start more frequent telemetry updates when recording
+    clearInterval(telemetryTimer);
+    telemetryTimer = setInterval(fetchTelemetry, 1000);
+}
+
+// New function to update UI when recording stops
+function updateUIToStopped() {
+    document.getElementById("recordingStatus").textContent = "Stopped";
+    document.getElementById("recordingStatus").className = "";
+    document.getElementById("startButton").disabled = false;
+    document.getElementById("stopButton").disabled = true;
+    
+    clearInterval(recordingTimer);
+    document.getElementById("recordingTime").style.display = "none";
+    
+    // Slow down telemetry updates when not recording
+    clearInterval(telemetryTimer);
+    telemetryTimer = setInterval(fetchTelemetry, 5000);
 }
 
 function updateRecordingTime() {
@@ -260,6 +271,34 @@ function updateRecordingTime() {
     const seconds = Math.floor((diff % 60000) / 1000);
     const timeString = ` (${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')})`;
     document.getElementById("recordingTime").innerText = timeString;
+}
+
+// New function to check recording status from the server
+async function checkRecordingStatus() {
+    try {
+        const response = await axios.get('/status');
+        const isRecording = response.data.recording;
+        const currentUIState = document.getElementById("recordingStatus").textContent === "Recording";
+        
+        // If status has changed, update UI to match
+        if (isRecording && !currentUIState) {
+            console.log("Detected recording started externally");
+            // Set startTime based on server's start_time if available
+            if (response.data.start_time) {
+                startTime = new Date(response.data.start_time);
+            } else {
+                startTime = new Date();
+            }
+            updateUIToRecording();
+        } else if (!isRecording && currentUIState) {
+            console.log("Detected recording stopped externally");
+            updateUIToStopped();
+            // Refresh video list when recording stops
+            await fetchVideos();
+        }
+    } catch (error) {
+        console.error("Error checking recording status:", error);
+    }
 }
 
 async function fetchTelemetry() {
@@ -301,17 +340,15 @@ async function fetchVideos() {
     }
 }
 
-// Initial video list fetch
+// Initial setup
 fetchVideos();
-
-// Initial telemetry fetch
 fetchTelemetry();
+checkRecordingStatus();  // Check initial status
 
-// Set up periodic refresh of video list (every 5 seconds)
+// Set up periodic refreshes
 fileListTimer = setInterval(fetchVideos, 5000);
-
-// Set up periodic refresh of telemetry (every 5 seconds)
 telemetryTimer = setInterval(fetchTelemetry, 5000);
+statusCheckTimer = setInterval(checkRecordingStatus, 2000);  // Check status every 2 seconds
 
 // Set the iframe source dynamically based on the current host
 window.addEventListener('load', () => {
@@ -319,11 +356,12 @@ window.addEventListener('load', () => {
     iframe.src = `http://${window.location.hostname}:7777/files/extensions/videorecorder`;
 });
 
-// Clean up timer when page is unloaded
+// Clean up timers when page is unloaded
 window.addEventListener('unload', () => {
     clearInterval(fileListTimer);
     clearInterval(recordingTimer);
     clearInterval(telemetryTimer);
+    clearInterval(statusCheckTimer);  // Clean up new timer
 });
 </script>
 </body>
