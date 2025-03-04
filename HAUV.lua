@@ -284,7 +284,7 @@ function motor_output()
         
         -- Log ascent status periodically rather than every iteration
         if iteration_counter % 50 == 0 then
-            gcs:send_text(6, string.format("Ascent status: state=%d, rate=%.2f, target=%.2f, throttle=%d", 
+            gcs:send_text(6, string.format("A stat: state=%d, rate=%.2f, target=%.2f, throttle=%d", 
                 state, current_ascent_rate, target_ascent_rate, current_ascent_throttle))
         end
         
@@ -407,6 +407,7 @@ function control_dive_mission()
     elseif state == ASCEND_TOHOVER then
         vehicle:set_mode(MODE_MANUAL)  -- Set to MANUAL to allow direct motor control
         motor_output()  -- Add call to motor_output for ASCEND_TOHOVER state
+        set_lights(true, PWM_Lightmed)  -- Keep lights on at medium brightness
         if depth < hover_depth then 
             vehicle:set_mode(MODE_ALT_HOLD)
             hover_start_time = millis()
@@ -472,22 +473,25 @@ function control_dive_mission()
         vehicle:set_mode(MODE_MANUAL)  --Set to MANUAL to allow direct motor control
         motor_output()  -- Add call to motor_output for SURFACING state
         
-        -- Calculate depth difference from the actual hover depth
-        local depth_difference = hover_depth - depth
+        -- Calculate distance above hover depth to turn off lights (20m)
+        local light_off_depth = hover_depth - 20
         
-        -- Turn off lights if we're 50m or more above hover depth
-        if depth_difference >= 50 then
+        -- Turn off lights when 20m above hover depth, but keep them on otherwise
+        if depth < light_off_depth then
             set_lights(false)
             if not lights_off_reported then
-                gcs:send_text(6, "Lights turned off at 50m above hover depth")
+                gcs:send_text(6, "Lights turned off during ascent")
                 lights_off_reported = true
             end
+        else
+            -- Keep lights at maximum brightness until 20m above hover depth
+            set_lights(true, PWM_Lightmax)
         end
         
         if depth < surf_depth:get() then
             if stop_video_recording() then
                 gcs:send_text(6, "Video recording stopped during surfacing")
-                set_lights(false)
+                set_lights(false)  -- Ensure lights are off when surfacing
                 arming:disarm()
                 is_recording = 0
                 state = COMPLETE
