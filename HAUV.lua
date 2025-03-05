@@ -41,6 +41,8 @@ max_descent_rate = bind_add_param('MAX_D_RATE',13,1.0) -- Maximum descent rate (
 min_ascent_rate = bind_add_param('MIN_A_RATE',14,0.7) -- Minimum ascent rate (m/s)
 throttle_step = bind_add_param('THRTL_STEP',16,10) -- Throttle adjustment step
 timeout_buffer = bind_add_param('T_BUFFER',17,1.3) -- Buffer multiplier for timeout calculation
+-- New parameter for surface maintaining throttle
+surface_depth_threshold = bind_add_param('SURF_DEPTH',19,0.65) -- Depth threshold to increase throttle (m)
 
 -- Simulation variables
 sim_start_time = 0
@@ -106,12 +108,18 @@ function updateswitch()
             sim_cycle_state = 2
             gcs:send_text(6, "Simulation: switch closed")
         elseif sim_cycle_state == 2 and state == COMPLETE then
-            -- If we've just completed a mission, start the open timer
+            -- If we've just completed a mission, start the delay timer
             sim_switch_timer = millis()
             sim_cycle_state = 3
-            gcs:send_text(6, "Simulation: mission complete, switch opening for 30s")
-            switch_state = 0
-        elseif sim_cycle_state == 3 and (millis() > (sim_switch_timer + 30000)) then
+            gcs:send_text(6, "Simulation: mission complete, waiting 60s before opening switch")
+            switch_state = 1  -- Keep switch closed during delay
+        elseif sim_cycle_state == 3 and (millis() > (sim_switch_timer + 60000)) then
+            -- After 60 seconds delay, open the switch for 30 seconds
+            sim_switch_timer = millis()  -- Reset timer for the open period
+            sim_cycle_state = 4
+            gcs:send_text(6, "Simulation: opening switch for 30s")
+            switch_state = 0  -- Open the switch
+        elseif sim_cycle_state == 4 and (millis() > (sim_switch_timer + 30000)) then
             -- After 30 seconds in the open state, close switch again
             switch_state = 1
             sim_cycle_state = 2
@@ -137,6 +145,9 @@ function updateswitch()
             -- Mark that the switch has been opened after completion
             switch_opened_after_complete = true
             gcs:send_text(6, "Switch opened after mission completion - ready for reset")
+            -- Now it's safe to disarm the vehicle
+            arming:disarm()
+            gcs:send_text(6, "Vehicle disarmed - motors off")
         elseif state ~= STANDBY then
             state = ABORT
             gcs:send_text(6, "Switch opened - aborting mission")
@@ -234,7 +245,15 @@ function motor_output()
                 slow_zone_entered = true
                 slow_zone_time = millis()
                 gcs:send_text(6, "Entering slow descent zone")
+                
+                -- Set lights to maximum brightness when entering slow zone
+                set_lights(true, PWM_Lightmax)
+                gcs:send_text(6, "Lights set to maximum brightness in slow descent zone")
             end
+            
+            -- Ensure lights remain at maximum brightness throughout slow zone
+            set_lights(true, PWM_Lightmax)
+            
             -- Within 40m of target depth - reduce to 50% descent speed
             -- Calculate 50% between neutral (1500) and full descent throttle
             local reduced_throttle = 1500 + (descent_throttle:get() - 1500) * 0.5
@@ -315,7 +334,7 @@ function motor_output()
         SRV_Channels:set_output_pwm_chan_timeout(5-1, current_ascent_throttle, 100)
         SRV_Channels:set_output_pwm_chan_timeout(6-1, current_ascent_throttle, 100)
     else
-        -- Default behavior for other states
+        -- Default behavior for all other states
         SRV_Channels:set_output_pwm_chan_timeout(5-1, 1500, 100)
         SRV_Channels:set_output_pwm_chan_timeout(6-1, 1500, 100)
     end
@@ -372,9 +391,19 @@ function control_dive_mission()
         vehicle:set_mode(MODE_MANUAL)
         motor_output()
 
+        -- Explicit light control
         if depth > light_depth:get() then
-            set_lights(true)
+            -- If in slow descent zone, always use maximum brightness
+            local remaining_distance = target_depth:get() - depth
+            if remaining_distance < 40 then  -- 40m is the slow_descent_zone
+                set_lights(true, PWM_Lightmax)
+            else
+                set_lights(true)  -- Default medium brightness
+            end
+        else
+            set_lights(false)  -- Lights off when shallow
         end
+        
         if depth > recording_depth:get() and is_recording == 0 then
             if start_video_recording() then
                 is_recording = 1
@@ -492,12 +521,25 @@ function control_dive_mission()
             if stop_video_recording() then
                 gcs:send_text(6, "Video recording stopped during surfacing")
                 set_lights(false)  -- Ensure lights are off when surfacing
+                -- Reintroduce the disarm command
                 arming:disarm()
                 is_recording = 0
                 state = COMPLETE
                 -- Reset switch_opened_after_complete when entering COMPLETE state
                 switch_opened_after_complete = false
-                gcs:send_text(6, "Mission complete - open switch to reset")
+                gcs:send_text(6, "Mission complete - disarmed")
+                gcs:send_text(6, "Open switch to reset")
+            end
+        end
+    elseif state == COMPLETE then
+        -- If depth increases above threshold, set to ALT_HOLD mode to maintain position
+        -- This prevents sinking if the vehicle is at the surface and starts to drift deeper
+        if depth > surface_depth_threshold:get() then
+            -- Only arm and set mode if we're not already armed
+            if not arming:is_armed() then
+                arming:arm()
+                vehicle:set_mode(MODE_ALT_HOLD)
+                gcs:send_text(6, string.format("Depth increased to %.2fm - setting ALT_HOLD mode", depth))
             end
         end
     elseif state == ABORT then
@@ -612,6 +654,7 @@ function loop()
         if state == ABORT then
             gcs:send_text(6, "Abort active")
         end
+
         if sim_mode:get() == 1 then
             gcs:send_text(6, string.format("Sim mode: cycle=%d switch=%d", sim_cycle_state, switch_state))
         end
