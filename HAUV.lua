@@ -530,7 +530,7 @@ function control_dive_mission()
         
         -- Log hover status periodically (every 10 seconds)
         if iteration_counter % 200 == 0 then  -- 200 iterations * 50ms = 10 seconds
-            local elapsed_hover_time = (current_time - hover_start_time) / 1000  -- Convert to seconds
+            local elapsed_hover_time = (current_time - hover_start_time + 0) / 1000  -- Convert to seconds and force number conversion
             local total_hover_time = hover_time:get() * 60  -- Convert to seconds
             gcs:send_text(6, string.format("Hover: %.1fs/%.1fs elapsed, step %d/10, depth %.1fm", 
                 elapsed_hover_time, total_hover_time, light_control.last_step, depth))
