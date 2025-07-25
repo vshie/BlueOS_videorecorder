@@ -85,6 +85,10 @@ last_log_time = 0  -- For tracking light intensity logging
 hover_iteration_count = 0
 hover_total_iterations = 0
 
+-- ALT_HOLD mode tracking
+last_vehicle_mode = -1
+alt_hold_exit_detected = false
+
 -- Completely change how we manage light PWM
 -- Create a dedicated light control table that can't be accidentally overwritten
 light_control = {
@@ -215,6 +219,17 @@ function get_data()
     -- Override battery voltage in simulation mode
     if sim_mode:get() == 1 then
         batV = 14.0  -- Simulate full battery in sim mode
+    end
+    
+    -- Track vehicle mode changes to detect ALT_HOLD exits
+    local current_mode = vehicle:get_mode()
+    if last_vehicle_mode ~= current_mode then
+        if last_vehicle_mode == MODE_ALT_HOLD and current_mode ~= MODE_ALT_HOLD then
+            -- ALT_HOLD mode was exited
+            alt_hold_exit_detected = true
+            gcs:send_text(6, string.format("ALT_HOLD mode exited - current mode: %d", current_mode))
+        end
+        last_vehicle_mode = current_mode
     end
 end
 
@@ -375,6 +390,11 @@ function control_dive_mission()
         state = COUNTDOWN
         gcs:send_text(6, string.format("Switch closed - starting countdown. Timeout: %.1f min", dive_timeout))
         timer = millis() -- start overall dive clock
+        
+        -- Reset ALT_HOLD tracking for new mission
+        alt_hold_exit_detected = false
+        last_vehicle_mode = -1
+        gcs:send_text(6, "ALT_HOLD tracking reset for new mission")
     elseif state == COUNTDOWN then
         arming:arm()
         if millis() > (timer + dive_delay_s:get() * 1000) then
@@ -437,6 +457,7 @@ function control_dive_mission()
         vehicle:set_mode(MODE_MANUAL)  -- Set to MANUAL to allow direct motor control
         motor_output()  -- Add call to motor_output for ASCEND_TOHOVER state
         set_lights(true, PWM_Lightmed)  -- Keep lights on at medium brightness
+        
         if depth < hover_depth then 
             vehicle:set_mode(MODE_ALT_HOLD)
             hover_start_time = millis()
@@ -484,19 +505,35 @@ function control_dive_mission()
                 light_control.last_step, new_pwm))
         end
         
-        -- Check if hover time is complete
+        -- Check if hover time is complete - ONLY based on elapsed time, not depth
         if current_time > (hover_start_time + hover_duration_ms) then
             -- Ensure final light value is maximum
             set_lights(true, PWM_Lightmax)
             gcs:send_text(6, "Hover complete - lights at maximum")
             
-            vehicle:set_mode(MODE_MANUAL)
+            -- Clear ALT_HOLD exit detection before transitioning to prevent re-entry
+            alt_hold_exit_detected = false
             state = SURFACING
+            vehicle:set_mode(MODE_MANUAL)
+            
             hover_start_time = 0  -- Reset for next time
             
             -- Ensure ascent throttle is properly initialized
             current_ascent_throttle = ascent_throttle:get()
             gcs:send_text(6, string.format("Starting surfacing with throttle: %d", current_ascent_throttle))
+        elseif alt_hold_exit_detected then
+            -- ALT_HOLD mode was exited during active hover - re-enter immediately
+            vehicle:set_mode(MODE_ALT_HOLD)
+            alt_hold_exit_detected = false
+            gcs:send_text(6, "Re-entering ALT_HOLD mode after exit")
+        end
+        
+        -- Log hover status periodically (every 10 seconds)
+        if iteration_counter % 200 == 0 then  -- 200 iterations * 50ms = 10 seconds
+            local elapsed_hover_time = (current_time - hover_start_time) / 1000  -- Convert to seconds
+            local total_hover_time = hover_time:get() * 60  -- Convert to seconds
+            gcs:send_text(6, string.format("Hover: %.1fs/%.1fs elapsed, step %d/10, depth %.1fm", 
+                elapsed_hover_time, total_hover_time, light_control.last_step, depth))
         end
     elseif state == SURFACING then
         vehicle:set_mode(MODE_MANUAL)  --Set to MANUAL to allow direct motor control
@@ -658,6 +695,7 @@ function loop()
         if sim_mode:get() == 1 then
             gcs:send_text(6, string.format("Sim mode: cycle=%d switch=%d", sim_cycle_state, switch_state))
         end
+        
         gcs:send_named_float("State", state)
         gcs:send_named_float("Depth", depth)
         
