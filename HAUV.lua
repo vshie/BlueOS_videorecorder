@@ -277,7 +277,7 @@ function motor_output()
             if descent_rate > max_descent_rate:get() * 0.5 then
                 -- Still descending too fast, reduce throttle further
                 current_descent_throttle = math.max(1500, current_descent_throttle - throttle_step:get())
-                gcs:send_text(6, string.format("Reducing throttle in slow zone: %d, rate: %.2f", current_descent_throttle, descent_rate))
+                gcs:send_text(6, string.format("Reducing throttle in slow zone: %d, rate: %.2f", current_descent_throttle + 0, descent_rate))
             end
         else
             slow_zone_entered = false  -- Reset flag when outside slow zone
@@ -286,7 +286,7 @@ function motor_output()
             if descent_rate > max_descent_rate:get() then
                 -- Descent too fast, reduce throttle
                 current_descent_throttle = math.max(1500, current_descent_throttle - throttle_step:get())
-                gcs:send_text(6, string.format("Reducing descent throttle to %d, rate: %.2f", current_descent_throttle, descent_rate))
+                gcs:send_text(6, string.format("Reducing descent throttle to %d, rate: %.2f", current_descent_throttle + 0, descent_rate))
             else
                 -- Gradually restore to parameter value
                 current_descent_throttle = math.min(descent_throttle:get(), current_descent_throttle + throttle_step:get()/2)
@@ -309,7 +309,7 @@ function motor_output()
         -- Initialize current throttle value if needed
         if not current_ascent_throttle or current_ascent_throttle == 1500 then
             current_ascent_throttle = ascent_throttle:get()
-            gcs:send_text(6, string.format("Initializing ascent throttle: %d", current_ascent_throttle))
+            gcs:send_text(6, string.format("Initializing ascent throttle: %d", current_ascent_throttle + 0))
         end
         
         -- In ArduSub, descent_rate is positive when going down, negative when going up
@@ -319,7 +319,7 @@ function motor_output()
         -- Log ascent status periodically rather than every iteration
         if iteration_counter % 50 == 0 then
             gcs:send_text(6, string.format("A stat: state=%d, rate=%.2f, target=%.2f, throttle=%d", 
-                state, current_ascent_rate, target_ascent_rate, current_ascent_throttle))
+                state, current_ascent_rate, target_ascent_rate, current_ascent_throttle + 0))
         end
         
         -- Adjust throttle if needed
@@ -520,7 +520,7 @@ function control_dive_mission()
             
             -- Ensure ascent throttle is properly initialized
             current_ascent_throttle = ascent_throttle:get()
-            gcs:send_text(6, string.format("Starting surfacing with throttle: %d", current_ascent_throttle))
+            gcs:send_text(6, string.format("Starting surfacing with throttle: %d", current_ascent_throttle + 0))
         elseif alt_hold_exit_detected then
             -- ALT_HOLD mode was exited during active hover - re-enter immediately
             vehicle:set_mode(MODE_ALT_HOLD)
@@ -530,10 +530,7 @@ function control_dive_mission()
         
         -- Log hover status periodically (every 10 seconds)
         if iteration_counter % 200 == 0 then  -- 200 iterations * 50ms = 10 seconds
-            local elapsed_hover_time = (current_time - hover_start_time + 0) / 1000  -- Convert to seconds and force number conversion
-            local total_hover_time = hover_time:get() * 60  -- Convert to seconds
-            gcs:send_text(6, string.format("Hover: %.1fs/%.1fs elapsed, step %d/10, depth %.1fm", 
-                elapsed_hover_time, total_hover_time, light_control.last_step, depth))
+            gcs:send_text(6, string.format("Hover: step %d/10, depth %.1fm", light_control.last_step, depth))
         end
     elseif state == SURFACING then
         vehicle:set_mode(MODE_MANUAL)  --Set to MANUAL to allow direct motor control
@@ -616,7 +613,7 @@ function transition_to_hovering()
     hover_depth = depth - hover_offset:get()
     state = ASCEND_TOHOVER
     current_ascent_throttle = ascent_throttle:get()  -- Initialize ascent throttle when transitioning
-    gcs:send_text(6, string.format("Transitioning to ascend, initial throttle: %d", current_ascent_throttle))
+    gcs:send_text(6, string.format("Transitioning to ascend, initial throttle: %d", current_ascent_throttle + 0))
     RC3:set_override(1500)
 end
 
@@ -696,7 +693,7 @@ function loop()
             gcs:send_text(6, string.format("Sim mode: cycle=%d switch=%d", sim_cycle_state, switch_state))
         end
         
-        gcs:send_named_float("State", state)
+        gcs:send_named_float("State", state + 0.0)
         gcs:send_named_float("Depth", depth)
         
         -- Only reset counter after completing a full cycle
