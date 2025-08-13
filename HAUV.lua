@@ -31,7 +31,7 @@ recording_depth = bind_add_param('REC_DEPTH', 7, 5.0)    -- Depth to start recor
 hover_offset = bind_add_param('H_OFF',8,3) --hover this far above of target depth or impact (actual) max depth
 target_depth = bind_add_param('T_DEPTH',9,60) --max depth, hover above this if reached (updated from 40 to 410)
 hover_depth = target_depth:get()-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
-descent_throttle = bind_add_param('D_THRTL',10,1800 ) --descend at this throttle
+descent_throttle = bind_add_param('D_THRTL',10,1750 ) --descend at this throttle
 ascent_throttle = bind_add_param('A_THRTL',11,1460) --ascend at this throttle, only if climb rate not sufficient?
 
 -- Add simulation mode parameter
@@ -89,13 +89,7 @@ hover_total_iterations = 0
 last_vehicle_mode = -1
 alt_hold_exit_detected = false
 
--- Completely change how we manage light PWM
--- Create a dedicated light control table that can't be accidentally overwritten
-light_control = {
-    current_pwm = PWM_Lightoff,
-    last_change_time = 0,
-    last_step = -1
-}
+-- Light control simplified - no incremental changes needed
 
 function updateswitch()
     if sim_mode:get() == 1 then
@@ -183,10 +177,7 @@ PWM_Lightmax = 1900  -- Maximum brightness
 local RC9 = rc:get_channel(9)  -- Using Navigator input channel 9 for lights
 local RC3 = rc:get_channel(3)  -- Using Navigator input channel 3 for vertical control
 
--- Variables for light control
-local hover_steps = 7
-local current_light_step = 0
-local last_light_change_time = 0
+-- Variables for light control (simplified - no incremental changes)
 
 -- Function to control lights
 function set_lights(on, brightness_override)
@@ -261,13 +252,15 @@ function motor_output()
                 slow_zone_time = millis()
                 gcs:send_text(6, "Entering slow descent zone")
                 
-                -- Set lights to maximum brightness when entering slow zone
-                set_lights(true, PWM_Lightmax)
-                gcs:send_text(6, "Lights set to maximum brightness in slow descent zone")
+                -- Set lights to 80% brightness when entering slow zone
+                local light_80_percent = PWM_Lightoff + (PWM_Lightmax - PWM_Lightoff) * 0.8
+                set_lights(true, light_80_percent)
+                gcs:send_text(6, "Lights set to 80% brightness in slow descent zone")
             end
             
-            -- Ensure lights remain at maximum brightness throughout slow zone
-            set_lights(true, PWM_Lightmax)
+            -- Ensure lights remain at 80% brightness throughout slow zone
+            local light_80_percent = PWM_Lightoff + (PWM_Lightmax - PWM_Lightoff) * 0.8
+            set_lights(true, light_80_percent)
             
             -- Within 40m of target depth - reduce to 50% descent speed
             -- Calculate 50% between neutral (1500) and full descent throttle
@@ -397,6 +390,9 @@ function control_dive_mission()
         gcs:send_text(6, "ALT_HOLD tracking reset for new mission")
     elseif state == COUNTDOWN then
         arming:arm()
+        -- Ensure lights are off during countdown (vehicle likely at surface)
+        set_lights(false)
+        
         if millis() > (timer + dive_delay_s:get() * 1000) then
             state = DESCENDING
             gcs:send_text(6, "Starting descent")
@@ -413,10 +409,11 @@ function control_dive_mission()
 
         -- Explicit light control
         if depth > light_depth:get() then
-            -- If in slow descent zone, always use maximum brightness
+            -- If in slow descent zone, always use 80% brightness
             local remaining_distance = target_depth:get() - depth
             if remaining_distance < 40 then  -- 40m is the slow_descent_zone
-                set_lights(true, PWM_Lightmax)
+                local light_80_percent = PWM_Lightoff + (PWM_Lightmax - PWM_Lightoff) * 0.8
+                set_lights(true, light_80_percent)
             else
                 set_lights(true)  -- Default medium brightness
             end
@@ -440,6 +437,9 @@ function control_dive_mission()
                 impact_detection_count = impact_detection_count + 1
                 if impact_detection_count >= 3 then  -- Require 3 consecutive detections
                     gcs:send_text(6, string.format("Impact detected at %.1fm, rate: %.2f", depth, descent_rate))
+                    -- Turn lights to 100% brightness immediately when bottom strike detected
+                    set_lights(true, PWM_Lightmax)
+                    gcs:send_text(6, "Bottom strike detected - lights set to 100% brightness")
                     transition_to_hovering()
                 end
             end
@@ -448,6 +448,9 @@ function control_dive_mission()
         end
         if depth > target_depth:get() then --handles target depth reached
             gcs:send_text(6, "Target depth reached")
+            -- Turn lights to 100% brightness immediately when target depth reached
+            set_lights(true, PWM_Lightmax)
+            gcs:send_text(6, "Target depth reached - lights set to 100% brightness")
             
             transition_to_hovering()
         end
@@ -456,7 +459,8 @@ function control_dive_mission()
     elseif state == ASCEND_TOHOVER then
         vehicle:set_mode(MODE_MANUAL)  -- Set to MANUAL to allow direct motor control
         motor_output()  -- Add call to motor_output for ASCEND_TOHOVER state
-        set_lights(true, PWM_Lightmed)  -- Keep lights on at medium brightness
+        -- Keep lights at 100% brightness during ascent to hover (maintain from previous state)
+        set_lights(true, PWM_Lightmax)
         
         if depth < hover_depth then 
             vehicle:set_mode(MODE_ALT_HOLD)
@@ -469,47 +473,20 @@ function control_dive_mission()
         -- First time entering this state, initialize
         if hover_start_time == 0 then
             hover_start_time = millis()
-            light_control.last_change_time = millis()
-            light_control.current_pwm = PWM_Lightmed
-            light_control.last_step = 0
-            
-            -- Start with first light setting
-            set_lights(true, PWM_Lightmed)
-            gcs:send_text(6, string.format("Hover started - lights at %d", PWM_Lightmed))
+            -- Keep lights at 100% brightness throughout hover (no incremental changes)
+            set_lights(true, PWM_Lightmax)
+            gcs:send_text(6, "Hover started - lights at 100% brightness")
         end
         
-        -- Always apply the current light setting on every loop iteration
-        set_lights(true, light_control.current_pwm)
-        
-        -- Current time
-        local current_time = millis()
-        
-        -- Simple light control: 10 steps from PWM_Lightmed to PWM_Lightmax
-        local hover_duration_ms = hover_time:get() * 60 * 1000
-        local step_interval_ms = hover_duration_ms / 10
-        local step_increment = (PWM_Lightmax - PWM_Lightmed) / 10
-        
-        -- Check if it's time for the next step
-        if current_time - hover_start_time > (light_control.last_step + 1) * step_interval_ms then
-            -- Move to next step (max 10 steps)
-            light_control.last_step = math.min(light_control.last_step + 1, 10)
-            
-            -- Calculate new PWM - simple arithmetic
-            local new_pwm = PWM_Lightmed + (step_increment * light_control.last_step)
-            new_pwm = math.floor(new_pwm)
-            
-            -- Set the new value
-            light_control.current_pwm = new_pwm
-            
-            gcs:send_text(6, string.format("Light step %d/10: PWM=%d", 
-                light_control.last_step, new_pwm))
-        end
+        -- Always keep lights at 100% brightness during hover
+        set_lights(true, PWM_Lightmax)
         
         -- Check if hover time is complete - ONLY based on elapsed time, not depth
+        local current_time = millis()
+        local hover_duration_ms = hover_time:get() * 60 * 1000
+        
         if current_time > (hover_start_time + hover_duration_ms) then
-            -- Ensure final light value is maximum
-            set_lights(true, PWM_Lightmax)
-            gcs:send_text(6, "Hover complete - lights at maximum")
+            gcs:send_text(6, "Hover complete - lights at 100% brightness")
             
             -- Clear ALT_HOLD exit detection before transitioning to prevent re-entry
             alt_hold_exit_detected = false
@@ -530,24 +507,24 @@ function control_dive_mission()
         
         -- Log hover status periodically (every 10 seconds)
         if iteration_counter % 200 == 0 then  -- 200 iterations * 50ms = 10 seconds
-            gcs:send_text(6, string.format("Hover: step %d/10, depth %.1fm", light_control.last_step, depth))
+            gcs:send_text(6, string.format("Hover: depth %.1fm, lights at 100%%", depth))
         end
     elseif state == SURFACING then
         vehicle:set_mode(MODE_MANUAL)  --Set to MANUAL to allow direct motor control
         motor_output()  -- Add call to motor_output for SURFACING state
         
-        -- Calculate distance above hover depth to turn off lights (20m)
-        local light_off_depth = hover_depth - 20
+        -- Calculate distance above hover depth to turn off lights (40m)
+        local light_off_depth = hover_depth - 40
         
-        -- Turn off lights when 20m above hover depth, but keep them on otherwise
+        -- Turn off lights when 40m above hover depth, but keep them on otherwise
         if depth < light_off_depth then
             set_lights(false)
             if not lights_off_reported then
-                gcs:send_text(6, "Lights turned off during ascent")
+                gcs:send_text(6, "Lights turned off during ascent (40m above hover depth)")
                 lights_off_reported = true
             end
         else
-            -- Keep lights at maximum brightness until 20m above hover depth
+            -- Keep lights at maximum brightness until 40m above hover depth
             set_lights(true, PWM_Lightmax)
         end
         
