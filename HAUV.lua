@@ -73,6 +73,7 @@ abort_timer = 0  -- Add timer for abort sequence
 start_ah = 0 -- track power consumption
 hover_start_time = 0  --  variable to track hover start time, determine duration
 switch_state = 1
+temperature = 0.0  -- Temperature in degrees C
 impact_threshold = 0.2-- in m/s, speed of descent is positive
 impact_detection_count = 0  -- Count consecutive slow readings
 slow_zone_entered = false   -- Flag to track if we've entered slow zone
@@ -345,6 +346,7 @@ function update_subtitle_file()
     local climb_rate = descent_rate or 0.0  -- descent_rate is positive downward, climb_rate should be negative
     local climb_rate_display = -climb_rate  -- Convert to climb rate (negative descent_rate)
     local light_percentage = get_light_percentage()
+    local temp_val = temperature or 0.0
     
     -- Get current time string
     local current_time_str = string.format("%02d:%02d:%02d", 
@@ -352,9 +354,9 @@ function update_subtitle_file()
         math.floor(elapsed_seconds / 60) % 60,
         math.floor(elapsed_seconds) % 60)
     
-    -- Format subtitle text (same format as Python version)
-    local subtitle_text = string.format("Dialogue: 0,%s,%s,Telemetry,,0,0,0,,{\\an8}Depth: %.1fm | Climb: %.2fm/s | Lights: %d%% | Time: %s",
-        start_timestamp, end_timestamp, depth_val, climb_rate_display, light_percentage, current_time_str)
+    -- Format subtitle text (same format as Python version, now with temperature)
+    local subtitle_text = string.format("Dialogue: 0,%s,%s,Telemetry,,0,0,0,,{\\an8}Depth: %.1fm | Climb: %.2fm/s | Temp: %.1f°C | Lights: %d%% | Time: %s",
+        start_timestamp, end_timestamp, depth_val, climb_rate_display, temp_val, light_percentage, current_time_str)
     
     -- Append to subtitle file
     local file = io.open(subtitle_file, "a")
@@ -405,6 +407,9 @@ function get_data()
     end
     --mah = battery:consumed_mah(0)
     batV = battery:voltage(0)
+    
+    -- Get temperature from barometer (in degrees C)
+    temperature = baro:get_temperature() / 100.0  -- Convert from centidegrees to degrees C
     
     -- Override battery voltage in simulation mode
     if sim_mode:get() == 1 then
@@ -870,6 +875,7 @@ function loop()
         -- Log state to bin log (5x more frequently)
         logger:write('STA', 'State', 'i', state)
         logger:write('DCR', 'DescentRate', 'f', 'm', '-', descent_rate)
+        logger:write('TEMP', 'Temperature', 'f', 'C', '-', temperature)
     end
   
     -- GCS messages and other status checks (original frequency - every 50 iterations)
