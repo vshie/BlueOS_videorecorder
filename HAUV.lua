@@ -224,7 +224,7 @@ end
 function control_water_sampling_relay()
     if ws_relay_toggled then
         -- Check if relay toggle duration has elapsed
-        if millis() > (ws_relay_toggle_start + ws_relay_duration) then
+        if (millis() + 0) > (ws_relay_toggle_start + ws_relay_duration) then
             -- Toggle relay back to original state
             relay:toggle(0)
             ws_relay_toggled = false
@@ -239,7 +239,7 @@ function trigger_water_sampling()
         -- Toggle relay
         relay:toggle(0)
         ws_relay_toggled = true
-        ws_relay_toggle_start = millis()
+        ws_relay_toggle_start = millis() + 0  -- Convert to regular number
         gcs:send_text(6, "Water sampling relay triggered")
     end
 end
@@ -487,7 +487,7 @@ function control_dive_mission()
         if ws_next_depth > 0 and depth >= ws_next_depth then
             -- Initialize water sampling
             ws_next_depth = ws_next_depth + ws_interval:get()  -- Set next sampling depth
-            ws_hover_start_time = millis()
+            ws_hover_start_time = millis() + 0  -- Convert to regular number
             state = WATER_SAMPLING
             gcs:send_text(6, string.format("Starting water sampling at %.1fm", depth))
         end
@@ -531,8 +531,8 @@ function control_dive_mission()
         local ws_hover_duration_ms = ws_htime:get() * 60 * 1000
         
         -- Check if halfway through hover time to trigger relay
-        local current_time = millis()
-        local hover_elapsed = current_time - ws_hover_start_time
+        local current_time = millis() + 0  -- Convert to regular number
+        local hover_elapsed = (current_time - ws_hover_start_time + 0)  -- Convert to regular number
         local halfway_time = ws_hover_duration_ms / 2
         
         if hover_elapsed >= halfway_time and not ws_relay_toggled then
@@ -551,8 +551,8 @@ function control_dive_mission()
         
         -- Log water sampling status periodically
         if iteration_counter % 100 == 0 then  -- Every 5 seconds
-            local remaining_time = (ws_hover_duration_ms - hover_elapsed) / 1000
-            gcs:send_text(6, string.format("Water sampling: %.1fm, %.1fs remaining", depth, remaining_time))
+            local remaining_time = (ws_hover_duration_ms - hover_elapsed + 0) / 1000
+            gcs:send_text(6, string.format("Water sampling: %.1fm, %.1fs remaining", depth, remaining_time + 0))
         end
 
     elseif state == ASCEND_TOHOVER then
