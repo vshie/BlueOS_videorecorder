@@ -100,6 +100,8 @@ ws_relay_toggled = false  -- Track if relay is currently in toggled state
 ws_relay_toggle_start = 0  -- Start time of relay toggle
 ws_relay_duration = 1000  -- Relay toggle duration in milliseconds
 ws_relay_triggered = false  -- Track if relay has been triggered for this sampling session
+ws_sample_count = 0  -- Count of water samples taken
+ws_max_samples = 5  -- Maximum number of water samples
 
 -- Light control simplified - no incremental changes needed
 
@@ -180,6 +182,7 @@ function updateswitch()
         ws_hover_start_time = 0
         ws_relay_toggled = false
         ws_relay_triggered = false
+        ws_sample_count = 0
         gcs:send_text(6, "Switch closed after reset - ready for new mission")
     end
     
@@ -193,6 +196,7 @@ function updateswitch()
         ws_hover_start_time = 0
         ws_relay_toggled = false
         ws_relay_triggered = false
+        ws_sample_count = 0
         gcs:send_text(6, "Switch closed at shallow depth - ready for new mission")
     end
 end
@@ -440,8 +444,9 @@ function control_dive_mission()
         
         -- Initialize water sampling depth
         ws_next_depth = ws_interval:get()  -- First sampling at WS_INTERVAL depth
-        gcs:send_text(6, string.format("Water sampling initialized - first sample at %.1fm, interval %.1fm", 
-            ws_next_depth, ws_interval:get()))
+        ws_sample_count = 0  -- Reset sample count for new mission
+        gcs:send_text(6, string.format("Water sampling initialized - max %d samples, first at %.1fm, interval %.1fm", 
+            ws_max_samples, ws_next_depth, ws_interval:get()))
         
         -- Reset ALT_HOLD tracking for new mission
         alt_hold_exit_detected = false
@@ -487,14 +492,19 @@ function control_dive_mission()
             end
         end
         
-        -- Check for water sampling depth
-        if ws_next_depth > 0 and depth >= ws_next_depth then
+        -- Check for water sampling depth (only if we haven't reached max samples)
+        if ws_next_depth > 0 and depth >= ws_next_depth and ws_sample_count < ws_max_samples then
             -- Initialize water sampling
             ws_next_depth = ws_next_depth + ws_interval:get()  -- Set next sampling depth
             ws_hover_start_time = millis()
             ws_relay_triggered = false  -- Reset trigger flag for new sampling session
+            ws_sample_count = ws_sample_count + 1  -- Increment sample count
             state = WATER_SAMPLING
-            gcs:send_text(6, string.format("Starting water sampling at %.1fm", depth))
+            gcs:send_text(6, string.format("Starting water sampling %d/%d at %.1fm", ws_sample_count, ws_max_samples, depth))
+        elseif ws_sample_count >= ws_max_samples and ws_next_depth > 0 then
+            -- Mark that we've completed all water samples
+            ws_next_depth = 0  -- Disable further water sampling
+            gcs:send_text(6, string.format("Water sampling complete - %d samples taken", ws_max_samples))
         end
         
         if millis() > (timer + dive_timeout*60000) then 
@@ -692,6 +702,7 @@ function control_dive_mission()
         ws_hover_start_time = 0
         ws_relay_toggled = false
         ws_relay_triggered = false
+        ws_sample_count = 0
     end
 end
 -- Transition to HOVERING state
