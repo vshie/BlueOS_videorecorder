@@ -551,8 +551,7 @@ function control_dive_mission()
         
         -- Log water sampling status periodically
         if iteration_counter % 100 == 0 then  -- Every 5 seconds
-            local remaining_time = (ws_hover_duration_ms - hover_elapsed) / 1000
-            gcs:send_text(6, string.format("Water sampling: %.1fm, %.1fs remaining", depth, remaining_time))
+            gcs:send_text(6, string.format("Water sampling at %.1fm", depth))
         end
 
     elseif state == ASCEND_TOHOVER then
