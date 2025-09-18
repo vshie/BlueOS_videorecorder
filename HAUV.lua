@@ -875,7 +875,7 @@ function loop()
         -- Log state to bin log (5x more frequently)
         logger:write('STA', 'State', 'i', state)
         logger:write('DCR', 'DescentRate', 'f', 'm', '-', descent_rate)
-        logger:write('TEMP', 'Temperature', 'f', 'C', '-', temperature)
+        -- Note: Temperature is already logged by ArduPilot as BARO(1).temp
     end
   
     -- GCS messages and other status checks (original frequency - every 50 iterations)
