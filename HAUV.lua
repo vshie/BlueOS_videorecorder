@@ -96,9 +96,10 @@ alt_hold_exit_detected = false
 -- Water sampling variables
 ws_next_depth = 0  -- Next water sampling depth
 ws_hover_start_time = 0  -- Start time for water sampling hover
-ws_relay_toggled = false  -- Track if relay has been toggled during sampling
+ws_relay_toggled = false  -- Track if relay is currently toggled
 ws_relay_toggle_start = 0  -- Start time of relay toggle
 ws_relay_duration = 1000  -- Relay toggle duration in milliseconds
+ws_relay_triggered = false  -- Track if relay has been triggered for this sampling session
 
 -- Light control simplified - no incremental changes needed
 
@@ -177,6 +178,7 @@ function updateswitch()
         ws_next_depth = 0
         ws_hover_start_time = 0
         ws_relay_toggled = false
+        ws_relay_triggered = false
         gcs:send_text(6, "Switch closed after reset - ready for new mission")
     end
     
@@ -189,6 +191,7 @@ function updateswitch()
         ws_next_depth = 0
         ws_hover_start_time = 0
         ws_relay_toggled = false
+        ws_relay_triggered = false
         gcs:send_text(6, "Switch closed at shallow depth - ready for new mission")
     end
 end
@@ -488,6 +491,7 @@ function control_dive_mission()
             -- Initialize water sampling
             ws_next_depth = ws_next_depth + ws_interval:get()  -- Set next sampling depth
             ws_hover_start_time = millis()
+            ws_relay_triggered = false  -- Reset trigger flag for new sampling session
             state = WATER_SAMPLING
             gcs:send_text(6, string.format("Starting water sampling at %.1fm", depth))
         end
@@ -535,8 +539,9 @@ function control_dive_mission()
         local hover_elapsed = current_time - ws_hover_start_time
         local halfway_time = ws_hover_duration_ms / 2
         
-        if hover_elapsed >= halfway_time and not ws_relay_toggled then
+        if hover_elapsed >= halfway_time and not ws_relay_triggered then
             trigger_water_sampling()
+            ws_relay_triggered = true  -- Mark that we've triggered for this session
             gcs:send_text(6, string.format("Water sampling relay triggered at %.1fm (halfway through hover)", depth))
         end
         
@@ -546,6 +551,7 @@ function control_dive_mission()
             state = DESCENDING
             -- Reset water sampling variables
             ws_relay_toggled = false
+            ws_relay_triggered = false
             ws_hover_start_time = 0
         end
         
@@ -684,6 +690,7 @@ function control_dive_mission()
         -- Reset water sampling variables for new mission
         ws_hover_start_time = 0
         ws_relay_toggled = false
+        ws_relay_triggered = false
     end
 end
 -- Transition to HOVERING state
