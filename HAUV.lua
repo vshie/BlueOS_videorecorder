@@ -96,7 +96,7 @@ alt_hold_exit_detected = false
 -- Water sampling variables
 ws_next_depth = 0  -- Next water sampling depth
 ws_hover_start_time = 0  -- Start time for water sampling hover
-ws_relay_toggled = false  -- Track if relay is currently toggled
+ws_relay_toggled = false  -- Track if relay is currently in toggled state
 ws_relay_toggle_start = 0  -- Start time of relay toggle
 ws_relay_duration = 1000  -- Relay toggle duration in milliseconds
 ws_relay_triggered = false  -- Track if relay has been triggered for this sampling session
@@ -145,6 +145,7 @@ function updateswitch()
                 ws_next_depth = 0
                 ws_hover_start_time = 0
                 ws_relay_toggled = false
+                ws_relay_triggered = false
                 gcs:send_text(6, "Simulation: state reset for new mission")
             end
         end
