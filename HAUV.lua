@@ -22,14 +22,14 @@ assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 32), 'could not add 
 
 -- Add configurable parameters with defaults
 dive_delay_s = bind_add_param('DELAY_S', 1, 30)      -- Countdown before dive
-light_depth = bind_add_param('LIGHT_D', 2, 7.0)     -- Depth to turn on lights (m)
-hover_time = bind_add_param('HOVER_M', 3, 1.0)       -- Minutes to hover
+light_depth = bind_add_param('LIGHT_D', 2, 200.0)     -- Depth to turn on lights (m)
+hover_time = bind_add_param('HOVER_M', 3, 2.0)       -- Minutes to hover
 surf_depth = bind_add_param('SURF_D', 4, 2.0)        -- Surface threshold
 max_ah = bind_add_param('MAX_AH', 5, 12.0)           -- Max amp-hours
 min_voltage = bind_add_param('MIN_V', 6, 13.0)       -- Min battery voltage
-recording_depth = bind_add_param('REC_DEPTH', 7, 5.0)    -- Depth to start recording
+recording_depth = bind_add_param('REC_DEPTH', 7, 50.0)    -- Depth to start recording
 hover_offset = bind_add_param('H_OFF',8,3) --hover this far above of target depth or impact (actual) max depth
-target_depth = bind_add_param('T_DEPTH',9,60) --max depth, hover above this if reached (updated from 40 to 410)
+target_depth = bind_add_param('T_DEPTH',9,410) --max depth, hover above this if reached (updated from 40 to 410)
 hover_depth = target_depth:get()-hover_offset:get() -- this may be set shallower if bottom changes target depth (shallower than expected)
 descent_throttle = bind_add_param('D_THRTL',10,1750 ) --descend at this throttle
 ascent_throttle = bind_add_param('A_THRTL',11,1460) --ascend at this throttle, only if climb rate not sufficient?
@@ -39,10 +39,13 @@ sim_mode = bind_add_param('SIM_MODE', 12, 0)  -- 0=normal, 1=simulation - change
 -- New parameters for dynamic throttle control
 max_descent_rate = bind_add_param('MAX_D_RATE',13,1.0) -- Maximum descent rate (m/s)
 min_ascent_rate = bind_add_param('MIN_A_RATE',14,0.7) -- Minimum ascent rate (m/s)
-throttle_step = bind_add_param('THRTL_STEP',16,10) -- Throttle adjustment step
+throttle_step = bind_add_param('THRTL_STEP',16,2) -- Throttle adjustment step
 timeout_buffer = bind_add_param('T_BUFFER',17,1.3) -- Buffer multiplier for timeout calculation
 -- New parameter for surface maintaining throttle
 surface_depth_threshold = bind_add_param('SURF_DEPTH',19,0.65) -- Depth threshold to increase throttle (m)
+-- Water sampling parameters
+ws_interval = bind_add_param('WS_INTERVAL',20,5.0) -- Water sampling interval depth (m)
+ws_htime = bind_add_param('WS_HTIME',21,0.5) -- Water sampling hover time (minutes)
 
 -- Simulation variables
 sim_start_time = 0
@@ -53,11 +56,12 @@ sim_switch_timer = 0
 STANDBY = 0
 COUNTDOWN = 1
 DESCENDING = 2
-ASCEND_TOHOVER = 3
-HOVERING = 4
-SURFACING = 5
-ABORT = 6
-COMPLETE = 7
+WATER_SAMPLING = 3
+ASCEND_TOHOVER = 4
+HOVERING = 5
+SURFACING = 6
+ABORT = 7
+COMPLETE = 8
 
 -- Initialize variables
 state = STANDBY
@@ -88,6 +92,13 @@ hover_total_iterations = 0
 -- ALT_HOLD mode tracking
 last_vehicle_mode = -1
 alt_hold_exit_detected = false
+
+-- Water sampling variables
+ws_next_depth = 0  -- Next water sampling depth
+ws_hover_start_time = 0  -- Start time for water sampling hover
+ws_relay_toggled = false  -- Track if relay has been toggled during sampling
+ws_relay_toggle_start = 0  -- Start time of relay toggle
+ws_relay_duration = 1000  -- Relay toggle duration in milliseconds
 
 -- Light control simplified - no incremental changes needed
 
@@ -129,6 +140,10 @@ function updateswitch()
                 has_disarmed = false
                 abort_timer = 0
                 switch_opened_after_complete = false
+                -- Reset water sampling variables
+                ws_next_depth = 0
+                ws_hover_start_time = 0
+                ws_relay_toggled = false
                 gcs:send_text(6, "Simulation: state reset for new mission")
             end
         end
@@ -158,6 +173,10 @@ function updateswitch()
         has_disarmed = false  -- Reset disarm flag
         abort_timer = 0       -- Reset abort timer
         switch_opened_after_complete = false  -- Reset the switch toggle flag
+        -- Reset water sampling variables
+        ws_next_depth = 0
+        ws_hover_start_time = 0
+        ws_relay_toggled = false
         gcs:send_text(6, "Switch closed after reset - ready for new mission")
     end
     
@@ -166,6 +185,10 @@ function updateswitch()
         state = STANDBY
         has_disarmed = false  -- Reset disarm flag
         abort_timer = 0       -- Reset abort timer
+        -- Reset water sampling variables
+        ws_next_depth = 0
+        ws_hover_start_time = 0
+        ws_relay_toggled = false
         gcs:send_text(6, "Switch closed at shallow depth - ready for new mission")
     end
 end
@@ -194,6 +217,30 @@ function set_lights(on, brightness_override)
         RC9:set_override(pwm_value)
     else
         RC9:set_override(PWM_Lightoff)
+    end
+end
+
+-- Function to control water sampling relay
+function control_water_sampling_relay()
+    if ws_relay_toggled then
+        -- Check if relay toggle duration has elapsed
+        if millis() > (ws_relay_toggle_start + ws_relay_duration) then
+            -- Toggle relay back to original state
+            relay:toggle(0)
+            ws_relay_toggled = false
+            gcs:send_text(6, "Water sampling relay toggled back to original state")
+        end
+    end
+end
+
+-- Function to trigger water sampling relay
+function trigger_water_sampling()
+    if not ws_relay_toggled then
+        -- Toggle relay
+        relay:toggle(0)
+        ws_relay_toggled = true
+        ws_relay_toggle_start = millis()
+        gcs:send_text(6, "Water sampling relay triggered")
     end
 end
 
@@ -288,6 +335,9 @@ function motor_output()
         
         SRV_Channels:set_output_pwm_chan_timeout(5-1, current_descent_throttle, 100)
         SRV_Channels:set_output_pwm_chan_timeout(6-1, current_descent_throttle, 100)
+    elseif state == WATER_SAMPLING then
+        -- In water sampling state, motors are controlled by ALT_HOLD mode
+        -- No direct motor control needed here
     elseif state == ASCEND_TOHOVER or state == SURFACING then
         -- Set different target ascent rates for each state
         local target_ascent_rate
@@ -384,6 +434,11 @@ function control_dive_mission()
         gcs:send_text(6, string.format("Switch closed - starting countdown. Timeout: %.1f min", dive_timeout))
         timer = millis() -- start overall dive clock
         
+        -- Initialize water sampling depth
+        ws_next_depth = ws_interval:get()  -- First sampling at WS_INTERVAL depth
+        gcs:send_text(6, string.format("Water sampling initialized - first sample at %.1fm, interval %.1fm", 
+            ws_next_depth, ws_interval:get()))
+        
         -- Reset ALT_HOLD tracking for new mission
         alt_hold_exit_detected = false
         last_vehicle_mode = -1
@@ -427,6 +482,16 @@ function control_dive_mission()
                 gcs:send_text(6, "Video recording started at depth")
             end
         end
+        
+        -- Check for water sampling depth
+        if ws_next_depth > 0 and depth >= ws_next_depth then
+            -- Initialize water sampling
+            ws_next_depth = ws_next_depth + ws_interval:get()  -- Set next sampling depth
+            ws_hover_start_time = millis()
+            state = WATER_SAMPLING
+            gcs:send_text(6, string.format("Starting water sampling at %.1fm", depth))
+        end
+        
         if millis() > (timer + dive_timeout*60000) then 
             state = ABORT
             gcs:send_text(6, "Dive duration timeout")
@@ -455,6 +520,40 @@ function control_dive_mission()
             transition_to_hovering()
         end
 
+    elseif state == WATER_SAMPLING then
+        -- Set vehicle to ALT_HOLD mode for stable hovering during water sampling
+        vehicle:set_mode(MODE_ALT_HOLD)
+        
+        -- Control water sampling relay
+        control_water_sampling_relay()
+        
+        -- Calculate water sampling hover time in milliseconds
+        local ws_hover_duration_ms = ws_htime:get() * 60 * 1000
+        
+        -- Check if halfway through hover time to trigger relay
+        local current_time = millis()
+        local hover_elapsed = current_time - ws_hover_start_time
+        local halfway_time = ws_hover_duration_ms / 2
+        
+        if hover_elapsed >= halfway_time and not ws_relay_toggled then
+            trigger_water_sampling()
+            gcs:send_text(6, string.format("Water sampling relay triggered at %.1fm (halfway through hover)", depth))
+        end
+        
+        -- Check if water sampling hover time is complete
+        if hover_elapsed >= ws_hover_duration_ms then
+            gcs:send_text(6, string.format("Water sampling complete at %.1fm - resuming descent", depth))
+            state = DESCENDING
+            -- Reset water sampling variables
+            ws_relay_toggled = false
+            ws_hover_start_time = 0
+        end
+        
+        -- Log water sampling status periodically
+        if iteration_counter % 100 == 0 then  -- Every 5 seconds
+            local remaining_time = (ws_hover_duration_ms - hover_elapsed) / 1000
+            gcs:send_text(6, string.format("Water sampling: %.1fm, %.1fs remaining", depth, remaining_time))
+        end
 
     elseif state == ASCEND_TOHOVER then
         vehicle:set_mode(MODE_MANUAL)  -- Set to MANUAL to allow direct motor control
@@ -583,6 +682,9 @@ function control_dive_mission()
         current_ascent_throttle = ascent_throttle:get()
         impact_detection_count = 0
         slow_zone_entered = false
+        -- Reset water sampling variables for new mission
+        ws_hover_start_time = 0
+        ws_relay_toggled = false
     end
 end
 -- Transition to HOVERING state
