@@ -202,6 +202,24 @@ def start():
         current_subtitle_file_h264 = create_subtitle_file(filepath_h264)
         current_subtitle_file_rtsp = create_subtitle_file(filepath_rtsp)
         
+        # Set recording state and start time BEFORE starting video processes
+        recording = True
+        start_time = datetime.now()
+        
+        # Start subtitle thread immediately for perfect synchronization
+        stop_subtitle_thread = False
+        subtitle_thread = threading.Thread(target=update_subtitles)
+        subtitle_thread.daemon = True
+        subtitle_thread.start()
+        
+        # Log which subtitle files are being generated
+        subtitle_files = []
+        if current_subtitle_file_h264:
+            subtitle_files.append(f"H264: {current_subtitle_file_h264}")
+        if current_subtitle_file_rtsp:
+            subtitle_files.append(f"RTSP: {current_subtitle_file_rtsp}")
+        logger.info(f"Started telemetry subtitle generation: {'; '.join(subtitle_files)}")
+        
         # Pipeline for H264 stream from /dev/video2
         h264_pipeline = ("v4l2src device=/dev/video2 ! "
             "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
@@ -268,23 +286,6 @@ def start():
         if rtsp_started:
             active_streams.append("RTSP")
         logger.info(f"Recording started successfully with streams: {', '.join(active_streams)}")
-            
-        recording = True
-        start_time = datetime.now()
-        
-        # Start subtitle thread immediately for synchronization
-        stop_subtitle_thread = False
-        subtitle_thread = threading.Thread(target=update_subtitles)
-        subtitle_thread.daemon = True
-        subtitle_thread.start()
-        
-        # Log which subtitle files are being generated
-        subtitle_files = []
-        if current_subtitle_file_h264:
-            subtitle_files.append(f"H264: {current_subtitle_file_h264}")
-        if current_subtitle_file_rtsp:
-            subtitle_files.append(f"RTSP: {current_subtitle_file_rtsp}")
-        logger.info(f"Started telemetry subtitle generation: {'; '.join(subtitle_files)}")
         
         return jsonify({"success": True})
     except Exception as e:
