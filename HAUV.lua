@@ -73,7 +73,7 @@ abort_timer = 0  -- Add timer for abort sequence
 start_ah = 0 -- track power consumption
 hover_start_time = 0  --  variable to track hover start time, determine duration
 switch_state = 1
-temperature = 0.0  -- Temperature in degrees C
+is_recording = 0
 impact_threshold = 0.2-- in m/s, speed of descent is positive
 impact_detection_count = 0  -- Count consecutive slow readings
 slow_zone_entered = false   -- Flag to track if we've entered slow zone
@@ -102,12 +102,6 @@ ws_relay_duration = 1000  -- Relay toggle duration in milliseconds
 ws_relay_triggered = false  -- Track if relay has been triggered for this sampling session
 ws_sample_count = 0  -- Count of water samples taken
 ws_max_samples = 5  -- Maximum number of water samples
-
--- Subtitle generation variables
-subtitle_file = nil  -- File handle for subtitle file
-subtitle_start_time = 0  -- Start time for subtitle generation
-subtitle_last_update = 0  -- Last subtitle update time
-subtitle_update_interval = 500  -- Update every 500ms (2 updates per second)
 
 -- Light control simplified - no incremental changes needed
 
@@ -189,8 +183,6 @@ function updateswitch()
         ws_relay_toggled = false
         ws_relay_triggered = false
         ws_sample_count = 0
-        -- Reset subtitle generation
-        stop_subtitle_generation()
         gcs:send_text(6, "Switch closed after reset - ready for new mission")
     end
     
@@ -205,8 +197,6 @@ function updateswitch()
         ws_relay_toggled = false
         ws_relay_triggered = false
         ws_sample_count = 0
-        -- Reset subtitle generation
-        stop_subtitle_generation()
         gcs:send_text(6, "Switch closed at shallow depth - ready for new mission")
     end
 end
@@ -262,142 +252,6 @@ function trigger_water_sampling()
     end
 end
 
--- Function to create subtitle file header
-function create_subtitle_file(filename)
-    local subtitle_path = string.gsub(filename, "%.mp4$", ".ass")
-    
-    -- ASS subtitle format header (same as Python version)
-    local header = [[[Script Info]
-Title: Telemetry Data
-ScriptType: v4.00+
-WrapStyle: 0
-PlayResX: 1920
-PlayResY: 1080
-ScaledBorderAndShadow: yes
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,54,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,0,8,10,10,10,1
-Style: Telemetry,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,8,10,10,50,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-]]
-    
-    -- Open file and write header
-    local file = io.open(subtitle_path, "w")
-    if file then
-        file:write(header)
-        file:close()
-        gcs:send_text(6, string.format("Created subtitle file: %s", subtitle_path))
-        return subtitle_path
-    else
-        gcs:send_text(6, string.format("Failed to create subtitle file: %s", subtitle_path))
-        return nil
-    end
-end
-
--- Function to format timestamp for ASS format (H:MM:SS.cc)
-function format_ass_timestamp(seconds)
-    local hours = math.floor(seconds / 3600)
-    local minutes = math.floor((seconds % 3600) / 60)
-    local secs = seconds % 60
-    local centiseconds = math.floor((secs - math.floor(secs)) * 100)
-    return string.format("%d:%02d:%02d.%02d", hours, minutes, math.floor(secs), centiseconds)
-end
-
--- Function to get light percentage from RC channel 9
-function get_light_percentage()
-    local rc9 = rc:get_channel(9)
-    if rc9 then
-        local raw_value = rc9:get_control_in()
-        -- Convert from 1100-1900 range to 0-100% (same as Python)
-        if raw_value <= 1100 then
-            return 0
-        elseif raw_value >= 1900 then
-            return 100
-        else
-            return math.floor((raw_value - 1100) / 8.0 + 0.5)  -- Round to nearest integer
-        end
-    end
-    return 0
-end
-
--- Function to update subtitle file with telemetry data
-function update_subtitle_file()
-    if not subtitle_file then
-        return
-    end
-    
-    local current_time = millis()
-    if (current_time - subtitle_last_update) < subtitle_update_interval then
-        return  -- Not time to update yet
-    end
-    
-    subtitle_last_update = current_time
-    
-    -- Calculate elapsed time since subtitle start
-    local elapsed_seconds = (current_time - subtitle_start_time) / 1000.0
-    local start_timestamp = format_ass_timestamp(elapsed_seconds)
-    local end_timestamp = format_ass_timestamp(elapsed_seconds + 0.5)  -- 0.5 second duration
-    
-    -- Get telemetry data
-    local depth_val = depth or 0.0
-    local climb_rate = descent_rate or 0.0  -- descent_rate is positive downward, climb_rate should be negative
-    local climb_rate_display = -climb_rate  -- Convert to climb rate (negative descent_rate)
-    local light_percentage = get_light_percentage()
-    local temp_val = temperature or 0.0
-    
-    -- Get current time string
-    local current_time_str = string.format("%02d:%02d:%02d", 
-        math.floor(elapsed_seconds / 3600) % 24,
-        math.floor(elapsed_seconds / 60) % 60,
-        math.floor(elapsed_seconds) % 60)
-    
-    -- Format subtitle text (same format as Python version, now with temperature)
-    local subtitle_text = string.format("Dialogue: 0,%s,%s,Telemetry,,0,0,0,,{\\an8}Depth: %.1fm | Climb: %.2fm/s | Temp: %.1f°C | Lights: %d%% | Time: %s",
-        start_timestamp, end_timestamp, depth_val, climb_rate_display, temp_val, light_percentage, current_time_str)
-    
-    -- Append to subtitle file
-    local file = io.open(subtitle_file, "a")
-    if file then
-        file:write(subtitle_text .. "\n")
-        file:close()
-    end
-end
-
--- Function to start subtitle generation
-function start_subtitle_generation()
-    if not arming:is_armed() then
-        return  -- Only generate subtitles when armed
-    end
-    
-    if subtitle_file then
-        return  -- Already generating subtitles
-    end
-    
-    -- Create subtitle file with timestamp
-    local timestamp = os.date("%Y%m%d_%H%M%S")
-    local filename = string.format("/tmp/video_%s.ass", timestamp)
-    
-    subtitle_file = create_subtitle_file(filename)
-    if subtitle_file then
-        subtitle_start_time = millis()
-        subtitle_last_update = 0
-        gcs:send_text(6, string.format("Started subtitle generation: %s", subtitle_file))
-    end
-end
-
--- Function to stop subtitle generation
-function stop_subtitle_generation()
-    if subtitle_file then
-        gcs:send_text(6, string.format("Stopped subtitle generation: %s", subtitle_file))
-        subtitle_file = nil
-        subtitle_start_time = 0
-        subtitle_last_update = 0
-    end
-end
-
 -- Function to read inputs we control vehicle off of
 function get_data() 
     depth = -baro:get_altitude() -- positive downwards
@@ -407,9 +261,6 @@ function get_data()
     end
     --mah = battery:consumed_mah(0)
     batV = battery:voltage(0)
-    
-    -- Get temperature from barometer (in degrees C)
-    temperature = baro:get_temperature() / 100.0  -- Convert from centidegrees to degrees C
     
     -- Override battery voltage in simulation mode
     if sim_mode:get() == 1 then
@@ -634,8 +485,12 @@ function control_dive_mission()
             set_lights(false)  -- Lights off when shallow
         end
         
-        -- Start subtitle generation when armed (video recording handled by external extension)
-        start_subtitle_generation()
+        if depth > recording_depth:get() and is_recording == 0 then
+            if start_video_recording() then
+                is_recording = 1
+                gcs:send_text(6, "Video recording started at depth")
+            end
+        end
         
         -- Check for water sampling depth (only if we haven't reached max samples)
         if ws_next_depth > 0 and depth >= ws_next_depth and ws_sample_count < ws_max_samples then
@@ -789,17 +644,18 @@ function control_dive_mission()
         end
         
         if depth < surf_depth:get() then
-            -- Stop subtitle generation
-            stop_subtitle_generation()
-            gcs:send_text(6, "Subtitle generation stopped during surfacing")
-            set_lights(false)  -- Ensure lights are off when surfacing
-            -- Reintroduce the disarm command
-            arming:disarm()
-            state = COMPLETE
-            -- Reset switch_opened_after_complete when entering COMPLETE state
-            switch_opened_after_complete = false
-            gcs:send_text(6, "Mission complete - disarmed")
-            gcs:send_text(6, "Open switch to reset")
+            if stop_video_recording() then
+                gcs:send_text(6, "Video recording stopped during surfacing")
+                set_lights(false)  -- Ensure lights are off when surfacing
+                -- Reintroduce the disarm command
+                arming:disarm()
+                is_recording = 0
+                state = COMPLETE
+                -- Reset switch_opened_after_complete when entering COMPLETE state
+                switch_opened_after_complete = false
+                gcs:send_text(6, "Mission complete - disarmed")
+                gcs:send_text(6, "Open switch to reset")
+            end
         end
     elseif state == COMPLETE then
         -- If depth increases above threshold, set to ALT_HOLD mode to maintain position
@@ -825,9 +681,12 @@ function control_dive_mission()
         
         motor_output()  -- Keep motors in safe state
         
-        -- Wait 60 seconds before stopping subtitle generation and lights
+        -- Wait 60 seconds before stopping recording and lights
         if millis() > (abort_timer + 60000) then
-            stop_subtitle_generation()
+            if is_recording == 1 then
+                stop_video_recording()
+                is_recording = 0
+            end
             set_lights(false)
             abort_timer = 0  -- Reset timer for next abort if it happens
         end
@@ -844,8 +703,6 @@ function control_dive_mission()
         ws_relay_toggled = false
         ws_relay_triggered = false
         ws_sample_count = 0
-        -- Reset subtitle generation
-        stop_subtitle_generation()
     end
 end
 -- Transition to HOVERING state
@@ -858,16 +715,61 @@ function transition_to_hovering()
 end
 
   
--- Video recording is now handled by external extension
--- This script only generates subtitle files with telemetry data
+-- HTTP Configuration
+HTTP_HOST = "localhost"
+HTTP_PORT = 5423
+
+-- Function to start video recording
+function start_video_recording()
+    local sock = Socket(0)
+    if not sock:bind("0.0.0.0", 9988) then
+        gcs:send_text(6, "Failed to bind socket")
+        sock:close()
+        return false
+    end
+
+    if not sock:connect(HTTP_HOST, HTTP_PORT) then
+        gcs:send_text(6, string.format("Failed to connect to %s:%d", HTTP_HOST, HTTP_PORT))
+        sock:close()
+        return false
+    end
+
+    local request = "GET /start HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/start", HTTP_HOST, HTTP_PORT))
+    sock:send(request, string.len(request))
+    sock:close()
+    gcs:send_text(6, "Video recording started")
+    return true
+end
+
+-- Function to stop video recording
+function stop_video_recording()
+    local sock = Socket(0)
+    if not sock:bind("0.0.0.0", 9988) then
+        gcs:send_text(6, "Failed to bind socket")
+        sock:close()
+        return false
+    end
+
+    if not sock:connect(HTTP_HOST, HTTP_PORT) then
+        gcs:send_text(6, string.format("Failed to connect to %s:%d", HTTP_HOST, HTTP_PORT))
+        sock:close()
+        return false
+    end
+
+    local request = "GET /stop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    gcs:send_text(6, string.format("Sending request to http://%s:%d/stop", HTTP_HOST, HTTP_PORT))
+    sock:send(request, string.len(request))
+    sock:close()
+    gcs:send_text(6, "Video recording stopped")
+    return true
+end
 iteration_counter = 0
 
 function loop()
     get_data()
     updateswitch()
     control_dive_mission()
-    -- Update subtitle file with telemetry data
-    update_subtitle_file()
     -- Increment the iteration counter
     iteration_counter = iteration_counter + 1
     -- Log data to bin log at higher frequency (every 10 iterations)
@@ -875,7 +777,6 @@ function loop()
         -- Log state to bin log (5x more frequently)
         logger:write('STA', 'State', 'i', state)
         logger:write('DCR', 'DescentRate', 'f', 'm', '-', descent_rate)
-        -- Note: Temperature is already logged by ArduPilot as BARO(1).temp
     end
   
     -- GCS messages and other status checks (original frequency - every 50 iterations)
