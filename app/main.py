@@ -22,7 +22,8 @@ recording = False
 start_time = None
 subtitle_thread = None
 stop_subtitle_thread = False
-current_subtitle_file = None
+current_subtitle_file_h264 = None
+current_subtitle_file_rtsp = None
 
 # Mavlink URLs
 ahrs2_url = 'http://host.docker.internal/mavlink2rest/mavlink/vehicles/1/components/1/messages/AHRS2'
@@ -58,12 +59,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return subtitle_path
 
 def update_subtitles():
-    """Update subtitle file with current telemetry data"""
-    global stop_subtitle_thread, current_subtitle_file, start_time
+    """Update subtitle files with current telemetry data for both video streams"""
+    global stop_subtitle_thread, current_subtitle_file_h264, current_subtitle_file_rtsp, start_time
     
     subtitle_update_rate = 2  # Updates per second
     
-    while not stop_subtitle_thread and recording and current_subtitle_file:
+    while not stop_subtitle_thread and recording and (current_subtitle_file_h264 or current_subtitle_file_rtsp):
         try:
             # Get current timestamp relative to recording start
             if start_time:
@@ -80,9 +81,14 @@ def update_subtitles():
                 # Format subtitle text - using alignment tag \an1 for bottom left
                 subtitle_text = f"Dialogue: 0,{start_timestamp},{end_timestamp},Telemetry,,0,0,0,,{{\\an1}}Depth: {depth:.1f}m | Climb: {vfr_data:.2f}m/s | Temp: {baro_data:.1f}°C | Lights: {light_percentage}% | Time: {datetime.now().strftime('%H:%M:%S')}"
                 
-                # Append to subtitle file
-                with open(current_subtitle_file, 'a') as f:
-                    f.write(subtitle_text + '\n')
+                # Append to both subtitle files if they exist
+                if current_subtitle_file_h264:
+                    with open(current_subtitle_file_h264, 'a') as f:
+                        f.write(subtitle_text + '\n')
+                
+                if current_subtitle_file_rtsp:
+                    with open(current_subtitle_file_rtsp, 'a') as f:
+                        f.write(subtitle_text + '\n')
                 
             time.sleep(1/subtitle_update_rate)
         except Exception as e:
@@ -175,7 +181,7 @@ def register_service():
 
 @app.route('/start', methods=['GET'])
 def start():
-    global process, rtsp_process, recording, start_time, subtitle_thread, stop_subtitle_thread, current_subtitle_file
+    global process, rtsp_process, recording, start_time, subtitle_thread, stop_subtitle_thread, current_subtitle_file_h264, current_subtitle_file_rtsp
     try:
         if recording:
             return jsonify({"success": False, "message": "Already recording"}), 400
@@ -192,8 +198,9 @@ def start():
         filepath_h264 = os.path.join("/app/videorecordings", filename_h264)
         filepath_rtsp = os.path.join("/app/videorecordings", filename_rtsp)
         
-        # Create subtitle file (use h264 filename as base)
-        current_subtitle_file = create_subtitle_file(filepath_h264)
+        # Create subtitle files for both video streams
+        current_subtitle_file_h264 = create_subtitle_file(filepath_h264)
+        current_subtitle_file_rtsp = create_subtitle_file(filepath_rtsp)
         
         # Pipeline for H264 stream from /dev/video2
         h264_pipeline = ("v4l2src device=/dev/video2 ! "
@@ -265,12 +272,19 @@ def start():
         recording = True
         start_time = datetime.now()
         
-        # Start subtitle thread
+        # Start subtitle thread immediately for synchronization
         stop_subtitle_thread = False
         subtitle_thread = threading.Thread(target=update_subtitles)
         subtitle_thread.daemon = True
         subtitle_thread.start()
-        logger.info(f"Started telemetry subtitle generation for {current_subtitle_file}")
+        
+        # Log which subtitle files are being generated
+        subtitle_files = []
+        if current_subtitle_file_h264:
+            subtitle_files.append(f"H264: {current_subtitle_file_h264}")
+        if current_subtitle_file_rtsp:
+            subtitle_files.append(f"RTSP: {current_subtitle_file_rtsp}")
+        logger.info(f"Started telemetry subtitle generation: {'; '.join(subtitle_files)}")
         
         return jsonify({"success": True})
     except Exception as e:
@@ -289,11 +303,13 @@ def start():
                 pass
         process = None
         rtsp_process = None
+        current_subtitle_file_h264 = None
+        current_subtitle_file_rtsp = None
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/stop', methods=['GET'])
 def stop():
-    global process, rtsp_process, recording, start_time, subtitle_thread, stop_subtitle_thread
+    global process, rtsp_process, recording, start_time, subtitle_thread, stop_subtitle_thread, current_subtitle_file_h264, current_subtitle_file_rtsp
     try:
         if not recording:
             return jsonify({"success": True})
@@ -341,6 +357,8 @@ def stop():
         start_time = None
         process = None
         rtsp_process = None
+        current_subtitle_file_h264 = None
+        current_subtitle_file_rtsp = None
         
         logger.info("Both recording processes stopped successfully")
         return jsonify({"success": True})
@@ -360,6 +378,8 @@ def stop():
                 pass
         process = None
         rtsp_process = None
+        current_subtitle_file_h264 = None
+        current_subtitle_file_rtsp = None
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/status', methods=['GET'])
