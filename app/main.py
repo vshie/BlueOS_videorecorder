@@ -77,8 +77,8 @@ def update_subtitles():
                 baro_data = get_baro_data()
                 light_percentage = get_light_output()
                 
-                # Format subtitle text - using alignment tag \an8 for top center
-                subtitle_text = f"Dialogue: 0,{start_timestamp},{end_timestamp},Telemetry,,0,0,0,,{{\\an8}}Depth: {depth:.1f}m | Climb: {vfr_data:.2f}m/s | Temp: {baro_data:.1f}°C | Lights: {light_percentage}% | Time: {datetime.now().strftime('%H:%M:%S')}"
+                # Format subtitle text - using alignment tag \an1 for bottom left
+                subtitle_text = f"Dialogue: 0,{start_timestamp},{end_timestamp},Telemetry,,0,0,0,,{{\\an1}}Depth: {depth:.1f}m | Climb: {vfr_data:.2f}m/s | Temp: {baro_data:.1f}°C | Lights: {light_percentage}% | Time: {datetime.now().strftime('%H:%M:%S')}"
                 
                 # Append to subtitle file
                 with open(current_subtitle_file, 'a') as f:
