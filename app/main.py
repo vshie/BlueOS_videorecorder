@@ -210,34 +210,57 @@ def start():
         rtsp_command = ["gst-launch-1.0", "-e"] + shlex.split(rtsp_pipeline)
 
         # Start H264 recording process
-        process = subprocess.Popen(h264_command,
-                           stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE)
-        
-        logger.info(f"Starting H264 recording with command: {' '.join(h264_command)}")
-        
-        if process.poll() is not None:
-            stdout, stderr = process.communicate()
-            logger.error(f"H264 process failed to start. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
-            raise Exception(f"Failed to start H264 recording: {stderr.decode()}")
+        h264_started = False
+        try:
+            process = subprocess.Popen(h264_command,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
+            
+            logger.info(f"Starting H264 recording with command: {' '.join(h264_command)}")
+            
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                logger.error(f"H264 process failed to start. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
+                process = None
+            else:
+                h264_started = True
+                logger.info("H264 recording started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start H264 recording: {str(e)}")
+            process = None
         
         # Start RTSP recording process
-        rtsp_process = subprocess.Popen(rtsp_command,
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE)
+        rtsp_started = False
+        try:
+            rtsp_process = subprocess.Popen(rtsp_command,
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+            
+            logger.info(f"Starting RTSP recording with command: {' '.join(rtsp_command)}")
+            
+            if rtsp_process.poll() is not None:
+                stdout, stderr = rtsp_process.communicate()
+                logger.error(f"RTSP process failed to start. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
+                rtsp_process = None
+            else:
+                rtsp_started = True
+                logger.info("RTSP recording started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start RTSP recording: {str(e)}")
+            rtsp_process = None
         
-        logger.info(f"Starting RTSP recording with command: {' '.join(rtsp_command)}")
+        # Check if at least one stream started successfully
+        if not h264_started and not rtsp_started:
+            logger.error("Both video streams failed to start")
+            return jsonify({"success": False, "message": "Both video streams failed to start"}), 500
         
-        if rtsp_process.poll() is not None:
-            stdout, stderr = rtsp_process.communicate()
-            logger.error(f"RTSP process failed to start. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
-            # Kill H264 process if RTSP fails
-            try:
-                process.kill()
-            except:
-                pass
-            process = None
-            raise Exception(f"Failed to start RTSP recording: {stderr.decode()}")
+        # Log which streams are active
+        active_streams = []
+        if h264_started:
+            active_streams.append("H264")
+        if rtsp_started:
+            active_streams.append("RTSP")
+        logger.info(f"Recording started successfully with streams: {', '.join(active_streams)}")
             
         recording = True
         start_time = datetime.now()
@@ -290,10 +313,12 @@ def stop():
             # Wait for the process to handle EOS
             try:
                 process.wait(timeout=7)
+                logger.info("H264 recording process stopped successfully")
             except subprocess.TimeoutExpired:
                 logger.warning("H264 process did not exit gracefully, force killing")
                 process.kill()
                 process.wait()
+                logger.info("H264 recording process force killed")
         
         # Stop RTSP recording process
         if rtsp_process:
@@ -305,10 +330,12 @@ def stop():
             # Wait for the process to handle EOS
             try:
                 rtsp_process.wait(timeout=7)
+                logger.info("RTSP recording process stopped successfully")
             except subprocess.TimeoutExpired:
                 logger.warning("RTSP process did not exit gracefully, force killing")
                 rtsp_process.kill()
                 rtsp_process.wait()
+                logger.info("RTSP recording process force killed")
         
         recording = False
         start_time = None
@@ -339,22 +366,29 @@ def stop():
 def get_status():
     global process, rtsp_process, recording, start_time
     try:
-        # Check if either process has died
-        if (process and process.poll() is not None) or (rtsp_process and rtsp_process.poll() is not None):
-            recording = False
-            start_time = None
-            if process:
-                try:
-                    process.kill()
-                except:
-                    pass
-            if rtsp_process:
-                try:
-                    rtsp_process.kill()
-                except:
-                    pass
+        # Check if processes have died and clean up individually
+        if process and process.poll() is not None:
+            logger.warning("H264 recording process has died")
+            try:
+                process.kill()
+            except:
+                pass
             process = None
+            
+        if rtsp_process and rtsp_process.poll() is not None:
+            logger.warning("RTSP recording process has died")
+            try:
+                rtsp_process.kill()
+            except:
+                pass
             rtsp_process = None
+        
+        # Only stop recording if both processes are dead or None
+        if (not process or process.poll() is not None) and (not rtsp_process or rtsp_process.poll() is not None):
+            if recording:
+                logger.info("All recording processes have stopped")
+                recording = False
+                start_time = None
             
         return jsonify({
             "recording": recording,
