@@ -153,7 +153,25 @@ function updateswitch()
         end
     else
         -- Normal physical switch mode
-        switch_state = gpio:read(27)
+        -- Depth-based switch mode
+        local depth = -baro:get_altitude() -- positive downwards
+        if depth > 10.0 then
+            -- Count consecutive readings > 10m
+            if not depth_trigger_count then depth_trigger_count = 0 end
+            depth_trigger_count = depth_trigger_count + 1
+            if depth_trigger_count >= 3 then
+                switch_state = true -- Trigger after 3 consecutive readings > 10m
+            end
+        else
+            -- Reset counter if depth < 10m
+            if depth_trigger_count then depth_trigger_count = 0 end
+            -- ONLY reset switch_state to false if we're in STANDBY state
+            -- This prevents aborting active missions when depth drops
+            if state == STANDBY then
+                switch_state = false
+            end
+            -- If we're in an active mission, keep switch_state = true regardless of depth
+        end
     end
     
     -- Common switch handling logic
