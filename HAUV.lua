@@ -1,5 +1,7 @@
 -- This script controls the dive mission of a hovering AUV. The vehicle must have the video recorder extension installed,
--- and the USB video device providing h264 on video 2, and removed from the Video Streams BlueOS page.
+-- and the USB video device providing h264 on video 2, and removed from the Video Streams BlueOS page.It also uses a RadCam, without PWM servo control of focus/zoom. 
+-- The camera has been configured to H265, main profile, and is accessed directly 
+-- at 192.168.2.10 with username admin password blue 
 -- The script is executed each time the autopilot starts.
 -- Follow the code to understand the structure, many comments are included...
 PARAM_TABLE_KEY = 91
@@ -64,6 +66,7 @@ ABORT = 7
 COMPLETE = 8
 
 -- Initialize variables
+gpio:pinMode(27,0) -- set pwm0  (Leak port on navigator) to input, used to connect external "arming" switch to 3.3V and signal pin
 state = STANDBY
 timer = 0
 last_depth = 0 --used to track depth to detect collision with bottom
@@ -79,8 +82,9 @@ impact_detection_count = 0  -- Count consecutive slow readings
 slow_zone_entered = false   -- Flag to track if we've entered slow zone
 slow_zone_time = 0          -- Time when we entered slow zone
 slow_zone_grace_period = 5000  -- 5 second grace period after throttle change
+ws_transition_grace_period = 10000  -- 10 second grace period after water sampling transition
+ws_transition_time = 0      -- Time when transitioning from water sampling
 dive_timeout = 10 --minutes - need to set based on descent rate measured in deployment 2
-gpio:pinMode(27,0) -- set pwm0 to input, used to connect external "arming" switch
 switch_opened_after_complete = false -- Flag to track if switch was opened after mission completion
 lights_off_reported = false  -- Flag to track if we've reported turning off lights
 last_log_time = 0  -- For tracking light intensity logging
@@ -153,25 +157,27 @@ function updateswitch()
         end
     else
         -- Normal physical switch mode
-        -- Depth-based switch mode
-        local depth = -baro:get_altitude() -- positive downwards
-        if depth > 10.0 then
-            -- Count consecutive readings > 10m
-            if not depth_trigger_count then depth_trigger_count = 0 end
-            depth_trigger_count = depth_trigger_count + 1
-            if depth_trigger_count >= 3 then
-                switch_state = true -- Trigger after 3 consecutive readings > 10m
-            end
-        else
-            -- Reset counter if depth < 10m
-            if depth_trigger_count then depth_trigger_count = 0 end
-            -- ONLY reset switch_state to false if we're in STANDBY state
-            -- This prevents aborting active missions when depth drops
-            if state == STANDBY then
-                switch_state = false
-            end
-            -- If we're in an active mission, keep switch_state = true regardless of depth
-        end
+        -- Normal physical switch mode
+        switch_state = gpio:read(27)
+        -- -- Depth-based switch mode
+        -- local depth = -baro:get_altitude() -- positive downwards
+        -- if depth > 10.0 then
+        --     -- Count consecutive readings > 10m
+        --     if not depth_trigger_count then depth_trigger_count = 0 end
+        --     depth_trigger_count = depth_trigger_count + 1
+        --     if depth_trigger_count >= 3 then
+        --         switch_state = true -- Trigger after 3 consecutive readings > 10m
+        --     end
+        -- else
+        --     -- Reset counter if depth < 10m
+        --     if depth_trigger_count then depth_trigger_count = 0 end
+        --     -- ONLY reset switch_state to false if we're in STANDBY state
+        --     -- This prevents aborting active missions when depth drops
+        --     if state == STANDBY then
+        --         switch_state = false
+        --     end
+        --     -- If we're in an active mission, keep switch_state = true regardless of depth
+        -- end
     end
     
     -- Common switch handling logic
@@ -530,8 +536,11 @@ function control_dive_mission()
             gcs:send_text(6, "Dive duration timeout")
         end
         if depth > 5 and descent_rate < impact_threshold then
-            -- Don't detect impact during the grace period after entering slow zone
-            if not (slow_zone_entered and (millis() - slow_zone_time < slow_zone_grace_period)) then
+            -- Don't detect impact during grace periods
+            local in_slow_zone_grace = slow_zone_entered and (millis() - slow_zone_time < slow_zone_grace_period)
+            local in_ws_transition_grace = ws_transition_time > 0 and (millis() - ws_transition_time < ws_transition_grace_period)
+            
+            if not (in_slow_zone_grace or in_ws_transition_grace) then
                 impact_detection_count = impact_detection_count + 1
                 if impact_detection_count >= 3 then  -- Require 3 consecutive detections
                     gcs:send_text(6, string.format("Impact detected at %.1fm, rate: %.2f", depth, descent_rate))
@@ -540,9 +549,18 @@ function control_dive_mission()
                     gcs:send_text(6, "Bottom strike detected - lights set to 100% brightness")
                     transition_to_hovering()
                 end
+            else
+                if in_ws_transition_grace then
+                    gcs:send_text(6, string.format("Impact detection suppressed - in water sampling transition grace period, rate: %.2f", descent_rate))
+                end
             end
         else
             impact_detection_count = 0  -- Reset counter if descent rate is normal
+            -- Clear water sampling transition grace period if descent rate is normal
+            if ws_transition_time > 0 then
+                ws_transition_time = 0
+                gcs:send_text(6, "Water sampling transition grace period cleared - normal descent resumed")
+            end
         end
         if depth > target_depth:get() then --handles target depth reached
             gcs:send_text(6, "Target depth reached")
@@ -578,6 +596,9 @@ function control_dive_mission()
         if hover_elapsed >= ws_hover_duration_ms then
             gcs:send_text(6, string.format("Water sampling complete at %.1fm - resuming descent", depth))
             state = DESCENDING
+            -- Set grace period timer to prevent false impact detection
+            ws_transition_time = millis()
+            gcs:send_text(6, "Water sampling transition grace period started")
             -- Reset water sampling variables
             ws_relay_toggled = false
             ws_relay_triggered = false
@@ -721,10 +742,17 @@ function control_dive_mission()
         ws_relay_toggled = false
         ws_relay_triggered = false
         ws_sample_count = 0
+        ws_transition_time = 0  -- Reset water sampling transition grace period
     end
 end
 -- Transition to HOVERING state
 function transition_to_hovering()
+    -- Trigger auto white balance right when we start the hover state after bottom strike
+    gcs:send_text(6, "Auto white balance")
+    send_http_request(
+        '/action/cgi_action?user=admin&pwd=blue&json={"onceAWB":1}',
+        "GET", {}, nil)
+    
     hover_depth = depth - hover_offset:get()
     state = ASCEND_TOHOVER
     current_ascent_throttle = ascent_throttle:get()  -- Initialize ascent throttle when transitioning
@@ -736,6 +764,10 @@ end
 -- HTTP Configuration
 HTTP_HOST = "localhost"
 HTTP_PORT = 5423
+
+-- Camera Configuration
+cameraip = "192.168.2.10"  -- Camera IP address
+cameraport = 80  -- Camera HTTP port
 
 -- Function to start video recording
 function start_video_recording()
@@ -782,6 +814,36 @@ function stop_video_recording()
     gcs:send_text(6, "Video recording stopped")
     return true
 end
+
+-- Function to send HTTP requests to camera
+function send_http_request(url, method, headers, body)
+  local sock = Socket(0)
+
+  if not sock:bind("0.0.0.0", 9988) then
+    gcs:send_text(0, string.format("WebServer: failed to bind to TCP %u", 9988))
+    sock:close()
+    return
+  end
+
+  if (sock:is_connected() == false) then
+    if (not sock:connect(cameraip, cameraport)) then
+      gcs:send_text(0, "Connection failed ")
+      sock:close()
+      return
+    end
+  end
+
+  -- Send HTTP request (basic implementation)
+  local request = string.format("%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", 
+                               method, url, cameraip)
+  if body then
+    request = request .. body
+  end
+  
+  sock:send(request, string.len(request))
+  sock:close()
+end
+
 iteration_counter = 0
 
 function loop()
