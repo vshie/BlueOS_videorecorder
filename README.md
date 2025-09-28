@@ -27,7 +27,7 @@ An ArduPilot Lua script that controls automated dive missions for a hovering AUV
 ## Installation
 
 ### Prerequisites
-- BlueOS running on compatible hardware
+- BlueOS running on compatible hardware ([Installation Guide](https://blueos.cloud/docs/latest/usage/installation/))
 - ArduSub firmware with Lua scripting enabled
 - USB video device providing H.264 stream on `/dev/video2`
 
@@ -115,6 +115,11 @@ The extension uses HTTP endpoints:
    - Verify GPIO pin 27 connection
    - Check switch wiring to 3.3V and signal pin
    - Monitor GCS messages for switch state updates
+
+## Hardware
+
+CAD files for the Profiling AUVE is available:
+- [Onshape CAD Document](https://cad.onshape.com/documents/e4693243722d954d549cf47c/w/2125e0004d02499999f2c26f/e/567b98a997673cb9745957bb?renderMode=0&uiState=68d9aa5e71f48e4fab9e347f)
 
 ## Development
 
