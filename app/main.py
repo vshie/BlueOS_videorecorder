@@ -178,7 +178,9 @@ def update_ass_file():
             time.sleep(1)
 
 
-def adjust_ass_timing(ass_path, video_duration, video_start_time=0.0):
+def adjust_ass_timing(ass_path, video_duration):
+    """Scale ASS dialogue timestamps so they span exactly video_duration.
+    Timestamps stay 0-based (players normalise the video timeline to start at 0)."""
     try:
         with open(ass_path, "r") as f:
             lines = f.readlines()
@@ -194,9 +196,8 @@ def adjust_ass_timing(ass_path, video_duration, video_start_time=0.0):
                 header.append(line)
         if not dialogues or max_t == 0:
             return
-        offset = video_start_time if video_start_time > 1.0 else 0.0
         scale = video_duration / max_t
-        if offset == 0.0 and abs(scale - 1.0) < 0.005:
+        if abs(scale - 1.0) < 0.005:
             return
         with open(ass_path, "w") as f:
             for line in header:
@@ -204,13 +205,10 @@ def adjust_ass_timing(ass_path, video_duration, video_start_time=0.0):
             for line in dialogues:
                 parts = line.split(",", 9)
                 if len(parts) >= 3:
-                    parts[1] = format_ass_ts(parse_ass_ts(parts[1]) * scale + offset)
-                    parts[2] = format_ass_ts(parse_ass_ts(parts[2]) * scale + offset)
+                    parts[1] = format_ass_ts(parse_ass_ts(parts[1]) * scale)
+                    parts[2] = format_ass_ts(parse_ass_ts(parts[2]) * scale)
                 f.write(",".join(parts))
-        if offset > 0:
-            logger.warning(f"ASS timing offset by {offset:.2f}s (video PTS doesn't start at zero)")
-        if abs(scale - 1.0) >= 0.005:
-            logger.info(f"ASS timing scaled by {scale:.4f}")
+        logger.info(f"ASS timing scaled by {scale:.4f}")
     except Exception as e:
         logger.error(f"ASS timing adjust error: {e}")
 
@@ -547,7 +545,7 @@ def _stop_recording_internal():
         time.sleep(2)
         dur, st = get_video_duration(video_path)
         if dur:
-            adjust_ass_timing(ass_path, dur, video_start_time=st)
+            adjust_ass_timing(ass_path, dur)
             if st > 1.0:
                 logger.warning(f"Video PTS offset: start_time={st:.2f}s (expected ~0)")
                 if events_path:
