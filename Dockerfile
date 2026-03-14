@@ -2,12 +2,14 @@ FROM ubuntu:20.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Python and build tools
+# Python, build tools, and Pillow native dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     python3 \
     python3-pip \
     python3-dev \
     build-essential \
+    libjpeg-dev \
+    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # GStreamer
