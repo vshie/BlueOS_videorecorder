@@ -26,11 +26,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-install-su
     psmisc \
     && rm -rf /var/lib/apt/lists/*
 
-# ffmpeg for still capture and ffprobe, pigpio daemon for servo/light PWM
+# ffmpeg for still capture and ffprobe
 RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     ffmpeg \
-    pigpio \
+    wget \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Build pigpio daemon from source (not in Ubuntu repos -- it's a Raspbian-only package)
+RUN wget -qO /tmp/pigpio.tar.gz https://github.com/joan2937/pigpio/archive/master.tar.gz && \
+    cd /tmp && tar xf pigpio.tar.gz && \
+    cd pigpio-master && make -j"$(nproc)" && make install && \
+    ldconfig && \
+    rm -rf /tmp/pigpio*
 
 WORKDIR /app
 COPY app/ .
