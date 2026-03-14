@@ -2,13 +2,12 @@ FROM ubuntu:20.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Python, build tools, and CA certs (needed for any HTTPS downloads in later layers)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Python and build tools
+RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     python3 \
     python3-pip \
     python3-dev \
     build-essential \
-    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # GStreamer
@@ -32,11 +31,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-install-su
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Build pigpio daemon from source (not in Ubuntu repos -- Raspbian only)
-RUN python3 -c "import urllib.request; urllib.request.urlretrieve( \
-        'https://github.com/joan2937/pigpio/archive/master.tar.gz', \
-        '/tmp/pigpio.tar.gz')" \
-    && cd /tmp && tar xf pigpio.tar.gz \
+# Build pigpio daemon from source (not in Ubuntu/Debian repos -- Raspbian only).
+# ADD downloads via the Docker daemon, bypassing container SSL cert issues.
+ADD https://github.com/joan2937/pigpio/archive/master.tar.gz /tmp/pigpio.tar.gz
+RUN cd /tmp && tar xf pigpio.tar.gz \
     && cd pigpio-master && make -j"$(nproc)" && make install \
     && ldconfig \
     && rm -rf /tmp/pigpio*
