@@ -1,15 +1,16 @@
 FROM ubuntu:20.04
 
-# Avoid prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python and minimal dependencies first
+# Python and build tools
 RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     python3 \
     python3-pip \
+    python3-dev \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install GStreamer dependencies in separate steps
+# GStreamer
 RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
@@ -21,29 +22,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-install-su
 
 RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     gstreamer1.0-plugins-bad \
+    gstreamer1.0-libav \
     psmisc \
     && rm -rf /var/lib/apt/lists/*
 
-# Create app directory
-WORKDIR /app
+# ffmpeg for still capture and ffprobe, pigpio daemon, vcgencmd
+RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
+    ffmpeg \
+    pigpio \
+    libraspberrypi-bin \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy app files
+WORKDIR /app
 COPY app/ .
 
-# Install Python dependencies
-RUN pip3 install flask requests
+# Python dependencies
+RUN pip3 install flask requests pigpio rpi_ws281x Pillow
 
-# Create directory for video recordings
 RUN mkdir -p /app/videorecordings
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV FLASK_APP=main.py
 
-# Expose port
 EXPOSE 5423
 
-LABEL version="0.9"
+LABEL version="1.0"
 
 ARG IMAGE_NAME
 LABEL permissions='\
@@ -93,11 +96,13 @@ ARG OWNER
 LABEL readme=''
 LABEL links='\
 {\
-        "source": ""\
+        "source": "https://github.com/vshie/BlueOS_videorecorder"\
     }'
 LABEL requirements="core >= 1.1"
 
-# Mark /dev/video2 as a volume
 VOLUME ["/dev/video2"]
 
-ENTRYPOINT ["python3", "-u", "/app/main.py"]
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

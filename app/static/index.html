@@ -1,367 +1,767 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Video Recorder</title>
-    <script defer src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 20px auto;
-            padding: 0 20px;
-            background-color: white;
-            color: black;
-        }
-        
-        .status-container {
-            margin: 20px 0;
-            padding: 10px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            background-color: white;
-        }
-        
-        .controls {
-            margin: 20px 0;
-        }
-        
-        .error {
-            color: red;
-            display: none;
-            margin: 10px 0;
-            padding: 10px;
-            background-color: #ffe6e6;
-            border: 1px solid #ff9999;
-            border-radius: 4px;
-        }
-        
-        #recordingStatus {
-            font-weight: bold;
-        }
-        
-        #recordingDuration {
-            font-family: monospace;
-            font-size: 1.2em;
-            margin-left: 10px;
-        }
-        
-        button {
-            padding: 8px 16px;
-            margin-right: 10px;
-            cursor: pointer;
-            border-radius: 4px;
-            border: 1px solid #ccc;
-            background-color: white;
-        }
-        
-        button:hover {
-            background-color: #f0f0f0;
-        }
-        
-        button:disabled {
-            background-color: #cccccc;
-            cursor: not-allowed;
-        }
-        
-        .recording {
-            color: red;
-            font-weight: bold;
-        }
-        
-        #videoList {
-            list-style: none;
-            padding: 0;
-        }
-        
-        #videoList li {
-            margin: 5px 0;
-            padding: 5px;
-            border-bottom: 1px solid #eee;
-        }
-        
-        #videoList a {
-            text-decoration: none;
-            color: #0066cc;
-        }
-        
-        #videoList a:hover {
-            text-decoration: underline;
-        }
-        
-        .input-group {
-            margin: 15px 0;
-        }
-        
-        .input-group label {
-            margin-right: 10px;
-        }
-        
-        input[type="number"] {
-            padding: 5px;
-            border-radius: 4px;
-            border: 1px solid #ccc;
-            background-color: white;
-        }
-        
-        .telemetry-container {
-            margin: 20px 0;
-            padding: 10px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            background-color: #f9f9f9;
-        }
-        
-        .telemetry-title {
-            font-weight: bold;
-            margin-bottom: 10px;
-        }
-        
-        .telemetry-data {
-            display: flex;
-            justify-content: space-between;
-            flex-wrap: wrap;
-        }
-        
-        .telemetry-item {
-            flex: 1;
-            min-width: 120px;
-            margin: 5px;
-            padding: 8px;
-            background-color: white;
-            border-radius: 4px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-        
-        .telemetry-item-label {
-            font-size: 0.9em;
-            color: #666;
-        }
-        
-        .telemetry-item-value {
-            font-size: 1.2em;
-            font-weight: bold;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DropCam</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f4f5f7;color:#1a1a1a;max-width:900px;margin:0 auto;padding:12px}
+h1{font-size:1.4em;margin-bottom:4px}
+h2{font-size:1.1em;margin:16px 0 8px;color:#333}
+h3{font-size:0.95em;margin:12px 0 6px;color:#555}
+
+/* Tabs */
+.tabs{display:flex;border-bottom:2px solid #ddd;margin-bottom:16px;gap:2px}
+.tab{padding:10px 20px;cursor:pointer;border:none;background:none;font-size:0.95em;font-weight:600;color:#666;border-bottom:3px solid transparent;transition:all .2s}
+.tab:hover{color:#333}
+.tab.active{color:#1a73e8;border-bottom-color:#1a73e8}
+.tab-content{display:none}
+.tab-content.active{display:block}
+
+/* Cards */
+.card{background:#fff;border-radius:8px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+
+/* Status indicator */
+.status-dot{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px;vertical-align:middle}
+.status-dot.idle{background:#999}
+.status-dot.recording{background:#e53935;animation:pulse 1.2s infinite}
+.status-dot.degraded{background:#f9a825;animation:pulse 0.5s infinite}
+.status-dot.complete{background:#1a73e8}
+.status-dot.failed{background:#e53935}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* Buttons */
+button,.btn{padding:8px 16px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer;font-size:0.9em;transition:all .15s}
+button:hover,.btn:hover{background:#f0f0f0}
+button:disabled{opacity:.45;cursor:not-allowed}
+.btn-start{background:#43a047;color:#fff;border-color:#388e3c}
+.btn-start:hover:not(:disabled){background:#388e3c}
+.btn-stop{background:#e53935;color:#fff;border-color:#c62828}
+.btn-stop:hover:not(:disabled){background:#c62828}
+.btn-primary{background:#1a73e8;color:#fff;border-color:#1557b0}
+.btn-primary:hover{background:#1557b0}
+.btn-danger{background:#e53935;color:#fff;border-color:#c62828}
+.btn-danger:hover{background:#c62828}
+.btn-sm{padding:4px 10px;font-size:.82em}
+
+/* Form elements */
+select,input[type=text],input[type=number]{padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:.9em;background:#fff}
+select:focus,input:focus{outline:none;border-color:#1a73e8}
+label{font-size:.88em;color:#555;display:block;margin-bottom:3px}
+.form-row{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:10px}
+.form-group{flex:1;min-width:140px}
+.form-group.narrow{max-width:160px;flex:0 0 auto}
+
+/* Telemetry grid */
+.telem-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+.telem-item{padding:8px;background:#f8f9fa;border-radius:6px;text-align:center}
+.telem-label{font-size:.78em;color:#777;margin-bottom:2px}
+.telem-value{font-size:1.05em;font-weight:600;font-family:"SF Mono","Fira Code",monospace}
+
+/* Slider */
+input[type=range]{width:100%;margin:4px 0;accent-color:#1a73e8}
+
+/* Snapshot */
+.snapshot-area{text-align:center;margin:12px 0}
+.snapshot-area img{max-width:100%;border-radius:6px;border:1px solid #ddd}
+.snapshot-placeholder{background:#e8e8e8;border-radius:6px;padding:40px;color:#999;font-size:.9em}
+
+/* Recipe list */
+.recipe-item{display:flex;align-items:center;padding:8px 12px;border:1px solid #e0e0e0;border-radius:6px;margin-bottom:6px;background:#fafafa}
+.recipe-item .name{flex:1;font-weight:600;font-size:.92em}
+.recipe-item .meta{font-size:.8em;color:#777;margin-right:12px}
+.recipe-actions{display:flex;gap:4px}
+
+/* Warning banner */
+.banner{padding:8px 14px;border-radius:6px;margin-bottom:10px;font-size:.88em}
+.banner.warn{background:#fff3cd;border:1px solid #ffc107;color:#856404}
+.banner.info{background:#d1ecf1;border:1px solid #bee5eb;color:#0c5460}
+.banner.error{background:#f8d7da;border:1px solid #f5c6cb;color:#721c24}
+
+/* Misc */
+.mono{font-family:"SF Mono","Fira Code",monospace}
+.text-muted{color:#888;font-size:.85em}
+.mt-8{margin-top:8px}
+.mb-8{margin-bottom:8px}
+.hidden{display:none}
+.flex-between{display:flex;justify-content:space-between;align-items:center}
+.gap-8{gap:8px}
+hr{border:none;border-top:1px solid #eee;margin:12px 0}
+
+/* Setup content */
+.setup-content h2{margin-top:20px}
+.setup-content p,.setup-content li{line-height:1.6;font-size:.92em}
+.setup-content ul{margin-left:20px;margin-bottom:10px}
+.setup-content code{background:#eee;padding:1px 5px;border-radius:3px;font-size:.88em}
+.setup-content table{width:100%;border-collapse:collapse;margin:10px 0}
+.setup-content th,.setup-content td{border:1px solid #ddd;padding:6px 10px;text-align:left;font-size:.88em}
+.setup-content th{background:#f0f0f0}
+</style>
 </head>
 <body>
-    <h1>Video Recorder</h1>
-    <div style="margin-bottom: 15px; color: #666;">
-        <p>Using camera device: <strong>/dev/video2</strong></p>
+
+<div class="flex-between mb-8">
+  <h1>DropCam</h1>
+  <span class="text-muted mono" id="sysTime">--</span>
+</div>
+
+<div id="timeBanner" class="banner warn hidden">System clock may not be synchronized. Connect a device to the BlueOS WiFi AP and load this page to sync time.</div>
+
+<div class="tabs">
+  <button class="tab active" data-tab="status">Status</button>
+  <button class="tab" data-tab="recipes">Recipes</button>
+  <button class="tab" data-tab="setup">Setup</button>
+</div>
+
+<!-- ═══════════════ STATUS TAB ═══════════════ -->
+<div class="tab-content active" id="tab-status">
+
+  <div class="card">
+    <div class="flex-between">
+      <div><span class="status-dot idle" id="statusDot"></span><strong id="statusText">Idle</strong>
+        <span class="mono" id="durationText" style="margin-left:8px;color:#666"></span>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn-start" id="btnStart" onclick="manualStart()">Start</button>
+        <button class="btn-stop" id="btnStop" onclick="manualStop()" disabled>Stop</button>
+      </div>
     </div>
-    <div class="status-container">
-        <p>Status: <span id="recordingStatus">Stopped</span><span id="recordingTime" style="display: none;"></span></p>
+    <div class="mt-8 text-muted" id="fileSizeText"></div>
+  </div>
+
+  <!-- Auto-start recipe selector -->
+  <div class="card">
+    <div class="form-row">
+      <div class="form-group">
+        <label>Auto-Start Recipe</label>
+        <select id="autoRecipeSelect" onchange="setActiveRecipe()">
+          <option value="">None (manual only)</option>
+        </select>
+      </div>
+      <button class="btn-primary btn-sm" onclick="startSchedule()" id="btnSchedule">Start Schedule</button>
+      <button class="btn-sm" onclick="stopSchedule()" id="btnScheduleStop" disabled>Cancel Schedule</button>
     </div>
-    
-    <!-- Telemetry Panel -->
-    <div class="telemetry-container">
-        <div class="telemetry-title">Live Telemetry</div>
-        <div class="telemetry-data">
-            <div class="telemetry-item">
-                <div class="telemetry-item-label">Depth</div>
-                <div class="telemetry-item-value" id="telemetryDepth">--</div>
-            </div>
-            <div class="telemetry-item">
-                <div class="telemetry-item-label">Climb Rate</div>
-                <div class="telemetry-item-value" id="telemetryClimb">--</div>
-            </div>
-            <div class="telemetry-item">
-                <div class="telemetry-item-label">Temperature</div>
-                <div class="telemetry-item-value" id="telemetryTemp">--</div>
-            </div>
-            <div class="telemetry-item">
-                <div class="telemetry-item-label">Lights</div>
-                <div class="telemetry-item-value" id="telemetryLights">--</div>
-            </div>
-            <div class="telemetry-item">
-                <div class="telemetry-item-label">Time</div>
-                <div class="telemetry-item-value" id="telemetryTime">--</div>
-            </div>
+    <div class="text-muted mt-8" id="scheduleStatus"></div>
+  </div>
+
+  <!-- Snapshot -->
+  <div class="card">
+    <div class="flex-between mb-8">
+      <h3>Camera Preview</h3>
+      <div style="display:flex;gap:6px">
+        <button class="btn-sm" onclick="takeSnapshot()">Snapshot</button>
+        <button class="btn-sm" onclick="cycleRotation()">Rotate <span id="rotLabel">0</span>&deg;</button>
+      </div>
+    </div>
+    <div class="snapshot-area">
+      <div class="snapshot-placeholder" id="snapPlaceholder">Click "Snapshot" to preview</div>
+      <img id="snapImg" class="hidden" alt="Camera snapshot">
+    </div>
+  </div>
+
+  <!-- Servo & Light direct control -->
+  <div class="card">
+    <h3>Manual Controls</h3>
+    <div class="form-row mt-8">
+      <div class="form-group">
+        <label>Servo Position: <span id="servoVal" class="mono">1500</span> us</label>
+        <input type="range" id="servoSlider" min="1000" max="2000" step="10" value="1500" oninput="setServo(this.value)">
+      </div>
+      <div class="form-group narrow">
+        <label>Light</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="range" id="lightSlider" min="0" max="100" step="5" value="0" oninput="setLight(this.value)" style="width:90px">
+          <span class="mono" id="lightVal">0</span>%
+          <button class="btn-sm" id="lightToggle" onclick="toggleLight()">Off</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Telemetry -->
+  <div class="card">
+    <h3>System Telemetry</h3>
+    <div class="telem-grid mt-8">
+      <div class="telem-item"><div class="telem-label">CPU Temp</div><div class="telem-value" id="tCpuTemp">--</div></div>
+      <div class="telem-item"><div class="telem-label">CPU Voltage</div><div class="telem-value" id="tCpuVolt">--</div></div>
+      <div class="telem-item"><div class="telem-label">CPU Clock</div><div class="telem-value" id="tCpuClk">--</div></div>
+      <div class="telem-item"><div class="telem-label">Disk Free</div><div class="telem-value" id="tDisk">--</div></div>
+      <div class="telem-item"><div class="telem-label">Time Synced</div><div class="telem-value" id="tSync">--</div></div>
+      <div class="telem-item"><div class="telem-label">Servo</div><div class="telem-value" id="tServo">--</div></div>
+      <div class="telem-item"><div class="telem-label">Light</div><div class="telem-value" id="tLight">--</div></div>
+      <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
+    </div>
+  </div>
+
+  <!-- Video list -->
+  <div class="card">
+    <h3>Recorded Files</h3>
+    <ul id="videoList" style="list-style:none;margin-top:8px"></ul>
+    <div id="noFiles" class="text-muted mt-8">No recordings yet.</div>
+  </div>
+
+</div>
+
+<!-- ═══════════════ RECIPES TAB ═══════════════ -->
+<div class="tab-content" id="tab-recipes">
+
+  <div class="card">
+    <div class="flex-between mb-8">
+      <h3>Saved Recipes</h3>
+      <button class="btn-primary btn-sm" onclick="newRecipe()">+ New Recipe</button>
+    </div>
+    <div id="recipeList"></div>
+  </div>
+
+  <div class="card hidden" id="recipeEditor">
+    <h3 id="editorTitle">New Recipe</h3>
+    <hr>
+    <div class="form-row">
+      <div class="form-group"><label>Name</label><input type="text" id="rName" placeholder="My Recipe"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group narrow">
+        <label>Mode</label>
+        <select id="rMode" onchange="toggleStillsFields()">
+          <option value="video">Video</option>
+          <option value="stills">Still Capture</option>
+        </select>
+      </div>
+      <div class="form-group narrow" id="stillsIntervalGroup">
+        <label>Still Interval (s)</label>
+        <input type="number" id="rStillInterval" value="1.0" min="0.1" max="3600" step="0.1">
+      </div>
+      <div class="form-group narrow">
+        <label>Duration (min)</label>
+        <input type="number" id="rDuration" value="30" min="1" max="480">
+      </div>
+      <div class="form-group narrow">
+        <label>Auto-Start Delay (min)</label>
+        <input type="number" id="rDelay" value="1" min="0" max="60">
+      </div>
+      <div class="form-group narrow">
+        <label>Rotation</label>
+        <select id="rRotation">
+          <option value="0">0&deg;</option>
+          <option value="90">90&deg;</option>
+          <option value="180">180&deg;</option>
+          <option value="270">270&deg;</option>
+        </select>
+      </div>
     </div>
 
-    <div class="error" id="errorMessage"></div>
-    
-    <div class="controls">
-        <button id="startButton" onclick="startRecording()">Start Recording</button>
-        <button id="stopButton" onclick="stopRecording()" disabled>Stop Recording</button>
+    <h3>Servo</h3>
+    <div class="form-row">
+      <div class="form-group narrow">
+        <label><input type="checkbox" id="rServoFixed" onchange="toggleServoFields()" checked> Fixed Position</label>
+      </div>
     </div>
-    
-    <h2>Recorded Videos</h2>
-    <ul id="videoList"></ul>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Start Position: <span id="rServoStartVal" class="mono">1500</span> us</label>
+        <input type="range" id="rServoStart" min="1000" max="2000" step="10" value="1500" oninput="previewServo(this.value,'rServoStartVal')">
+      </div>
+      <div class="form-group" id="servoEndGroup">
+        <label>End Position: <span id="rServoEndVal" class="mono">1500</span> us</label>
+        <input type="range" id="rServoEnd" min="1000" max="2000" step="10" value="1500" oninput="previewServo(this.value,'rServoEndVal')">
+      </div>
+    </div>
+    <div id="sweepFields">
+      <div class="form-row">
+        <div class="form-group narrow"><label>Sweep Time (s)</label><input type="number" id="rSweepTime" value="30" min="1" max="600"></div>
+        <div class="form-group narrow"><label>Pause Points</label><input type="number" id="rPausePoints" value="0" min="0" max="50"></div>
+        <div class="form-group narrow"><label>Loiter Time (s)</label><input type="number" id="rLoiterTime" value="0" min="0" max="120"></div>
+        <div class="form-group narrow"><label>Oscillations</label><input type="number" id="rOscillations" value="1" min="0" max="999"></div>
+      </div>
+    </div>
 
-    <!-- Iframe to embed the BlueOS file browser -->
-    <iframe src="" style="width: 100%; height: 600px; border: none;"></iframe>
+    <h3>Light</h3>
+    <div class="form-row">
+      <div class="form-group narrow">
+        <label><input type="checkbox" id="rLightOn"> Light On During Recording</label>
+      </div>
+      <div class="form-group narrow">
+        <label>Brightness: <span id="rLightBrightVal" class="mono">0</span>%</label>
+        <input type="range" id="rLightBright" min="0" max="100" step="5" value="0" oninput="document.getElementById('rLightBrightVal').textContent=this.value">
+      </div>
+    </div>
+
+    <hr>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn-primary" onclick="saveCurrentRecipe()">Save</button>
+      <button onclick="cancelEditor()">Cancel</button>
+    </div>
+    <input type="hidden" id="rId" value="">
+  </div>
+</div>
+
+<!-- ═══════════════ SETUP TAB ═══════════════ -->
+<div class="tab-content" id="tab-setup">
+  <div class="card setup-content" id="setupContent">
+    <!-- Populated by JS on load for cleanliness, or directly here -->
+  </div>
+</div>
 
 <script>
-let recordingTimer;
-let startTime;
-let fileListTimer;
-let telemetryTimer;
-let statusCheckTimer;
+/* ── State ─────────────────────────────────── */
+let isRecording = false;
+let recStartTime = null;
+let durationTimer = null;
+let lightIsOn = false;
 
-async function startRecording() {
-    try {
-        const response = await axios.get('/start');
-        if (response.data.success) {
-            document.getElementById("errorMessage").style.display = "none";
-            updateUIToRecording();
-        } else {
-            document.getElementById("errorMessage").textContent = response.data.message || "Failed to start recording";
-            document.getElementById("errorMessage").style.display = "block";
-        }
-    } catch (error) {
-        document.getElementById("errorMessage").textContent = error.response?.data?.message || "An unknown error occurred";
-        document.getElementById("errorMessage").style.display = "block";
-    }
-}
-
-async function stopRecording() {
-    try {
-        const response = await axios.get('/stop');
-        if (response.data.success) {
-            document.getElementById("errorMessage").style.display = "none";
-            updateUIToStopped();
-            await fetchVideos();
-        }
-    } catch (error) {
-        document.getElementById("errorMessage").textContent = error.response?.data?.error || "An unknown error occurred";
-        document.getElementById("errorMessage").style.display = "block";
-    }
-}
-
-// New function to update UI when recording starts
-function updateUIToRecording() {
-    document.getElementById("recordingStatus").textContent = "Recording";
-    document.getElementById("recordingStatus").className = "recording";
-    document.getElementById("startButton").disabled = true;
-    document.getElementById("stopButton").disabled = false;
-    
-    startTime = new Date();
-    document.getElementById("recordingTime").style.display = "inline";
-    clearInterval(recordingTimer);
-    recordingTimer = setInterval(updateRecordingTime, 1000);
-    
-    // Start more frequent telemetry updates when recording
-    clearInterval(telemetryTimer);
-    telemetryTimer = setInterval(fetchTelemetry, 1000);
-}
-
-// New function to update UI when recording stops
-function updateUIToStopped() {
-    document.getElementById("recordingStatus").textContent = "Stopped";
-    document.getElementById("recordingStatus").className = "";
-    document.getElementById("startButton").disabled = false;
-    document.getElementById("stopButton").disabled = true;
-    
-    clearInterval(recordingTimer);
-    document.getElementById("recordingTime").style.display = "none";
-    
-    // Slow down telemetry updates when not recording
-    clearInterval(telemetryTimer);
-    telemetryTimer = setInterval(fetchTelemetry, 5000);
-}
-
-function updateRecordingTime() {
-    const now = new Date();
-    const diff = now - startTime;
-    const hours = Math.floor(diff / 3600000);
-    const minutes = Math.floor((diff % 3600000) / 60000);
-    const seconds = Math.floor((diff % 60000) / 1000);
-    const timeString = ` (${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')})`;
-    document.getElementById("recordingTime").innerText = timeString;
-}
-
-// New function to check recording status from the server
-async function checkRecordingStatus() {
-    try {
-        const response = await axios.get('/status');
-        const isRecording = response.data.recording;
-        const currentUIState = document.getElementById("recordingStatus").textContent === "Recording";
-        
-        // If status has changed, update UI to match
-        if (isRecording && !currentUIState) {
-            console.log("Detected recording started externally");
-            // Set startTime based on server's start_time if available
-            if (response.data.start_time) {
-                startTime = new Date(response.data.start_time);
-            } else {
-                startTime = new Date();
-            }
-            updateUIToRecording();
-        } else if (!isRecording && currentUIState) {
-            console.log("Detected recording stopped externally");
-            updateUIToStopped();
-            // Refresh video list when recording stops
-            await fetchVideos();
-        }
-    } catch (error) {
-        console.error("Error checking recording status:", error);
-    }
-}
-
-async function fetchTelemetry() {
-    try {
-        console.log("Fetching telemetry data...");
-        const response = await axios.get('/telemetry');
-        console.log("Telemetry response:", response.data);
-        
-        if (response.data.success) {
-            document.getElementById("telemetryDepth").textContent = `${response.data.depth} m`;
-            document.getElementById("telemetryClimb").textContent = `${response.data.climb} m/s`;
-            document.getElementById("telemetryTemp").textContent = `${response.data.temperature} °C`;
-            document.getElementById("telemetryLights").textContent = `${response.data.lights}%`;
-            document.getElementById("telemetryTime").textContent = response.data.timestamp;
-        } else {
-            console.error("Telemetry request failed:", response.data.message);
-        }
-    } catch (error) {
-        console.error("Failed to fetch telemetry:", error);
-        // Don't show error on UI as this happens frequently and we don't want to alarm users
-    }
-}
-
-async function fetchVideos() {
-    try {
-        const response = await axios.get('/list');
-        const videoList = document.getElementById("videoList");
-        videoList.innerHTML = '';
-        response.data.videos.forEach(video => {
-            const li = document.createElement('li');
-            const a = document.createElement('a');
-            a.href = `/download/${video}`;
-            a.textContent = video;
-            li.appendChild(a);
-            videoList.appendChild(li);
-        });
-    } catch (error) {
-        console.error("Error fetching videos:", error);
-    }
-}
-
-// Initial setup
-fetchVideos();
-fetchTelemetry();
-checkRecordingStatus();  // Check initial status
-
-// Set up periodic refreshes
-fileListTimer = setInterval(fetchVideos, 5000);
-telemetryTimer = setInterval(fetchTelemetry, 5000);
-statusCheckTimer = setInterval(checkRecordingStatus, 2000);  // Check status every 2 seconds
-
-// Set the iframe source dynamically based on the current host
-window.addEventListener('load', () => {
-    const iframe = document.querySelector('iframe');
-    iframe.src = `http://${window.location.hostname}:7777/files/extensions/videorecorder`;
+/* ── Tabs ──────────────────────────────────── */
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('tab-' + t.dataset.tab).classList.add('active');
+    if (t.dataset.tab === 'recipes') loadRecipes();
+  });
 });
 
-// Clean up timers when page is unloaded
+/* ── Helpers ───────────────────────────────── */
+function fmtDur(ms) {
+  const s = Math.floor(ms/1000)%60, m = Math.floor(ms/60000)%60, h = Math.floor(ms/3600000);
+  return [h,m,s].map(v=>String(v).padStart(2,'0')).join(':');
+}
+async function api(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    return await r.json();
+  } catch(e) { console.error(url, e); return {success:false, message:String(e)}; }
+}
+
+/* ── Status polling ────────────────────────── */
+async function pollStatus() {
+  const d = await api('/status');
+  if (!d || d.success === false) return;
+
+  const wasRec = isRecording;
+  isRecording = d.recording;
+
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  dot.className = 'status-dot ' + (isRecording ? d.health : 'idle');
+
+  if (isRecording) {
+    txt.textContent = 'Recording' + (d.mode==='stills' ? ' (stills)' : '');
+    document.getElementById('btnStart').disabled = true;
+    document.getElementById('btnStop').disabled = false;
+    if (!wasRec && d.duration_seconds > 0) {
+      recStartTime = new Date(Date.now() - d.duration_seconds*1000);
+      startDurationTimer();
+    } else if (!wasRec) {
+      recStartTime = new Date();
+      startDurationTimer();
+    }
+  } else {
+    txt.textContent = d.scheduler && d.scheduler.state === 'delay' ? 'Waiting to start...' :
+                      d.scheduler && d.scheduler.state === 'complete' ? 'Complete' : 'Idle';
+    document.getElementById('btnStart').disabled = false;
+    document.getElementById('btnStop').disabled = true;
+    stopDurationTimer();
+  }
+
+  const fsTxt = [];
+  if (d.file_size_mb > 0) fsTxt.push(d.file_size_mb + ' MB');
+  if (d.disk_free_mb != null) fsTxt.push('Disk free: ' + (d.disk_free_mb/1024).toFixed(1) + ' GB');
+  if (d.stills_count > 0) fsTxt.push(d.stills_count + ' stills');
+  document.getElementById('fileSizeText').textContent = fsTxt.join(' | ');
+
+  // Schedule status
+  const sched = d.scheduler || {};
+  const schedEl = document.getElementById('scheduleStatus');
+  if (sched.state === 'delay') {
+    schedEl.textContent = `Starting "${sched.recipe_name}" in ${Math.ceil(sched.remaining_s)}s...`;
+    document.getElementById('btnScheduleStop').disabled = false;
+  } else if (sched.state === 'recording') {
+    schedEl.textContent = `Recording "${sched.recipe_name}" — ${Math.ceil(sched.remaining_s/60)} min remaining`;
+    document.getElementById('btnScheduleStop').disabled = false;
+  } else if (sched.state === 'complete') {
+    schedEl.textContent = `Schedule complete: "${sched.recipe_name}"`;
+    document.getElementById('btnScheduleStop').disabled = true;
+  } else {
+    schedEl.textContent = '';
+    document.getElementById('btnScheduleStop').disabled = true;
+  }
+}
+
+function startDurationTimer() {
+  stopDurationTimer();
+  durationTimer = setInterval(() => {
+    if (recStartTime) {
+      document.getElementById('durationText').textContent = fmtDur(Date.now() - recStartTime.getTime());
+    }
+  }, 500);
+}
+function stopDurationTimer() {
+  clearInterval(durationTimer);
+  document.getElementById('durationText').textContent = '';
+  recStartTime = null;
+}
+
+/* ── Telemetry polling ─────────────────────── */
+async function pollTelemetry() {
+  const d = await api('/telemetry');
+  if (!d || !d.success) return;
+  document.getElementById('tCpuTemp').textContent = d.cpu_temp_c != null ? d.cpu_temp_c + ' C' : '--';
+  document.getElementById('tCpuVolt').textContent = d.cpu_voltage_v != null ? d.cpu_voltage_v + ' V' : '--';
+  document.getElementById('tCpuClk').textContent = d.cpu_clock_mhz != null ? d.cpu_clock_mhz + ' MHz' : '--';
+  document.getElementById('tDisk').textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1)+' GB' : '--';
+  document.getElementById('tSync').textContent = d.time_synced === true ? 'Yes' : d.time_synced === false ? 'No' : '--';
+  document.getElementById('tServo').textContent = d.servo_position_us != null ? d.servo_position_us + ' us' : '--';
+  document.getElementById('tLight').textContent = d.light_on ? d.light_brightness_pct + '%' : 'Off';
+  document.getElementById('tHealth').textContent = isRecording ? (d.recording_ok ? 'OK' : 'STALL') : '--';
+  document.getElementById('sysTime').textContent = d.timestamp || '--';
+
+  if (d.time_synced === false) {
+    document.getElementById('timeBanner').classList.remove('hidden');
+  } else {
+    document.getElementById('timeBanner').classList.add('hidden');
+  }
+}
+
+/* ── Recording controls ────────────────────── */
+async function manualStart() {
+  document.getElementById('btnStart').disabled = true;
+  const d = await api('/start');
+  if (d.success) { isRecording = true; pollStatus(); }
+  else { alert(d.message || 'Failed to start'); document.getElementById('btnStart').disabled = false; }
+}
+async function manualStop() {
+  document.getElementById('btnStop').disabled = true;
+  await api('/stop');
+  isRecording = false;
+  pollStatus();
+  loadVideoList();
+}
+
+/* ── Schedule ──────────────────────────────── */
+async function setActiveRecipe() {
+  const rid = document.getElementById('autoRecipeSelect').value;
+  await api('/active_recipe', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({recipe_id: rid || null})});
+}
+async function startSchedule() {
+  const rid = document.getElementById('autoRecipeSelect').value;
+  if (!rid) { alert('Select a recipe first'); return; }
+  const d = await api('/schedule/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({recipe_id:rid})});
+  if (!d.success) alert(d.message || 'Failed');
+  pollStatus();
+}
+async function stopSchedule() {
+  await api('/schedule/stop', {method:'POST'});
+  pollStatus();
+}
+
+/* ── Snapshot ──────────────────────────────── */
+async function takeSnapshot() {
+  const img = document.getElementById('snapImg');
+  const ph = document.getElementById('snapPlaceholder');
+  ph.textContent = 'Capturing...';
+  try {
+    const r = await fetch('/snapshot');
+    if (r.ok) {
+      const blob = await r.blob();
+      img.src = URL.createObjectURL(blob);
+      img.classList.remove('hidden');
+      ph.classList.add('hidden');
+    } else {
+      ph.textContent = 'Capture failed';
+    }
+  } catch(e) { ph.textContent = 'Error: ' + e; }
+}
+async function cycleRotation() {
+  const d = await api('/rotate', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  if (d.success) {
+    document.getElementById('rotLabel').textContent = d.rotation_degrees;
+    takeSnapshot();
+  }
+}
+
+/* ── Servo / Light direct ──────────────────── */
+let servoDebounce = null;
+function setServo(val) {
+  document.getElementById('servoVal').textContent = val;
+  clearTimeout(servoDebounce);
+  servoDebounce = setTimeout(() => {
+    api('/servo', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({position_us:+val})});
+  }, 80);
+}
+let lightDebounce = null;
+function setLight(val) {
+  document.getElementById('lightVal').textContent = val;
+  clearTimeout(lightDebounce);
+  lightDebounce = setTimeout(() => {
+    api('/light', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({brightness_pct:+val, on:true})});
+    lightIsOn = true;
+    document.getElementById('lightToggle').textContent = 'On';
+  }, 80);
+}
+function toggleLight() {
+  lightIsOn = !lightIsOn;
+  api('/light', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({on:lightIsOn})});
+  document.getElementById('lightToggle').textContent = lightIsOn ? 'On' : 'Off';
+}
+
+/* ── Video list ────────────────────────────── */
+async function loadVideoList() {
+  const d = await api('/list');
+  const ul = document.getElementById('videoList');
+  ul.innerHTML = '';
+  const nf = document.getElementById('noFiles');
+  const items = (d.videos || []).concat(d.stills_sessions || []);
+  if (items.length === 0) { nf.classList.remove('hidden'); return; }
+  nf.classList.add('hidden');
+  (d.videos||[]).forEach(v => {
+    const li = document.createElement('li');
+    li.style.padding = '4px 0';
+    li.style.borderBottom = '1px solid #eee';
+    const a = document.createElement('a');
+    a.href = '/download/' + v;
+    a.textContent = v;
+    a.style.color = '#1a73e8';
+    li.appendChild(a);
+    ul.appendChild(li);
+  });
+  (d.stills_sessions||[]).forEach(s => {
+    const li = document.createElement('li');
+    li.style.padding = '4px 0';
+    li.textContent = s + ' (stills folder)';
+    li.style.color = '#666';
+    ul.appendChild(li);
+  });
+}
+
+/* ── Recipes ───────────────────────────────── */
+let allRecipes = [];
+async function loadRecipes() {
+  const d = await api('/recipes');
+  allRecipes = d.recipes || [];
+  renderRecipeList();
+  populateRecipeDropdown();
+}
+function renderRecipeList() {
+  const el = document.getElementById('recipeList');
+  if (allRecipes.length === 0) { el.innerHTML = '<div class="text-muted">No recipes. Create one to get started.</div>'; return; }
+  el.innerHTML = allRecipes.map(r => `
+    <div class="recipe-item">
+      <span class="name">${esc(r.name)}</span>
+      <span class="meta">${r.mode} | ${r.duration_minutes} min</span>
+      <div class="recipe-actions">
+        <button class="btn-sm" onclick="editRecipe('${r.id}')">Edit</button>
+        <button class="btn-sm btn-danger" onclick="deleteRecipeUI('${r.id}')">Del</button>
+      </div>
+    </div>
+  `).join('');
+}
+function populateRecipeDropdown() {
+  const sel = document.getElementById('autoRecipeSelect');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">None (manual only)</option>';
+  allRecipes.forEach(r => {
+    const opt = document.createElement('option');
+    opt.value = r.id;
+    opt.textContent = r.name;
+    sel.appendChild(opt);
+  });
+  // Restore selection
+  api('/active_recipe').then(d => {
+    if (d.active_recipe_id) sel.value = d.active_recipe_id;
+  });
+}
+function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+function newRecipe() {
+  document.getElementById('rId').value = '';
+  document.getElementById('rName').value = '';
+  document.getElementById('rMode').value = 'video';
+  document.getElementById('rStillInterval').value = '1.0';
+  document.getElementById('rDuration').value = '30';
+  document.getElementById('rDelay').value = '1';
+  document.getElementById('rRotation').value = '0';
+  document.getElementById('rServoFixed').checked = true;
+  document.getElementById('rServoStart').value = 1500;
+  document.getElementById('rServoStartVal').textContent = '1500';
+  document.getElementById('rServoEnd').value = 1500;
+  document.getElementById('rServoEndVal').textContent = '1500';
+  document.getElementById('rSweepTime').value = '30';
+  document.getElementById('rPausePoints').value = '0';
+  document.getElementById('rLoiterTime').value = '0';
+  document.getElementById('rOscillations').value = '1';
+  document.getElementById('rLightOn').checked = false;
+  document.getElementById('rLightBright').value = 0;
+  document.getElementById('rLightBrightVal').textContent = '0';
+  document.getElementById('editorTitle').textContent = 'New Recipe';
+  document.getElementById('recipeEditor').classList.remove('hidden');
+  toggleStillsFields();
+  toggleServoFields();
+}
+
+async function editRecipe(id) {
+  const d = await api('/recipes/' + id);
+  if (!d.success) return;
+  const r = d.recipe;
+  document.getElementById('rId').value = r.id;
+  document.getElementById('rName').value = r.name;
+  document.getElementById('rMode').value = r.mode;
+  document.getElementById('rStillInterval').value = r.still_interval_s;
+  document.getElementById('rDuration').value = r.duration_minutes;
+  document.getElementById('rDelay').value = r.auto_start_delay_minutes;
+  document.getElementById('rRotation').value = r.rotation_degrees;
+  document.getElementById('rServoFixed').checked = r.servo_fixed;
+  document.getElementById('rServoStart').value = r.servo_start_us;
+  document.getElementById('rServoStartVal').textContent = r.servo_start_us;
+  document.getElementById('rServoEnd').value = r.servo_end_us;
+  document.getElementById('rServoEndVal').textContent = r.servo_end_us;
+  document.getElementById('rSweepTime').value = r.servo_sweep_time_s;
+  document.getElementById('rPausePoints').value = r.servo_pause_points;
+  document.getElementById('rLoiterTime').value = r.servo_loiter_time_s;
+  document.getElementById('rOscillations').value = r.servo_oscillations;
+  document.getElementById('rLightOn').checked = r.light_on;
+  document.getElementById('rLightBright').value = r.light_brightness_pct;
+  document.getElementById('rLightBrightVal').textContent = r.light_brightness_pct;
+  document.getElementById('editorTitle').textContent = 'Edit Recipe';
+  document.getElementById('recipeEditor').classList.remove('hidden');
+  toggleStillsFields();
+  toggleServoFields();
+}
+
+function cancelEditor() { document.getElementById('recipeEditor').classList.add('hidden'); }
+
+async function saveCurrentRecipe() {
+  const body = {
+    name: document.getElementById('rName').value,
+    mode: document.getElementById('rMode').value,
+    still_interval_s: +document.getElementById('rStillInterval').value,
+    duration_minutes: +document.getElementById('rDuration').value,
+    auto_start_delay_minutes: +document.getElementById('rDelay').value,
+    rotation_degrees: +document.getElementById('rRotation').value,
+    servo_fixed: document.getElementById('rServoFixed').checked,
+    servo_start_us: +document.getElementById('rServoStart').value,
+    servo_end_us: +document.getElementById('rServoEnd').value,
+    servo_sweep_time_s: +document.getElementById('rSweepTime').value,
+    servo_pause_points: +document.getElementById('rPausePoints').value,
+    servo_loiter_time_s: +document.getElementById('rLoiterTime').value,
+    servo_oscillations: +document.getElementById('rOscillations').value,
+    light_on: document.getElementById('rLightOn').checked,
+    light_brightness_pct: +document.getElementById('rLightBright').value,
+  };
+  const id = document.getElementById('rId').value;
+  if (id) body.id = id;
+  const d = await api('/recipes', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if (d.success) { cancelEditor(); loadRecipes(); }
+  else { alert((d.errors||[]).join(', ') || 'Save failed'); }
+}
+
+async function deleteRecipeUI(id) {
+  if (!confirm('Delete this recipe?')) return;
+  await api('/recipes/' + id, {method:'DELETE'});
+  loadRecipes();
+}
+
+function toggleStillsFields() {
+  document.getElementById('stillsIntervalGroup').style.display = document.getElementById('rMode').value === 'stills' ? '' : 'none';
+}
+function toggleServoFields() {
+  const fixed = document.getElementById('rServoFixed').checked;
+  document.getElementById('servoEndGroup').style.display = fixed ? 'none' : '';
+  document.getElementById('sweepFields').style.display = fixed ? 'none' : '';
+}
+function previewServo(val, labelId) {
+  document.getElementById(labelId).textContent = val;
+  api('/servo', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({position_us:+val})});
+}
+
+/* ── Setup tab content ─────────────────────── */
+function loadSetup() {
+  document.getElementById('setupContent').innerHTML = `
+<h2>DropCam Setup Guide</h2>
+
+<h3>1. Initial BlueOS Setup</h3>
+<ul>
+  <li>Flash BlueOS to a microSD card (32 GB+ recommended, high-endurance).</li>
+  <li>Insert the card into your Raspberry Pi 4 and power it on.</li>
+  <li>Connect to the <strong>BlueOS WiFi AP</strong> (default: <code>blueos-wifi</code>).</li>
+  <li>Navigate to <code>http://blueos.local</code> or <code>http://192.168.2.2</code> to access the BlueOS web interface.</li>
+  <li>Install the <strong>DropCam</strong> extension from the Extension Manager.</li>
+</ul>
+
+<h3>2. Hardware Wiring</h3>
+<table>
+  <tr><th>Component</th><th>GPIO</th><th>Physical Pin</th><th>Notes</th></tr>
+  <tr><td>RGB Status LED (WS2812)</td><td>GPIO 10 (SPI MOSI)</td><td>Pin 19</td><td>Single NeoPixel data line</td></tr>
+  <tr><td>Camera Tilt Servo</td><td>GPIO 21</td><td>Pin 40</td><td>1000-2000 &mu;s PWM</td></tr>
+  <tr><td>Lumen Light</td><td>GPIO 13 (PWM1)</td><td>Pin 33</td><td>1000-2000 &mu;s servo PWM</td></tr>
+  <tr><td>USB Camera</td><td colspan="2">/dev/video2</td><td>H264 USB camera (1080p 30fps)</td></tr>
+</table>
+<p>All servo/light signals share a common ground with the Pi. The servo and light require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header.</p>
+
+<h3>3. LED Status Indicators</h3>
+<table>
+  <tr><th>Pattern</th><th>Meaning</th></tr>
+  <tr><td style="color:#e53935;font-weight:bold">Slow red flash</td><td>Recording in progress (normal)</td></tr>
+  <tr><td style="color:#f9a825;font-weight:bold">Fast yellow flash</td><td>Recording problem (file not growing) or disk full</td></tr>
+  <tr><td style="color:#1a73e8;font-weight:bold">Solid blue</td><td>Recording sequence complete</td></tr>
+  <tr><td style="color:#999">Off</td><td>Idle, no active recipe</td></tr>
+</table>
+
+<h3>4. Time Synchronization</h3>
+<p>The Raspberry Pi does not have a real-time clock (RTC). Without internet access, the system time resets on each boot. To synchronize the clock:</p>
+<ul>
+  <li>Connect a phone or laptop to the BlueOS WiFi AP.</li>
+  <li>Open this DropCam page in a browser &mdash; the system clock will be synchronized to your device's time automatically by BlueOS.</li>
+  <li>A yellow banner on the Status tab warns when the clock is not synchronized.</li>
+</ul>
+
+<h3>5. Recording Plans (Recipes)</h3>
+<ul>
+  <li>Create recipes in the <strong>Recipes</strong> tab to define recording duration, servo movement, and light settings.</li>
+  <li>Select a recipe in the <strong>Auto-Start Recipe</strong> dropdown on the Status tab.</li>
+  <li>When the extension starts (on boot), it will wait the configured delay period, then begin recording automatically.</li>
+  <li>To disable auto-start, set the dropdown to "None (manual only)".</li>
+</ul>
+
+<h3>6. Recording Details</h3>
+<ul>
+  <li>Video is recorded in <strong>.ts (MPEG-TS)</strong> container format, which is resilient to power cuts.</li>
+  <li>Still capture mode saves JPEG frames at the configured interval.</li>
+  <li>Subtitle files (.ass) are generated alongside video recordings with system telemetry data.</li>
+  <li>Recording stops automatically if disk space drops below <strong>1 GB</strong>.</li>
+  <li>Maximum recommended recording duration: <strong>8 hours</strong> (limited by SD card endurance and power supply).</li>
+</ul>
+
+<h3>7. File Management</h3>
+<ul>
+  <li>Recorded files are stored at <code>/usr/blueos/extensions/videorecorder/</code> on the Pi.</li>
+  <li>Download files from the <strong>Status</strong> tab or use the BlueOS File Manager.</li>
+  <li>The BlueOS file browser is available at <code>http://blueos.local:7777/files/extensions/videorecorder</code>.</li>
+</ul>
+
+<h3>8. Troubleshooting</h3>
+<ul>
+  <li><strong>Camera not detected:</strong> Ensure the USB camera is connected and appears as <code>/dev/video2</code>. Replug and restart the extension.</li>
+  <li><strong>Servo not moving:</strong> Verify wiring and that the pigpio daemon is running inside the container. Check extension logs.</li>
+  <li><strong>LED not lighting:</strong> Ensure the WS2812 data line is on GPIO 10 and shares a ground with the Pi.</li>
+  <li><strong>Recordings empty or corrupt:</strong> Check disk space. A .ts file can be played even if the recording was interrupted.</li>
+  <li><strong>Extension logs:</strong> View logs from the BlueOS Extension Manager or run <code>docker logs blueos-videorecorder</code>.</li>
+</ul>
+`;
+}
+
+/* ── Init ──────────────────────────────────── */
+loadSetup();
+loadRecipes();
+loadVideoList();
+pollStatus();
+pollTelemetry();
+setInterval(pollStatus, 2000);
+setInterval(pollTelemetry, 5000);
+setInterval(loadVideoList, 10000);
+
 window.addEventListener('unload', () => {
-    clearInterval(fileListTimer);
-    clearInterval(recordingTimer);
-    clearInterval(telemetryTimer);
-    clearInterval(statusCheckTimer);  // Clean up new timer
+  clearInterval(durationTimer);
 });
 </script>
 </body>
