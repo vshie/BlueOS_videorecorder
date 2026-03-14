@@ -26,20 +26,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-install-su
     psmisc \
     && rm -rf /var/lib/apt/lists/*
 
-# ffmpeg for still capture/ffprobe, then build pigpio daemon from source
-# (pigpio is not in Ubuntu repos -- only in Raspbian)
+# ffmpeg for still capture and ffprobe
 RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     ffmpeg \
-    wget \
-    ca-certificates \
-    && wget -qO /tmp/pigpio.tar.gz https://github.com/joan2937/pigpio/archive/master.tar.gz \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build pigpio daemon from source (not in Ubuntu repos -- Raspbian only).
+# Use python3 to download since it's already installed and has working SSL.
+RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/joan2937/pigpio/archive/master.tar.gz', '/tmp/pigpio.tar.gz')" \
     && cd /tmp && tar xf pigpio.tar.gz \
     && cd pigpio-master && make -j"$(nproc)" && make install \
     && ldconfig \
-    && rm -rf /tmp/pigpio* \
-    && apt-get purge -y wget \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /tmp/pigpio*
 
 WORKDIR /app
 COPY app/ .
