@@ -178,7 +178,7 @@ def update_ass_file():
             time.sleep(1)
 
 
-def adjust_ass_timing(ass_path, video_duration):
+def adjust_ass_timing(ass_path, video_duration, video_start_time=0.0):
     try:
         with open(ass_path, "r") as f:
             lines = f.readlines()
@@ -194,8 +194,9 @@ def adjust_ass_timing(ass_path, video_duration):
                 header.append(line)
         if not dialogues or max_t == 0:
             return
+        offset = video_start_time if video_start_time > 1.0 else 0.0
         scale = video_duration / max_t
-        if abs(scale - 1.0) < 0.01:
+        if offset == 0.0 and abs(scale - 1.0) < 0.005:
             return
         with open(ass_path, "w") as f:
             for line in header:
@@ -203,10 +204,13 @@ def adjust_ass_timing(ass_path, video_duration):
             for line in dialogues:
                 parts = line.split(",", 9)
                 if len(parts) >= 3:
-                    parts[1] = format_ass_ts(parse_ass_ts(parts[1]) * scale)
-                    parts[2] = format_ass_ts(parse_ass_ts(parts[2]) * scale)
+                    parts[1] = format_ass_ts(parse_ass_ts(parts[1]) * scale + offset)
+                    parts[2] = format_ass_ts(parse_ass_ts(parts[2]) * scale + offset)
                 f.write(",".join(parts))
-        logger.info(f"ASS timing scaled by {scale:.4f}")
+        if offset > 0:
+            logger.warning(f"ASS timing offset by {offset:.2f}s (video PTS doesn't start at zero)")
+        if abs(scale - 1.0) >= 0.005:
+            logger.info(f"ASS timing scaled by {scale:.4f}")
     except Exception as e:
         logger.error(f"ASS timing adjust error: {e}")
 
@@ -347,18 +351,24 @@ def stills_capture_loop(interval_s, rotation):
 # ── Get video duration ───────────────────────────────────────────────────
 
 def get_video_duration(path):
+    """Return (duration, start_time) tuple, or (None, 0.0) on failure."""
     try:
         cmd = [
             "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", path,
+            "-show_entries", "format=duration,start_time",
+            "-of", "default=noprint_wrappers=1:nokey=0", path,
         ]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
-            return float(r.stdout.strip())
+            vals = {}
+            for line in r.stdout.strip().splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    vals[k.strip()] = float(v.strip())
+            return vals.get("duration"), vals.get("start_time", 0.0)
     except Exception as e:
         logger.error(f"ffprobe error: {e}")
-    return None
+    return None, 0.0
 
 # ── Core recording start/stop ────────────────────────────────────────────
 
@@ -386,7 +396,6 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
         return False
 
     os.makedirs(VIDEO_DIR, exist_ok=True)
-    time.sleep(0.5)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if mode == "video":
@@ -395,7 +404,7 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
         current_video_file = filepath
 
         pipeline = (
-            f"v4l2src device={VIDEO_DEVICE} ! "
+            f"v4l2src do-timestamp=true device={VIDEO_DEVICE} ! "
             "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
             f"h264parse ! mpegtsmux ! filesink location={filepath}"
         )
@@ -405,16 +414,25 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
             gst_process = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
+            start_time = datetime.now()
             logger.info(f"GStreamer command: {' '.join(command)}")
             if gst_process.poll() is not None:
                 out, err = gst_process.communicate()
                 logger.error(f"GStreamer failed: {err.decode()}")
                 gst_process = None
+                start_time = None
                 return False
             time.sleep(2)
+            if gst_process.poll() is not None:
+                out, err = gst_process.communicate()
+                logger.error(f"GStreamer died during startup: {err.decode()}")
+                gst_process = None
+                start_time = None
+                return False
         except Exception as e:
             logger.error(f"Failed to start GStreamer: {e}")
             gst_process = None
+            start_time = None
             return False
 
         current_ass_file = create_ass_file(filepath)
@@ -447,12 +465,12 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
             target=stills_capture_loop, args=(still_interval_s, rotation), daemon=True
         )
         stills_thread.start()
+        start_time = datetime.now()
     else:
         logger.error(f"Unknown mode: {mode}")
         return False
 
     recording = True
-    start_time = datetime.now()
 
     if current_ass_file:
         stop_ass_thread = False
@@ -486,6 +504,7 @@ def _stop_recording_internal():
 
     video_path = current_video_file
     ass_path = current_ass_file
+    events_path = current_events_file
 
     stop_ass_thread = True
     if ass_thread and ass_thread.is_alive():
@@ -526,9 +545,23 @@ def _stop_recording_internal():
 
     if video_path and ass_path and os.path.exists(video_path) and os.path.exists(ass_path):
         time.sleep(2)
-        dur = get_video_duration(video_path)
+        dur, st = get_video_duration(video_path)
         if dur:
-            adjust_ass_timing(ass_path, dur)
+            adjust_ass_timing(ass_path, dur, video_start_time=st)
+            if st > 1.0:
+                logger.warning(f"Video PTS offset: start_time={st:.2f}s (expected ~0)")
+                if events_path:
+                    try:
+                        evt = {
+                            "ts": time.time(),
+                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                            "event": "pts_warning",
+                            "detail": f"Video start_time={st:.2f}s, expected ~0",
+                        }
+                        with open(events_path, "a") as f:
+                            f.write(json.dumps(evt) + "\n")
+                    except Exception:
+                        pass
 
     logger.info("Recording stopped")
 
