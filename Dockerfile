@@ -26,11 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-install-su
     psmisc \
     && rm -rf /var/lib/apt/lists/*
 
-# ffmpeg for still capture and ffprobe, pigpio daemon, vcgencmd
+# ffmpeg for still capture and ffprobe, pigpio daemon for servo/light PWM
 RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     ffmpeg \
     pigpio \
-    libraspberrypi-bin \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
