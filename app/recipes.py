@@ -166,7 +166,7 @@ def validate_recipe(data):
         ("servo_start_us", 1000, 2000),
         ("servo_end_us", 1000, 2000),
         ("servo_pause_points", 0, 50),
-        ("servo_loiter_time_s", 0, 120),
+        ("servo_loiter_time_s", 0, 3600),
         ("servo_oscillations", 0, 999),
         ("light_brightness_pct", 0, 100),
     ]:
