@@ -42,12 +42,13 @@ RUN cd /tmp && tar xf pigpio.tar.gz \
     && rm -rf /tmp/pigpio*
 
 WORKDIR /app
-COPY app/ .
 
-# Python dependencies
+# Python dependencies (before COPY so app-only edits don't rebuild this layer)
 RUN pip3 install flask requests pigpio rpi_ws281x Pillow
 
 RUN mkdir -p /app/videorecordings
+
+COPY app/ .
 
 ENV PYTHONUNBUFFERED=1
 ENV FLASK_APP=main.py
