@@ -90,7 +90,7 @@ class HardwareController:
         try:
             self._strip = PixelStrip(
                 LED_COUNT, LED_GPIO, 800000, 10, False, LED_BRIGHTNESS, 0,
-                strip_type=ws.WS2811_STRIP_GRB,
+                strip_type=ws.WS2811_STRIP_RBG,
             )
             self._strip.begin()
         except Exception as e:
