@@ -6,24 +6,29 @@
 <title>DropCam</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f4f5f7;color:#1a1a1a;max-width:900px;margin:0 auto;padding:12px}
-h1{font-size:1.4em;margin-bottom:4px}
-h2{font-size:1.1em;margin:16px 0 8px;color:#333}
-h3{font-size:0.95em;margin:12px 0 6px;color:#555}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f4f5f7;color:#1a1a1a;max-width:1400px;margin:0 auto;padding:10px 16px}
+h1{font-size:1.25em;margin-bottom:2px}
+h2{font-size:1.05em;margin:12px 0 6px;color:#333}
+h3{font-size:.88em;margin:8px 0 4px;color:#555;text-transform:uppercase;letter-spacing:.04em}
 
 /* Tabs */
-.tabs{display:flex;border-bottom:2px solid #ddd;margin-bottom:16px;gap:2px}
-.tab{padding:10px 20px;cursor:pointer;border:none;background:none;font-size:0.95em;font-weight:600;color:#666;border-bottom:3px solid transparent;transition:all .2s}
+.tabs{display:flex;border-bottom:2px solid #ddd;margin-bottom:12px;gap:2px}
+.tab{padding:8px 18px;cursor:pointer;border:none;background:none;font-size:.9em;font-weight:600;color:#666;border-bottom:3px solid transparent;transition:all .2s}
 .tab:hover{color:#333}
 .tab.active{color:#1a73e8;border-bottom-color:#1a73e8}
 .tab-content{display:none}
 .tab-content.active{display:block}
 
 /* Cards */
-.card{background:#fff;border-radius:8px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card{background:#fff;border-radius:8px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+
+/* Two-column status layout */
+.status-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start}
+.status-col{display:flex;flex-direction:column}
+@media(max-width:700px){.status-grid{grid-template-columns:1fr}}
 
 /* Status indicator */
-.status-dot{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px;vertical-align:middle}
+.status-dot{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:6px;vertical-align:middle}
 .status-dot.idle{background:#999}
 .status-dot.recording{background:#e53935;animation:pulse 1.2s infinite}
 .status-dot.degraded{background:#f9a825;animation:pulse 0.5s infinite}
@@ -32,7 +37,7 @@ h3{font-size:0.95em;margin:12px 0 6px;color:#555}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
 /* Buttons */
-button,.btn{padding:8px 16px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer;font-size:0.9em;transition:all .15s}
+button,.btn{padding:6px 14px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer;font-size:.88em;transition:all .15s}
 button:hover,.btn:hover{background:#f0f0f0}
 button:disabled{opacity:.45;cursor:not-allowed}
 .btn-start{background:#43a047;color:#fff;border-color:#388e3c}
@@ -43,54 +48,54 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .btn-primary:hover{background:#1557b0}
 .btn-danger{background:#e53935;color:#fff;border-color:#c62828}
 .btn-danger:hover{background:#c62828}
-.btn-sm{padding:4px 10px;font-size:.82em}
+.btn-sm{padding:3px 9px;font-size:.8em}
 
 /* Form elements */
-select,input[type=text],input[type=number]{padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:.9em;background:#fff}
+select,input[type=text],input[type=number]{padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:.88em;background:#fff}
 select:focus,input:focus{outline:none;border-color:#1a73e8}
-label{font-size:.88em;color:#555;display:block;margin-bottom:3px}
-.form-row{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:10px}
-.form-group{flex:1;min-width:140px}
-.form-group.narrow{max-width:160px;flex:0 0 auto}
+label{font-size:.84em;color:#555;display:block;margin-bottom:2px}
+.form-row{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:8px}
+.form-group{flex:1;min-width:130px}
+.form-group.narrow{max-width:150px;flex:0 0 auto}
 
 /* Telemetry grid */
-.telem-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
-.telem-item{padding:8px;background:#f8f9fa;border-radius:6px;text-align:center}
-.telem-label{font-size:.78em;color:#777;margin-bottom:2px}
-.telem-value{font-size:1.05em;font-weight:600;font-family:"SF Mono","Fira Code",monospace}
+.telem-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:6px}
+.telem-item{padding:6px 8px;background:#f8f9fa;border-radius:6px;text-align:center}
+.telem-label{font-size:.72em;color:#777;margin-bottom:1px}
+.telem-value{font-size:.95em;font-weight:600;font-family:"SF Mono","Fira Code",monospace}
 
 /* Slider */
-input[type=range]{width:100%;margin:4px 0;accent-color:#1a73e8}
+input[type=range]{width:100%;margin:3px 0;accent-color:#1a73e8}
 
-/* Snapshot */
-.snapshot-area{text-align:center;margin:12px 0}
-.snapshot-area img{max-width:100%;border-radius:6px;border:1px solid #ddd}
-.snapshot-placeholder{background:#e8e8e8;border-radius:6px;padding:40px;color:#999;font-size:.9em}
+/* Snapshot — fixed height so page doesn't shift */
+.snapshot-area{text-align:center;height:220px;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:6px;background:#e8e8e8}
+.snapshot-area img{max-width:100%;max-height:220px;border-radius:6px;border:1px solid #ddd;display:block}
+.snapshot-placeholder{color:#999;font-size:.88em;padding:12px}
 
 /* Recipe list */
-.recipe-item{display:flex;align-items:center;padding:8px 12px;border:1px solid #e0e0e0;border-radius:6px;margin-bottom:6px;background:#fafafa}
-.recipe-item .name{flex:1;font-weight:600;font-size:.92em}
-.recipe-item .meta{font-size:.8em;color:#777;margin-right:12px}
+.recipe-item{display:flex;align-items:center;padding:7px 10px;border:1px solid #e0e0e0;border-radius:6px;margin-bottom:5px;background:#fafafa}
+.recipe-item .name{flex:1;font-weight:600;font-size:.88em}
+.recipe-item .meta{font-size:.78em;color:#777;margin-right:10px}
 .recipe-actions{display:flex;gap:4px}
 
 /* Warning banner */
-.banner{padding:8px 14px;border-radius:6px;margin-bottom:10px;font-size:.88em}
+.banner{padding:7px 12px;border-radius:6px;margin-bottom:8px;font-size:.85em}
 .banner.warn{background:#fff3cd;border:1px solid #ffc107;color:#856404}
 .banner.info{background:#d1ecf1;border:1px solid #bee5eb;color:#0c5460}
 .banner.error{background:#f8d7da;border:1px solid #f5c6cb;color:#721c24}
 
 /* Misc */
 .mono{font-family:"SF Mono","Fira Code",monospace}
-.text-muted{color:#888;font-size:.85em}
-.mt-8{margin-top:8px}
-.mb-8{margin-bottom:8px}
+.text-muted{color:#888;font-size:.82em}
+.mt-8{margin-top:6px}
+.mb-8{margin-bottom:6px}
 .hidden{display:none}
 .flex-between{display:flex;justify-content:space-between;align-items:center}
 .gap-8{gap:8px}
-hr{border:none;border-top:1px solid #eee;margin:12px 0}
+hr{border:none;border-top:1px solid #eee;margin:8px 0}
 
 /* File browser iframe */
-.file-manager-wrapper{width:100vw;position:relative;left:50%;margin-left:-50vw;padding:0 12px;box-sizing:border-box;margin-top:20px}
+.file-manager-wrapper{width:100%;margin-top:16px}
 
 /* Delete modal overlay */
 .modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:1000}
@@ -101,12 +106,12 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
 .countdown-text{font-size:1.3em;font-weight:700;color:#e53935;margin-bottom:12px}
 
 /* Setup content */
-.setup-content h2{margin-top:20px}
-.setup-content p,.setup-content li{line-height:1.6;font-size:.92em}
-.setup-content ul{margin-left:20px;margin-bottom:10px}
-.setup-content code{background:#eee;padding:1px 5px;border-radius:3px;font-size:.88em}
-.setup-content table{width:100%;border-collapse:collapse;margin:10px 0}
-.setup-content th,.setup-content td{border:1px solid #ddd;padding:6px 10px;text-align:left;font-size:.88em}
+.setup-content h2{margin-top:16px}
+.setup-content p,.setup-content li{line-height:1.6;font-size:.9em}
+.setup-content ul{margin-left:20px;margin-bottom:8px}
+.setup-content code{background:#eee;padding:1px 5px;border-radius:3px;font-size:.86em}
+.setup-content table{width:100%;border-collapse:collapse;margin:8px 0}
+.setup-content th,.setup-content td{border:1px solid #ddd;padding:5px 8px;text-align:left;font-size:.86em}
 .setup-content th{background:#f0f0f0}
 </style>
 </head>
@@ -127,158 +132,170 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
 
 <!-- ═══════════════ STATUS TAB ═══════════════ -->
 <div class="tab-content active" id="tab-status">
+<div class="status-grid">
 
-  <div class="card">
-    <div class="flex-between">
-      <div><span class="status-dot idle" id="statusDot"></span><strong id="statusText">Idle</strong>
-        <span class="mono" id="durationText" style="margin-left:8px;color:#666"></span>
-      </div>
-      <div style="display:flex;gap:6px">
-        <button class="btn-start" id="btnStart" onclick="manualStart()">Start</button>
-        <button class="btn-stop" id="btnStop" onclick="manualStop()" disabled>Stop</button>
-      </div>
-    </div>
-    <div class="mt-8 text-muted" id="fileSizeText"></div>
-    <div id="remuxBar" class="hidden" style="margin-top:8px">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span id="remuxStage" style="font-size:.85em;color:#43a047;font-weight:500">Remuxing TS→MP4</span>
-        <span id="remuxPct" style="font-size:.85em;font-weight:600;min-width:32px;text-align:right">0%</span>
-      </div>
-      <div style="background:#e0e0e0;border-radius:4px;height:10px;overflow:hidden;margin-top:4px">
-        <div id="remuxProgBar" style="background:#43a047;height:100%;width:0%;transition:width .5s;border-radius:4px"></div>
-      </div>
-      <div id="remuxFile" style="font-size:.78em;color:#888;margin-top:2px"></div>
-    </div>
-  </div>
+  <!-- LEFT COLUMN -->
+  <div class="status-col">
 
-  <!-- Storage indicator -->
-  <div class="card" id="storageCard">
-    <div class="flex-between">
-      <div>
-        <span id="storageDot" class="status-dot idle"></span>
-        <strong id="storageLabel">Storage: Local SD</strong>
+    <div class="card">
+      <div class="flex-between">
+        <div><span class="status-dot idle" id="statusDot"></span><strong id="statusText">Idle</strong>
+          <span class="mono" id="durationText" style="margin-left:8px;color:#666"></span>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn-start" id="btnStart" onclick="manualStart()">Start</button>
+          <button class="btn-stop" id="btnStop" onclick="manualStop()" disabled>Stop</button>
+        </div>
       </div>
-      <div style="display:flex;align-items:center;gap:6px">
-        <span class="text-muted mono" id="storageFree"></span>
-        <span style="font-size:.8em;color:#888;margin-left:4px">Use:</span>
-        <button id="btnStorageUsb" class="btn-sm btn-primary" onclick="setStoragePref('usb')" title="Save recordings to USB drive when available">USB</button>
-        <button id="btnStorageSd" class="btn-sm" onclick="setStoragePref('local')" title="Always save recordings to SD card">SD</button>
+      <div class="mt-8 text-muted" id="fileSizeText"></div>
+      <div id="remuxBar" class="hidden" style="margin-top:6px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="remuxStage" style="font-size:.82em;color:#43a047;font-weight:500">Remuxing TS→MP4</span>
+          <span id="remuxPct" style="font-size:.82em;font-weight:600;min-width:32px;text-align:right">0%</span>
+        </div>
+        <div style="background:#e0e0e0;border-radius:4px;height:8px;overflow:hidden;margin-top:3px">
+          <div id="remuxProgBar" style="background:#43a047;height:100%;width:0%;transition:width .5s;border-radius:4px"></div>
+        </div>
+        <div id="remuxFile" style="font-size:.75em;color:#888;margin-top:2px"></div>
       </div>
     </div>
-    <div class="text-muted mt-8" id="storageDetail"></div>
-  </div>
 
-  <!-- Auto-start recipe selector -->
-  <div class="card">
-    <div class="form-row">
-      <div class="form-group">
-        <label>Auto-Start Recipe</label>
-        <select id="autoRecipeSelect" onchange="setActiveRecipe()">
-          <option value="">None (manual only)</option>
-        </select>
+    <!-- Storage indicator -->
+    <div class="card" id="storageCard">
+      <div class="flex-between">
+        <div>
+          <span id="storageDot" class="status-dot idle"></span>
+          <strong id="storageLabel">Storage: Local SD</strong>
+        </div>
+        <div style="display:flex;align-items:center;gap:5px">
+          <span class="text-muted mono" id="storageFree"></span>
+          <span style="font-size:.78em;color:#888;margin-left:2px">Use:</span>
+          <button id="btnStorageUsb" class="btn-sm btn-primary" onclick="setStoragePref('usb')" title="Save recordings to USB drive when available">USB</button>
+          <button id="btnStorageSd" class="btn-sm" onclick="setStoragePref('local')" title="Always save recordings to SD card">SD</button>
+        </div>
       </div>
-      <span class="text-muted" id="autoRecipeSaved" style="font-size:.82em;display:none">Saved</span>
-      <button class="btn-primary btn-sm" onclick="startSchedule()" id="btnSchedule">Start Schedule</button>
-      <button class="btn-sm" onclick="stopSchedule()" id="btnScheduleStop" disabled>Cancel Schedule</button>
+      <div class="text-muted mt-8" id="storageDetail"></div>
     </div>
-    <div class="text-muted mt-8" id="scheduleStatus"></div>
-  </div>
 
-  <!-- Snapshot -->
-  <div class="card">
-    <div class="flex-between mb-8">
-      <h3>Camera Preview</h3>
-      <div style="display:flex;gap:6px">
-        <button class="btn-sm" onclick="takeSnapshot()">Snapshot</button>
-        <button class="btn-sm" onclick="cycleRotation()">Rotate <span id="rotLabel">0</span>&deg;</button>
+    <!-- Auto-start recipe selector -->
+    <div class="card">
+      <div class="form-row" style="margin-bottom:4px">
+        <div class="form-group">
+          <label>Auto-Start Recipe</label>
+          <select id="autoRecipeSelect" onchange="setActiveRecipe()">
+            <option value="">None (manual only)</option>
+          </select>
+        </div>
+        <span class="text-muted" id="autoRecipeSaved" style="font-size:.8em;display:none">Saved</span>
+        <button class="btn-primary btn-sm" onclick="startSchedule()" id="btnSchedule">Start Schedule</button>
+        <button class="btn-sm" onclick="stopSchedule()" id="btnScheduleStop" disabled>Cancel</button>
       </div>
+      <div class="text-muted mt-8" id="scheduleStatus"></div>
     </div>
-    <div class="snapshot-area">
-      <div class="snapshot-placeholder" id="snapPlaceholder">Click "Snapshot" to preview</div>
-      <img id="snapImg" class="hidden" alt="Camera snapshot">
-    </div>
-  </div>
 
-  <!-- Servo & Light direct control -->
-  <div class="card">
-    <h3>Manual Controls</h3>
-    <div class="form-row mt-8">
-      <div class="form-group">
-        <label>Servo Position: <span id="servoVal" class="mono">1500</span> us</label>
-        <input type="range" id="servoSlider" min="1000" max="2000" step="10" value="1500" oninput="setServo(this.value)">
+    <!-- Snapshot -->
+    <div class="card">
+      <div class="flex-between mb-8">
+        <h3>Camera Preview</h3>
+        <div style="display:flex;gap:5px">
+          <button class="btn-sm" onclick="takeSnapshot()">Snapshot</button>
+          <button class="btn-sm" onclick="cycleRotation()">Rotate <span id="rotLabel">0</span>&deg;</button>
+        </div>
       </div>
-      <div class="form-group narrow">
-        <label>Lumen Light</label>
-        <div style="display:flex;gap:6px;align-items:center">
-          <input type="range" id="lightSlider" min="0" max="100" step="5" value="0" oninput="setLight(this.value)" style="width:90px">
-          <span class="mono" id="lightVal">0</span>%
-          <button class="btn-sm" id="lightToggle" onclick="toggleLight()">Off</button>
+      <div class="snapshot-area">
+        <div class="snapshot-placeholder" id="snapPlaceholder">Click "Snapshot" to preview</div>
+        <img id="snapImg" class="hidden" alt="Camera snapshot">
+      </div>
+    </div>
+
+  </div><!-- end left col -->
+
+  <!-- RIGHT COLUMN -->
+  <div class="status-col">
+
+    <!-- Manual controls -->
+    <div class="card">
+      <h3>Manual Controls</h3>
+      <div class="form-row mt-8">
+        <div class="form-group">
+          <label>Servo Position: <span id="servoVal" class="mono">1500</span> us</label>
+          <input type="range" id="servoSlider" min="1000" max="2000" step="10" value="1500" oninput="setServo(this.value)">
+        </div>
+        <div class="form-group narrow">
+          <label>Lumen Light</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="range" id="lightSlider" min="0" max="100" step="5" value="0" oninput="setLight(this.value)" style="width:80px">
+            <span class="mono" id="lightVal">0</span>%
+            <button class="btn-sm" id="lightToggle" onclick="toggleLight()">Off</button>
+          </div>
         </div>
       </div>
     </div>
-  </div>
 
-  <!-- LED Configurator -->
-  <div class="card">
-    <h3>Status LED</h3>
-    <div class="form-row mt-8">
-      <div class="form-group">
-        <label>R: <span id="ledRVal" class="mono">0</span></label>
-        <input type="range" id="ledR" min="0" max="255" value="0" oninput="updateLedPreview()">
+    <!-- LED Configurator -->
+    <div class="card">
+      <h3>Status LED</h3>
+      <div class="form-row mt-8">
+        <div class="form-group">
+          <label>R: <span id="ledRVal" class="mono">0</span></label>
+          <input type="range" id="ledR" min="0" max="255" value="0" oninput="updateLedPreview()">
+        </div>
+        <div class="form-group">
+          <label>G: <span id="ledGVal" class="mono">0</span></label>
+          <input type="range" id="ledG" min="0" max="255" value="0" oninput="updateLedPreview()">
+        </div>
+        <div class="form-group">
+          <label>B: <span id="ledBVal" class="mono">0</span></label>
+          <input type="range" id="ledB" min="0" max="255" value="0" oninput="updateLedPreview()">
+        </div>
       </div>
-      <div class="form-group">
-        <label>G: <span id="ledGVal" class="mono">0</span></label>
-        <input type="range" id="ledG" min="0" max="255" value="0" oninput="updateLedPreview()">
+      <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+        <div id="ledPreview" style="width:24px;height:24px;border-radius:50%;border:2px solid #ccc;background:#000;flex-shrink:0"></div>
+        <select id="ledMode" style="padding:3px 7px;border-radius:4px;border:1px solid #ccc;font-size:.85em">
+          <option value="solid">Solid</option>
+          <option value="breathe" selected>Breathe</option>
+          <option value="flash_slow">Flash Slow</option>
+          <option value="flash_fast">Flash Fast</option>
+          <option value="off">Off</option>
+        </select>
+        <button class="btn-primary btn-sm" onclick="applyLed()">Apply</button>
+        <button class="btn-sm" onclick="applyIdleLed()">Reset Idle</button>
+        <span id="ledStatus" style="font-size:.8em;color:#666"></span>
       </div>
-      <div class="form-group">
-        <label>B: <span id="ledBVal" class="mono">0</span></label>
-        <input type="range" id="ledB" min="0" max="255" value="0" oninput="updateLedPreview()">
+    </div>
+
+    <!-- Telemetry -->
+    <div class="card">
+      <h3>System Telemetry</h3>
+      <div class="telem-grid mt-8">
+        <div class="telem-item"><div class="telem-label">CPU Temp</div><div class="telem-value" id="tCpuTemp">--</div></div>
+        <div class="telem-item"><div class="telem-label">CPU Voltage</div><div class="telem-value" id="tCpuVolt">--</div></div>
+        <div class="telem-item"><div class="telem-label">CPU Clock</div><div class="telem-value" id="tCpuClk">--</div></div>
+        <div class="telem-item"><div class="telem-label">Load (1m)</div><div class="telem-value" id="tCpuLoad">--</div></div>
+        <div class="telem-item"><div class="telem-label">Disk Free</div><div class="telem-value" id="tDisk">--</div></div>
+        <div class="telem-item"><div class="telem-label">USB Disk</div><div class="telem-value" id="tUsbDisk">--</div></div>
+        <div class="telem-item"><div class="telem-label">System Time</div><div class="telem-value" id="tSysTime" style="font-size:.8em">--</div></div>
+        <div class="telem-item"><div class="telem-label">Time Synced</div><div class="telem-value" id="tSync">--</div></div>
+        <div class="telem-item"><div class="telem-label">Status LED</div><div class="telem-value" id="tLed">--</div></div>
+        <div class="telem-item"><div class="telem-label">Servo</div><div class="telem-value" id="tServo">--</div></div>
+        <div class="telem-item"><div class="telem-label">Lumen Light</div><div class="telem-value" id="tLight">--</div></div>
+        <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
       </div>
     </div>
-    <div style="display:flex;align-items:center;gap:12px;margin-top:8px">
-      <div id="ledPreview" style="width:28px;height:28px;border-radius:50%;border:2px solid #ccc;background:#000"></div>
-      <select id="ledMode" style="padding:4px 8px;border-radius:4px;border:1px solid #ccc">
-        <option value="solid">Solid</option>
-        <option value="breathe" selected>Breathe</option>
-        <option value="flash_slow">Flash Slow</option>
-        <option value="flash_fast">Flash Fast</option>
-        <option value="off">Off</option>
-      </select>
-      <button class="btn-primary btn-sm" onclick="applyLed()">Apply</button>
-      <button class="btn-sm" onclick="applyIdleLed()">Reset Idle</button>
-      <span id="ledStatus" style="font-size:.82em;color:#666"></span>
-    </div>
-  </div>
 
-  <!-- Telemetry -->
-  <div class="card">
-    <h3>System Telemetry</h3>
-    <div class="telem-grid mt-8">
-      <div class="telem-item"><div class="telem-label">CPU Temp</div><div class="telem-value" id="tCpuTemp">--</div></div>
-      <div class="telem-item"><div class="telem-label">CPU Voltage</div><div class="telem-value" id="tCpuVolt">--</div></div>
-      <div class="telem-item"><div class="telem-label">CPU Clock</div><div class="telem-value" id="tCpuClk">--</div></div>
-      <div class="telem-item"><div class="telem-label">Load (1m)</div><div class="telem-value" id="tCpuLoad">--</div></div>
-      <div class="telem-item"><div class="telem-label">Disk Free</div><div class="telem-value" id="tDisk">--</div></div>
-      <div class="telem-item"><div class="telem-label">USB Disk</div><div class="telem-value" id="tUsbDisk">--</div></div>
-      <div class="telem-item"><div class="telem-label">System Time</div><div class="telem-value" id="tSysTime" style="font-size:.85em">--</div></div>
-      <div class="telem-item"><div class="telem-label">Time Synced</div><div class="telem-value" id="tSync">--</div></div>
-      <div class="telem-item"><div class="telem-label">Status LED</div><div class="telem-value" id="tLed">--</div></div>
-      <div class="telem-item"><div class="telem-label">Servo</div><div class="telem-value" id="tServo">--</div></div>
-      <div class="telem-item"><div class="telem-label">Lumen Light</div><div class="telem-value" id="tLight">--</div></div>
-      <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
+    <!-- Recorded files -->
+    <div class="card">
+      <div class="flex-between">
+        <h3>Recorded Files</h3>
+        <button class="btn-danger btn-sm" id="btnDeleteAll" onclick="deleteAllRecordings()">Delete All</button>
+      </div>
+      <ul id="videoList" style="list-style:none;margin-top:6px"></ul>
+      <div id="noFiles" class="text-muted mt-8">No recordings yet.</div>
     </div>
-  </div>
 
-  <!-- Video list -->
-  <div class="card">
-    <div class="flex-between">
-      <h3>Recorded Files</h3>
-      <button class="btn-danger btn-sm" id="btnDeleteAll" onclick="deleteAllRecordings()">Delete All</button>
-    </div>
-    <ul id="videoList" style="list-style:none;margin-top:8px"></ul>
-    <div id="noFiles" class="text-muted mt-8">No recordings yet.</div>
-  </div>
+  </div><!-- end right col -->
 
+</div><!-- end status-grid -->
 </div>
 
 <!-- ═══════════════ RECIPES TAB ═══════════════ -->
