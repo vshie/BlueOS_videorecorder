@@ -88,7 +88,7 @@ recording_base_dir = None
 # ── Config ───────────────────────────────────────────────────────────────
 
 def load_config():
-    defaults = {"active_recipe_id": None, "rotation_degrees": 0}
+    defaults = {"active_recipe_id": None, "rotation_degrees": 0, "storage_preference": "usb"}
 
     # One-time migration: move config from old location to recipes/ subfolder
     if not os.path.exists(CONFIG_FILE) and os.path.exists(_OLD_CONFIG_FILE):
@@ -130,6 +130,7 @@ def save_config(cfg):
 
 _cfg = load_config()
 image_rotation = _cfg.get("rotation_degrees", 0)
+storage_preference = _cfg.get("storage_preference", "usb")
 
 # ── ASS subtitle generation (system telemetry) ──────────────────────────
 
@@ -527,7 +528,7 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
     else:
         safe_name = None
 
-    use_usb = (not force_local) and usb_storage.is_usable()
+    use_usb = (not force_local) and (storage_preference == "usb") and usb_storage.is_usable()
     if use_usb:
         subfolder = f"{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
         rec_dir = usb_storage.get_recording_dir(subfolder)
@@ -1013,6 +1014,7 @@ def route_status():
             "usb_storage": usb_storage.get_status(),
             "recording_to": "usb" if usb_recording else "local",
             "usb_failover_count": usb_failover_count,
+            "storage_preference": storage_preference,
         })
         resp.headers["Cache-Control"] = "no-store"
         return resp
@@ -1422,6 +1424,21 @@ def route_active_recipe_set():
     return jsonify({"success": True, "active_recipe_id": rid})
 
 
+@app.route("/storage_preference", methods=["POST"])
+def route_storage_preference_set():
+    global storage_preference
+    data = request.get_json(silent=True) or {}
+    pref = data.get("preference")
+    if pref not in ("usb", "local"):
+        return jsonify({"success": False, "message": "preference must be 'usb' or 'local'"}), 400
+    storage_preference = pref
+    cfg = load_config()
+    cfg["storage_preference"] = pref
+    save_config(cfg)
+    logger.info(f"Storage preference set to: {pref}")
+    return jsonify({"success": True, "storage_preference": pref})
+
+
 # ── Schedule control ─────────────────────────────────────────────────────
 
 @app.route("/schedule/start", methods=["POST"])
@@ -1525,8 +1542,12 @@ def _boot():
     threading.Thread(target=_remux_orphaned_ts, daemon=True).start()
 
     cfg = load_config()
+    global storage_preference
+    storage_preference = cfg.get("storage_preference", "usb")
+
     rid = cfg.get("active_recipe_id")
-    logger.info(f"Boot config: active_recipe_id={rid!r}, rotation={cfg.get('rotation_degrees', 0)}")
+    logger.info(f"Boot config: active_recipe_id={rid!r}, rotation={cfg.get('rotation_degrees', 0)}, "
+                f"storage_preference={storage_preference!r}")
 
     if rid:
         recipe = get_recipe(rid)

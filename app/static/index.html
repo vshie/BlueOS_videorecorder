@@ -158,7 +158,12 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
         <span id="storageDot" class="status-dot idle"></span>
         <strong id="storageLabel">Storage: Local SD</strong>
       </div>
-      <span class="text-muted mono" id="storageFree"></span>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span class="text-muted mono" id="storageFree"></span>
+        <span style="font-size:.8em;color:#888;margin-left:4px">Use:</span>
+        <button id="btnStorageUsb" class="btn-sm btn-primary" onclick="setStoragePref('usb')" title="Save recordings to USB drive when available">USB</button>
+        <button id="btnStorageSd" class="btn-sm" onclick="setStoragePref('local')" title="Always save recordings to SD card">SD</button>
+      </div>
     </div>
     <div class="text-muted mt-8" id="storageDetail"></div>
   </div>
@@ -524,6 +529,15 @@ async function pollStatus() {
   const usb = d.usb_storage || {};
   const recTo = d.recording_to || 'local';
   const failovers = d.usb_failover_count || 0;
+  const pref = d.storage_preference || 'usb';
+
+  // Toggle button appearance
+  const btnUsb = document.getElementById('btnStorageUsb');
+  const btnSd = document.getElementById('btnStorageSd');
+  btnUsb.className = 'btn-sm' + (pref === 'usb' ? ' btn-primary' : '');
+  btnSd.className = 'btn-sm' + (pref === 'local' ? ' btn-primary' : '');
+  btnUsb.disabled = isRecording;
+  btnSd.disabled = isRecording;
 
   if (isRecording && recTo === 'usb') {
     sDot.className = 'status-dot recording';
@@ -537,6 +551,12 @@ async function pollStatus() {
     sLabel.textContent = 'Storage: Local SD (failover)';
     sFree.textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1) + ' GB free' : '';
     sDetail.textContent = 'USB disconnected during recording; continued on local SD.';
+  } else if (pref === 'local') {
+    sDot.className = 'status-dot idle';
+    sDot.style.background = '';
+    sLabel.textContent = 'Storage: Local SD (preferred)';
+    sFree.textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1) + ' GB free' : '';
+    sDetail.textContent = usb.mounted && usb.usable ? 'USB drive detected but SD card is selected.' : '';
   } else if (usb.mounted && usb.usable) {
     sDot.className = 'status-dot';
     sDot.style.background = '#43a047';
@@ -554,8 +574,22 @@ async function pollStatus() {
     sDot.style.background = '';
     sLabel.textContent = 'Storage: Local SD';
     sFree.textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1) + ' GB free' : '';
-    sDetail.textContent = '';
+    sDetail.textContent = 'No USB drive detected.';
   }
+}
+
+async function setStoragePref(pref) {
+  const btnUsb = document.getElementById('btnStorageUsb');
+  const btnSd = document.getElementById('btnStorageSd');
+  btnUsb.disabled = true;
+  btnSd.disabled = true;
+  await api('/storage_preference', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({preference: pref}),
+  });
+  // pollStatus will update button styles on next tick
+  pollStatus();
 }
 
 function startDurationTimer() {
