@@ -555,7 +555,7 @@ def _remux_to_mp4(ts_path):
         hw.flash_led(0, 255, 0, rate_hz=0.5)
     try:
         size_gib = os.path.getsize(ts_path) / (1024 ** 3)
-        timeout_s = int(120 + size_gib * 60)
+        timeout_s = int(180 + size_gib * 180)
 
         cmd = ["ffmpeg", "-y", "-i", ts_path, "-c", "copy"]
         if size_gib <= 4:
