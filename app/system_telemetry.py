@@ -151,7 +151,8 @@ def get_system_time():
 
 
 def get_all_telemetry(servo_position=None, light_brightness=None,
-                      recipe_name=None, recording_ok=None):
+                      recipe_name=None, recording_ok=None,
+                      usb_disk_free_mb=None):
     """Collect all available system telemetry into a dict."""
     return {
         "cpu_temp_c": get_cpu_temperature(),
@@ -161,6 +162,7 @@ def get_all_telemetry(servo_position=None, light_brightness=None,
         "time_synced": is_time_synced(),
         "system_time": get_system_time(),
         "disk_free_mb": get_disk_free_mb(),
+        "usb_disk_free_mb": usb_disk_free_mb,
         "servo_position_us": servo_position,
         "light_brightness_pct": light_brightness,
         "recipe_name": recipe_name,

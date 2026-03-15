@@ -151,6 +151,18 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
     </div>
   </div>
 
+  <!-- Storage indicator -->
+  <div class="card" id="storageCard">
+    <div class="flex-between">
+      <div>
+        <span id="storageDot" class="status-dot idle"></span>
+        <strong id="storageLabel">Storage: Local SD</strong>
+      </div>
+      <span class="text-muted mono" id="storageFree"></span>
+    </div>
+    <div class="text-muted mt-8" id="storageDetail"></div>
+  </div>
+
   <!-- Auto-start recipe selector -->
   <div class="card">
     <div class="form-row">
@@ -242,6 +254,7 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
       <div class="telem-item"><div class="telem-label">CPU Clock</div><div class="telem-value" id="tCpuClk">--</div></div>
       <div class="telem-item"><div class="telem-label">Load (1m)</div><div class="telem-value" id="tCpuLoad">--</div></div>
       <div class="telem-item"><div class="telem-label">Disk Free</div><div class="telem-value" id="tDisk">--</div></div>
+      <div class="telem-item"><div class="telem-label">USB Disk</div><div class="telem-value" id="tUsbDisk">--</div></div>
       <div class="telem-item"><div class="telem-label">System Time</div><div class="telem-value" id="tSysTime" style="font-size:.85em">--</div></div>
       <div class="telem-item"><div class="telem-label">Time Synced</div><div class="telem-value" id="tSync">--</div></div>
       <div class="telem-item"><div class="telem-label">Status LED</div><div class="telem-value" id="tLed">--</div></div>
@@ -501,6 +514,47 @@ async function pollStatus() {
     schedEl.textContent = '';
     document.getElementById('btnScheduleStop').disabled = true;
   }
+
+  // Storage card
+  const sDot = document.getElementById('storageDot');
+  const sLabel = document.getElementById('storageLabel');
+  const sFree = document.getElementById('storageFree');
+  const sDetail = document.getElementById('storageDetail');
+  const usb = d.usb_storage || {};
+  const recTo = d.recording_to || 'local';
+  const failovers = d.usb_failover_count || 0;
+
+  if (isRecording && recTo === 'usb') {
+    sDot.className = 'status-dot recording';
+    sDot.style.background = '#43a047';
+    sLabel.textContent = 'Recording to USB Drive';
+    sFree.textContent = usb.free_mb != null ? (usb.free_mb/1024).toFixed(1) + ' GB free' : '';
+    sDetail.textContent = usb.device || '';
+  } else if (failovers > 0 && isRecording) {
+    sDot.className = 'status-dot degraded';
+    sDot.style.background = '';
+    sLabel.textContent = 'Storage: Local SD (failover)';
+    sFree.textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1) + ' GB free' : '';
+    sDetail.textContent = 'USB disconnected during recording; continued on local SD.';
+  } else if (usb.mounted && usb.usable) {
+    sDot.className = 'status-dot';
+    sDot.style.background = '#43a047';
+    sLabel.textContent = 'Storage: USB Drive';
+    sFree.textContent = usb.free_mb != null ? (usb.free_mb/1024).toFixed(1) + ' GB free' : '';
+    sDetail.textContent = 'Recordings will be saved to USB.';
+  } else if (usb.mounted && !usb.usable) {
+    sDot.className = 'status-dot';
+    sDot.style.background = '#f9a825';
+    sLabel.textContent = 'Storage: Local SD';
+    sFree.textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1) + ' GB free' : '';
+    sDetail.textContent = 'USB detected but < 50 GB free — using local storage.';
+  } else {
+    sDot.className = 'status-dot idle';
+    sDot.style.background = '';
+    sLabel.textContent = 'Storage: Local SD';
+    sFree.textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1) + ' GB free' : '';
+    sDetail.textContent = '';
+  }
 }
 
 function startDurationTimer() {
@@ -526,6 +580,7 @@ async function pollTelemetry() {
   document.getElementById('tCpuClk').textContent = d.cpu_clock_mhz != null ? d.cpu_clock_mhz + ' MHz' : '--';
   document.getElementById('tCpuLoad').textContent = d.cpu_load_avg != null ? d.cpu_load_avg.toFixed(2) : '--';
   document.getElementById('tDisk').textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1)+' GB' : '--';
+  document.getElementById('tUsbDisk').textContent = d.usb_disk_free_mb != null ? (d.usb_disk_free_mb/1024).toFixed(1)+' GB' : '--';
   document.getElementById('tSysTime').textContent = d.system_time || '--';
   document.getElementById('tSync').textContent = d.time_synced === true ? 'Yes' : d.time_synced === false ? 'No' : '--';
   document.getElementById('tServo').textContent = d.servo_position_us != null ? d.servo_position_us + ' us' : '--';

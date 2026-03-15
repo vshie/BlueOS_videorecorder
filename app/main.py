@@ -39,6 +39,7 @@ from recipes import (
     init_default_recipes, list_recipes, get_recipe,
     save_recipe, delete_recipe, calculate_sweep_time,
 )
+import usb_storage
 
 # ── Constants ────────────────────────────────────────────────────────────
 VIDEO_DIR = "/app/videorecordings"
@@ -78,6 +79,10 @@ remux_progress = 0
 
 active_recipe_for_recording = None
 image_rotation = 0
+
+usb_recording = False
+usb_failover_count = 0
+recording_base_dir = None
 
 # ── Config ───────────────────────────────────────────────────────────────
 
@@ -306,6 +311,69 @@ def gst_stderr_monitor(process):
 
 # ── Health watchdog ──────────────────────────────────────────────────────
 
+def _usb_failover():
+    """Kill current recording on USB and restart on local SD card."""
+    global gst_process, recording, start_time, current_video_file
+    global current_ass_file, current_events_file
+    global ass_thread, stop_ass_thread
+    global gst_stderr_thread, stop_gst_stderr_thread
+    global stills_thread, stop_stills_thread, stills_dir
+    global usb_recording, usb_failover_count, recording_base_dir
+
+    logger.warning("USB failover: storage lost, switching to local SD")
+    log_event("usb_failover", "USB storage lost during recording, restarting on local SD")
+    usb_failover_count += 1
+
+    saved_recipe = active_recipe_for_recording
+    saved_mode = (saved_recipe or {}).get("mode", "video")
+    saved_interval = (saved_recipe or {}).get("still_interval_s", 1.0)
+    saved_rotation = image_rotation
+
+    stop_ass_thread = True
+    if ass_thread and ass_thread.is_alive():
+        ass_thread.join(timeout=2)
+
+    stop_stills_thread = True
+    if stills_thread and stills_thread.is_alive():
+        stills_thread.join(timeout=3)
+
+    stop_gst_stderr_thread = True
+    if gst_stderr_thread and gst_stderr_thread.is_alive():
+        gst_stderr_thread.join(timeout=2)
+
+    if gst_process:
+        try:
+            gst_process.kill()
+            gst_process.wait(timeout=5)
+        except Exception:
+            pass
+
+    recording = False
+    start_time = None
+    gst_process = None
+    current_video_file = None
+    current_ass_file = None
+    current_events_file = None
+    stills_dir = None
+    usb_recording = False
+    recording_base_dir = None
+
+    hw.led_warning()
+    time.sleep(1)
+
+    ok = _start_recording_internal(
+        mode=saved_mode,
+        still_interval_s=saved_interval,
+        rotation=saved_rotation,
+        force_local=True,
+    )
+    if ok:
+        logger.info("USB failover: recording resumed on local SD")
+    else:
+        logger.error("USB failover: failed to restart recording on local SD")
+        hw.led_warning()
+
+
 def recording_health_watchdog():
     global file_stall_count
     last_size = 0
@@ -313,6 +381,10 @@ def recording_health_watchdog():
 
     while not stop_watchdog_thread and recording:
         try:
+            if usb_recording and not usb_storage.is_healthy():
+                _usb_failover()
+                return
+
             if current_video_file and os.path.exists(current_video_file):
                 sz = os.path.getsize(current_video_file)
                 growth = sz - last_size
@@ -332,7 +404,8 @@ def recording_health_watchdog():
             if gst_process and gst_process.poll() is not None:
                 log_event("process_died", f"GStreamer exit code {gst_process.returncode}")
 
-            disk_free = get_disk_free_mb()
+            check_path = recording_base_dir or VIDEO_DIR
+            disk_free = get_disk_free_mb(check_path)
             if disk_free is not None and disk_free < 1024:
                 logger.warning(f"Disk space low: {disk_free} MB, stopping")
                 log_event("disk_full", f"{disk_free} MB remaining")
@@ -432,13 +505,15 @@ def start_recording_with_recipe(recipe):
     )
 
 
-def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
+def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
+                               force_local=False):
     global gst_process, recording, start_time, current_video_file
     global current_ass_file, current_events_file
     global ass_thread, stop_ass_thread
     global gst_stderr_thread, stop_gst_stderr_thread, gst_error_count, gst_warning_count
     global watchdog_thread, stop_watchdog_thread, file_stall_count
     global stills_thread, stop_stills_thread, stills_dir, stills_count
+    global usb_recording, recording_base_dir
 
     if recording:
         return False
@@ -446,13 +521,30 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
     os.makedirs(VIDEO_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    if active_recipe_for_recording:
+        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', active_recipe_for_recording.get("name", "recipe").replace(' ', '_'))
+    else:
+        safe_name = None
+
+    use_usb = (not force_local) and usb_storage.is_usable()
+    if use_usb:
+        subfolder = f"{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
+        rec_dir = usb_storage.get_recording_dir(subfolder)
+        usb_recording = True
+        logger.info(f"Recording to USB: {rec_dir}")
+    else:
+        rec_dir = VIDEO_DIR
+        usb_recording = False
+
+    recording_base_dir = rec_dir
+
     if mode == "video":
-        if active_recipe_for_recording:
-            safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', active_recipe_for_recording.get("name", "recipe").replace(' ', '_'))
-            filename = f"recipe_{safe_name}_{timestamp}.ts"
+        if use_usb:
+            basename = f"{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
         else:
-            filename = f"manual_{timestamp}.ts"
-        filepath = os.path.join(VIDEO_DIR, filename)
+            basename = f"recipe_{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
+        filename = basename + ".ts"
+        filepath = os.path.join(rec_dir, filename)
         current_video_file = filepath
 
         pipeline = (
@@ -503,8 +595,9 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
         gst_stderr_thread.start()
 
     elif mode == "stills":
-        if active_recipe_for_recording:
-            safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', active_recipe_for_recording.get("name", "recipe").replace(' ', '_'))
+        if use_usb:
+            stills_dir = rec_dir
+        elif safe_name:
             stills_dir = os.path.join(VIDEO_DIR, f"stills_recipe_{safe_name}_{timestamp}")
         else:
             stills_dir = os.path.join(VIDEO_DIR, f"stills_manual_{timestamp}")
@@ -544,8 +637,9 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
     watchdog_thread.start()
 
     hw.led_recording()
-    log_event("recording_started", f"mode={mode}")
-    logger.info(f"Recording started: mode={mode}")
+    storage_label = "USB" if usb_recording else "local"
+    log_event("recording_started", f"mode={mode}, storage={storage_label}")
+    logger.info(f"Recording started: mode={mode}, storage={storage_label}")
     return True
 
 
@@ -630,6 +724,7 @@ def _stop_recording_internal():
     global watchdog_thread, stop_watchdog_thread
     global stills_thread, stop_stills_thread, stills_dir
     global active_recipe_for_recording
+    global usb_recording, recording_base_dir
 
     if not recording:
         return
@@ -676,6 +771,8 @@ def _stop_recording_internal():
     current_events_file = None
     stills_dir = None
     active_recipe_for_recording = None
+    usb_recording = False
+    recording_base_dir = None
 
     if video_path and os.path.exists(video_path):
         time.sleep(2)
@@ -792,6 +889,9 @@ def route_status():
                 "filename": remux_filename,
                 "progress": remux_progress,
             } if remux_active else None,
+            "usb_storage": usb_storage.get_status(),
+            "recording_to": "usb" if usb_recording else "local",
+            "usb_failover_count": usb_failover_count,
         })
         resp.headers["Cache-Control"] = "no-store"
         return resp
@@ -939,6 +1039,7 @@ def route_telemetry():
             light_brightness=hw.get_light_brightness(),
             recipe_name=active_recipe_for_recording["name"] if active_recipe_for_recording else None,
             recording_ok=file_stall_count == 0 if recording else None,
+            usb_disk_free_mb=usb_storage.get_free_mb(),
         )
         data["success"] = True
         data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1182,10 +1283,20 @@ def _remux_orphaned_ts():
 
 
 def _boot():
-    """Initialize hardware, default recipes, and auto-start if configured."""
+    """Initialize hardware, default recipes, USB storage, and auto-start if configured."""
     logger.info("=== DropCam boot sequence starting ===")
     hw.init()
     init_default_recipes()
+
+    usb_storage.try_mount()
+    usb_status = usb_storage.get_status()
+    if usb_status["mounted"]:
+        logger.info(f"USB storage detected: {usb_status['device']}, "
+                    f"{usb_status['free_mb']:.0f} MB free, "
+                    f"usable={usb_status['usable']}")
+    else:
+        logger.info("No USB storage detected at boot")
+    usb_storage.start_probe()
 
     def _sweep_snapshot():
         """Capture a still during a sweep (for snapshot_only light mode)."""

@@ -35,6 +35,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-install-su
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# USB filesystem support (exFAT, NTFS, FAT32 is built-in)
+RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
+    exfat-fuse exfat-utils ntfs-3g \
+    && rm -rf /var/lib/apt/lists/*
+
 # Build pigpio daemon from source (not in Ubuntu/Debian repos -- Raspbian only).
 # ADD downloads via the Docker daemon, bypassing container SSL cert issues.
 ADD https://github.com/joan2937/pigpio/archive/master.tar.gz /tmp/pigpio.tar.gz
