@@ -25,6 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-install-su
 RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-libav \
+    gstreamer1.0-alsa \
+    alsa-utils \
     psmisc \
     && rm -rf /var/lib/apt/lists/*
 
@@ -66,7 +68,8 @@ LABEL permissions='\
   "HostConfig": {\
     "Binds": [\
       "/usr/blueos/extensions/videorecorder:/app/videorecordings",\
-      "/dev/video2:/dev/video2"\
+      "/dev/video2:/dev/video2",\
+      "/dev/snd:/dev/snd"\
     ],\
     "ExtraHosts": ["host.docker.internal:host-gateway"],\
     "PortBindings": {\
