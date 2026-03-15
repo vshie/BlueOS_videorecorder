@@ -1084,14 +1084,18 @@ function loadSetup() {
 <p>All servo/light signals share a common ground with the Pi. The servo and light require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header.</p>
 
 <h3>3. LED Status Indicators</h3>
+<p>When retrieving a deployed camera, the LED tells you exactly what state the system is in:</p>
 <table>
-  <tr><th>Pattern</th><th>Meaning</th></tr>
-  <tr><td style="color:#2196f3;font-weight:bold">Breathing blue</td><td>Idle, ready</td></tr>
-  <tr><td style="color:#e53935;font-weight:bold">Slow red flash</td><td>Recording in progress (default, customizable per recipe)</td></tr>
-  <tr><td style="color:#f9a825;font-weight:bold">Fast yellow flash</td><td>Recording problem (file not growing) or disk full</td></tr>
-  <tr><td style="color:#1a73e8;font-weight:bold">Solid blue</td><td>Recording sequence complete</td></tr>
+  <tr><th>LED Pattern</th><th>State</th><th>What It Means</th></tr>
+  <tr><td style="color:#888;font-weight:bold">Off</td><td>Boot</td><td>Extension is starting up and initializing hardware. Wait a few seconds.</td></tr>
+  <tr><td style="color:#2196f3;font-weight:bold">Breathing blue</td><td>Idle / Waiting</td><td>System is ready. If an auto-start recipe is set, this also shows during the pre-recording delay countdown.</td></tr>
+  <tr><td style="color:#e53935;font-weight:bold">Slow red flash</td><td>Recording</td><td>Video or stills capture is in progress. This is the default; recipes can customize the color and blink rate.</td></tr>
+  <tr><td style="color:#f9a825;font-weight:bold">Fast yellow flash</td><td>Warning</td><td>A problem occurred: recording file not growing, disk full, USB storage disconnected, or scheduler error. Recording may have stopped.</td></tr>
+  <tr><td style="color:#43a047;font-weight:bold">Slow green flash</td><td>Processing</td><td>Recording has stopped and the system is remuxing TS&rarr;MP4, or transferring files between USB and SD card. Do not remove power or USB drive.</td></tr>
+  <tr><td style="color:#1a73e8;font-weight:bold">Solid blue</td><td>Complete</td><td>A scheduled recording has finished and all processing is done. Safe to power off or retrieve the USB drive.</td></tr>
 </table>
-<p>Recipe recordings can customize LED color (red, green, blue, yellow, cyan, magenta, white) and blink rate (solid, slow, fast).</p>
+<p><strong>Retrieval lifecycle:</strong> Off &rarr; Breathing blue &rarr; Slow flash (recording) &rarr; Slow green flash (processing) &rarr; Solid blue (done &mdash; safe to retrieve).</p>
+<p>Recipe recordings can customize the recording LED color (red, green, blue, yellow, cyan, magenta, white) and blink rate (solid, slow, fast). The other states (idle, warning, processing, complete) are always the same regardless of recipe settings.</p>
 
 <h3>4. Time Synchronization</h3>
 <p>The Raspberry Pi does not have a real-time clock (RTC). Without internet access, the system time resets on each boot. To synchronize the clock:</p>
