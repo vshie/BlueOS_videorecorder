@@ -1075,8 +1075,9 @@ function updateSweepCalc() {
   }
   const sweep_per_leg = remaining / (2 * osc);
   const time_per_osc = 2 * sweep_per_leg + loiters_per_osc * loiter;
-  el.textContent = 'Sweep speed: ' + sweep_per_leg.toFixed(1) + 's per leg | '
-    + time_per_osc.toFixed(1) + 's per oscillation | '
+  const fmtMin = (s) => s >= 60 ? (s / 60).toFixed(1) + ' min' : s.toFixed(0) + 's';
+  el.textContent = 'Sweep speed: ' + fmtMin(sweep_per_leg) + ' per leg | '
+    + fmtMin(time_per_osc) + ' per oscillation | '
     + osc + ' oscillation' + (osc !== 1 ? 's' : '') + ' in ' + duration + ' min';
 }
 
