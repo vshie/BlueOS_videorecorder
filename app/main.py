@@ -499,12 +499,13 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
         with open(marker, "w") as f:
             json.dump({"started": timestamp, "interval_s": still_interval_s, "rotation": rotation}, f)
 
+        start_time = datetime.now()
+        recording = True
         stop_stills_thread = False
         stills_thread = threading.Thread(
             target=stills_capture_loop, args=(still_interval_s, rotation), daemon=True
         )
         stills_thread.start()
-        start_time = datetime.now()
     else:
         logger.error(f"Unknown mode: {mode}")
         return False
