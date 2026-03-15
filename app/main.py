@@ -43,6 +43,7 @@ from recipes import (
 VIDEO_DIR = "/app/videorecordings"
 CONFIG_FILE = os.path.join(VIDEO_DIR, "dropcam_config.json")
 VIDEO_DEVICE = "/dev/video2"
+AUDIO_DEVICE = "hw:Camera,0"
 
 # ── Recording state ──────────────────────────────────────────────────────
 gst_process = None
@@ -436,7 +437,11 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
         pipeline = (
             f"v4l2src do-timestamp=true device={VIDEO_DEVICE} ! "
             "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
-            f"h264parse ! mpegtsmux ! filesink location={filepath}"
+            "h264parse ! queue ! mux. "
+            f"alsasrc device={AUDIO_DEVICE} ! "
+            "audio/x-raw,format=S16LE,rate=44100,channels=1 ! "
+            "audioconvert ! audioresample ! avenc_aac ! queue ! mux. "
+            f"mpegtsmux name=mux ! filesink location={filepath}"
         )
         command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
 
