@@ -550,12 +550,18 @@ def _remux_to_mp4(ts_path):
     Returns the .mp4 path on success, or the original .ts path on failure."""
     mp4_path = os.path.splitext(ts_path)[0] + ".mp4"
     try:
-        cmd = [
-            "ffmpeg", "-y", "-i", ts_path,
-            "-c", "copy", "-movflags", "+faststart",
-            mp4_path,
-        ]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        size_gib = os.path.getsize(ts_path) / (1024 ** 3)
+        timeout_s = int(120 + size_gib * 60)
+
+        cmd = ["ffmpeg", "-y", "-i", ts_path, "-c", "copy"]
+        if size_gib <= 4:
+            cmd += ["-movflags", "+faststart"]
+        else:
+            logger.info(f"Skipping +faststart for {size_gib:.1f} GiB file to reduce remux time")
+        cmd.append(mp4_path)
+
+        logger.info(f"Remuxing {size_gib:.1f} GiB TS→MP4 (timeout {timeout_s}s)…")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
         if r.returncode == 0 and os.path.exists(mp4_path):
             os.remove(ts_path)
             logger.info(f"Remuxed to MP4: {os.path.basename(mp4_path)}")
@@ -567,7 +573,10 @@ def _remux_to_mp4(ts_path):
     except Exception as e:
         logger.error(f"Remux exception: {e}")
         if os.path.exists(mp4_path):
-            os.remove(mp4_path)
+            try:
+                os.remove(mp4_path)
+            except OSError:
+                pass
     return ts_path
 
 
@@ -1109,6 +1118,22 @@ def _wait_for_camera():
     return False
 
 
+def _remux_orphaned_ts():
+    """Remux any .ts files left over from previous runs (e.g. timeout or crash)."""
+    try:
+        os.makedirs(VIDEO_DIR, exist_ok=True)
+        ts_files = [f for f in os.listdir(VIDEO_DIR) if f.endswith(".ts")]
+        for fname in ts_files:
+            mp4_name = os.path.splitext(fname)[0] + ".mp4"
+            if os.path.exists(os.path.join(VIDEO_DIR, mp4_name)):
+                continue
+            ts_path = os.path.join(VIDEO_DIR, fname)
+            logger.info(f"Found orphaned TS file, remuxing: {fname}")
+            _remux_to_mp4(ts_path)
+    except Exception as e:
+        logger.error(f"Orphaned TS remux scan failed: {e}")
+
+
 def _boot():
     """Initialize hardware, default recipes, and auto-start if configured."""
     logger.info("=== DropCam boot sequence starting ===")
@@ -1130,6 +1155,8 @@ def _boot():
     )
 
     hw.led_idle()
+
+    threading.Thread(target=_remux_orphaned_ts, daemon=True).start()
 
     cfg = load_config()
     rid = cfg.get("active_recipe_id")
