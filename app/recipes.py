@@ -253,7 +253,7 @@ def get_recipe(recipe_id):
 
 
 def save_recipe(data, recipe_id=None):
-    """Validate and save a recipe. Returns (recipe_dict, errors)."""
+    """Validate and save a recipe atomically. Returns (recipe_dict, errors)."""
     _ensure_dir()
     clean, errors = validate_recipe(data)
     if errors:
@@ -263,8 +263,12 @@ def save_recipe(data, recipe_id=None):
     clean["id"] = recipe_id
     path = _recipe_path(recipe_id)
     try:
-        with open(path, "w") as f:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(clean, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
         return clean, []
     except Exception as e:
         return None, [str(e)]

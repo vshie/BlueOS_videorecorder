@@ -79,18 +79,29 @@ def load_config():
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r") as f:
-                saved = json.load(f)
-            defaults.update(saved)
+                raw = f.read().strip()
+            if raw:
+                saved = json.loads(raw)
+                defaults.update(saved)
+            else:
+                logger.warning("Config file exists but is empty (possible power-cut corruption)")
+    except json.JSONDecodeError as e:
+        logger.warning(f"Config file corrupt (possible power-cut corruption): {e}")
     except Exception as e:
         logger.warning(f"Could not load config: {e}")
     return defaults
 
 
 def save_config(cfg):
+    """Atomic config write: write to temp file then rename to prevent corruption."""
     try:
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-        with open(CONFIG_FILE, "w") as f:
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(cfg, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, CONFIG_FILE)
     except Exception as e:
         logger.error(f"Could not save config: {e}")
 
@@ -994,8 +1005,25 @@ def route_schedule_status():
 
 # ── Startup ──────────────────────────────────────────────────────────────
 
+CAMERA_BOOT_RETRIES = 10
+CAMERA_RETRY_INTERVAL_S = 3
+
+
+def _wait_for_camera():
+    """Block until the camera device is available or retries are exhausted."""
+    for attempt in range(1, CAMERA_BOOT_RETRIES + 1):
+        if os.path.exists(VIDEO_DEVICE):
+            logger.info(f"Camera {VIDEO_DEVICE} available (attempt {attempt})")
+            return True
+        logger.info(f"Waiting for camera {VIDEO_DEVICE} (attempt {attempt}/{CAMERA_BOOT_RETRIES})...")
+        time.sleep(CAMERA_RETRY_INTERVAL_S)
+    logger.warning(f"Camera {VIDEO_DEVICE} not found after {CAMERA_BOOT_RETRIES} attempts")
+    return False
+
+
 def _boot():
     """Initialize hardware, default recipes, and auto-start if configured."""
+    logger.info("=== DropCam boot sequence starting ===")
     hw.init()
     init_default_recipes()
 
@@ -1017,15 +1045,25 @@ def _boot():
 
     cfg = load_config()
     rid = cfg.get("active_recipe_id")
+    logger.info(f"Boot config: active_recipe_id={rid!r}, rotation={cfg.get('rotation_degrees', 0)}")
+
     if rid:
         recipe = get_recipe(rid)
         if recipe:
-            logger.info(f"Auto-start recipe: {recipe['name']} (delay {recipe.get('auto_start_delay_minutes', 1)} min)")
+            logger.info(f"Auto-start recipe: {recipe['name']} "
+                        f"(delay {recipe.get('auto_start_delay_minutes', 1)} min, "
+                        f"mode={recipe.get('mode', 'video')})")
+            camera_ok = _wait_for_camera()
+            if not camera_ok:
+                logger.warning("Proceeding with auto-start despite camera not yet detected — "
+                               "scheduler delay may allow it time to appear")
             scheduler.start(recipe)
         else:
-            logger.info(f"Active recipe id '{rid}' not found, skipping auto-start")
+            logger.warning(f"Active recipe id '{rid}' not found on disk, skipping auto-start")
     else:
-        logger.info("No active recipe configured, waiting for manual control")
+        logger.info("No active recipe configured (active_recipe_id is null), waiting for manual control")
+
+    logger.info("=== DropCam boot sequence complete ===")
 
 
 if __name__ == "__main__":

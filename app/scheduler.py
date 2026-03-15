@@ -14,6 +14,8 @@ import time
 logger = logging.getLogger(__name__)
 
 DISK_FREE_MINIMUM_MB = 1024  # 1 GB
+RECORDING_START_RETRIES = 5
+RECORDING_RETRY_INTERVAL_S = 5
 
 LED_COLOR_MAP = {
     "red": (255, 0, 0),
@@ -113,9 +115,19 @@ class Scheduler:
                 return
 
             self._set_state("starting")
-            ok = self._start_recording_fn(recipe)
+            ok = False
+            for attempt in range(1, RECORDING_START_RETRIES + 1):
+                if self._stop.is_set():
+                    return
+                ok = self._start_recording_fn(recipe)
+                if ok:
+                    break
+                logger.warning(f"Scheduler: recording start attempt {attempt}/{RECORDING_START_RETRIES} failed")
+                if attempt < RECORDING_START_RETRIES:
+                    self._stop.wait(RECORDING_RETRY_INTERVAL_S)
+
             if not ok:
-                logger.error("Scheduler: recording failed to start")
+                logger.error("Scheduler: recording failed to start after all retries")
                 self._set_state("error")
                 if self._hw:
                     self._hw.led_warning()
@@ -173,8 +185,10 @@ class Scheduler:
                 self._set_state("stopped")
 
         except Exception as e:
-            logger.error(f"Scheduler error: {e}")
+            logger.error(f"Scheduler error: {e}", exc_info=True)
             self._set_state("error")
+            if self._hw:
+                self._hw.led_warning()
 
     def _countdown(self, state, total_s, check_disk=False):
         """Wait for total_s seconds, updating remaining time. Checks disk if requested."""

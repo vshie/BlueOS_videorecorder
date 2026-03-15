@@ -135,11 +135,11 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
     <div class="form-row">
       <div class="form-group">
         <label>Auto-Start Recipe</label>
-        <select id="autoRecipeSelect">
+        <select id="autoRecipeSelect" onchange="setActiveRecipe()">
           <option value="">None (manual only)</option>
         </select>
       </div>
-      <button class="btn-sm" onclick="setActiveRecipe()" id="btnSaveAutoRecipe">Save</button>
+      <span class="text-muted" id="autoRecipeSaved" style="font-size:.82em;display:none">Saved</span>
       <button class="btn-primary btn-sm" onclick="startSchedule()" id="btnSchedule">Start Schedule</button>
       <button class="btn-sm" onclick="stopSchedule()" id="btnScheduleStop" disabled>Cancel Schedule</button>
     </div>
@@ -488,6 +488,10 @@ async function manualStop() {
 async function setActiveRecipe() {
   const rid = document.getElementById('autoRecipeSelect').value;
   await api('/active_recipe', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({recipe_id: rid || null})});
+  const badge = document.getElementById('autoRecipeSaved');
+  badge.style.display = 'inline';
+  badge.textContent = rid ? 'Saved — will auto-start on boot' : 'Saved — manual only';
+  setTimeout(() => { badge.style.display = 'none'; }, 3000);
 }
 async function startSchedule() {
   const rid = document.getElementById('autoRecipeSelect').value;
@@ -624,7 +628,6 @@ function renderRecipeList() {
 }
 function populateRecipeDropdown() {
   const sel = document.getElementById('autoRecipeSelect');
-  const cur = sel.value;
   sel.innerHTML = '<option value="">None (manual only)</option>';
   allRecipes.forEach(r => {
     const opt = document.createElement('option');
@@ -632,9 +635,13 @@ function populateRecipeDropdown() {
     opt.textContent = r.name;
     sel.appendChild(opt);
   });
-  // Restore selection
   api('/active_recipe').then(d => {
-    if (d.active_recipe_id) sel.value = d.active_recipe_id;
+    if (d.active_recipe_id) {
+      sel.value = d.active_recipe_id;
+      if (sel.value !== d.active_recipe_id) {
+        console.warn('Active recipe', d.active_recipe_id, 'not found in dropdown options');
+      }
+    }
   });
 }
 function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
@@ -812,8 +819,9 @@ function loadSetup() {
 <h3>5. Recording Plans (Recipes)</h3>
 <ul>
   <li>Create recipes in the <strong>Recipes</strong> tab to define recording duration, servo movement, and light settings.</li>
-  <li>Select a recipe in the <strong>Auto-Start Recipe</strong> dropdown on the Status tab.</li>
-  <li>When the extension starts (on boot), it will wait the configured delay period, then begin recording automatically.</li>
+  <li>Select a recipe in the <strong>Auto-Start Recipe</strong> dropdown on the Status tab &mdash; your selection is saved immediately and persists across reboots and power cycles.</li>
+  <li>When the extension starts (on boot), it will wait for the camera, then after the configured delay period, begin recording automatically.</li>
+  <li>If the camera is not immediately available after a cold boot, the system retries up to 10 times (30 seconds) before proceeding.</li>
   <li>To disable auto-start, set the dropdown to "None (manual only)".</li>
 </ul>
 
