@@ -1,9 +1,10 @@
 """
 DropCam - Standalone BlueOS Video Recording Extension
 
-Records H264 video from /dev/video2 into power-cut-safe .ts (MPEG-TS) files,
-or captures stills at a configurable interval. Controls a camera tilt servo,
-lumen light, and RGB status LED. Supports auto-start via saved recording recipes.
+Records H264 video from /dev/video2 into .mp4 files (recorded as power-cut-safe
+MPEG-TS, then remuxed to MP4 on stop for VLC/subtitle compatibility), or captures
+stills at a configurable interval. Controls a camera tilt servo, lumen light, and
+RGB status LED. Supports auto-start via saved recording recipes.
 """
 
 from flask import Flask, jsonify, request, send_file
@@ -498,6 +499,32 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
     return True
 
 
+def _remux_to_mp4(ts_path):
+    """Remux a .ts file to .mp4 with ffmpeg (copy, no re-encode).
+    Returns the .mp4 path on success, or the original .ts path on failure."""
+    mp4_path = os.path.splitext(ts_path)[0] + ".mp4"
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-i", ts_path,
+            "-c", "copy", "-movflags", "+faststart",
+            mp4_path,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if r.returncode == 0 and os.path.exists(mp4_path):
+            os.remove(ts_path)
+            logger.info(f"Remuxed to MP4: {os.path.basename(mp4_path)}")
+            return mp4_path
+        else:
+            logger.error(f"Remux to MP4 failed (rc={r.returncode}): {r.stderr[-500:]}")
+            if os.path.exists(mp4_path):
+                os.remove(mp4_path)
+    except Exception as e:
+        logger.error(f"Remux exception: {e}")
+        if os.path.exists(mp4_path):
+            os.remove(mp4_path)
+    return ts_path
+
+
 def _stop_recording_internal():
     global gst_process, recording, start_time, current_video_file
     global current_ass_file, current_events_file
@@ -553,25 +580,24 @@ def _stop_recording_internal():
     stills_dir = None
     active_recipe_for_recording = None
 
-    if video_path and ass_path and os.path.exists(video_path) and os.path.exists(ass_path):
+    if video_path and os.path.exists(video_path):
         time.sleep(2)
+        video_path = _remux_to_mp4(video_path)
         dur, st = get_video_duration(video_path)
-        if dur:
+        if dur and ass_path and os.path.exists(ass_path):
             adjust_ass_timing(ass_path, dur)
-            if st > 1.0:
-                logger.warning(f"Video PTS offset: start_time={st:.2f}s (expected ~0)")
-                if events_path:
-                    try:
-                        evt = {
-                            "ts": time.time(),
-                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-                            "event": "pts_warning",
-                            "detail": f"Video start_time={st:.2f}s, expected ~0",
-                        }
-                        with open(events_path, "a") as f:
-                            f.write(json.dumps(evt) + "\n")
-                    except Exception:
-                        pass
+        if events_path:
+            try:
+                evt = {
+                    "ts": time.time(),
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                    "event": "remux_complete",
+                    "detail": f"{os.path.basename(video_path)}, duration={dur:.1f}s" if dur else "remux failed",
+                }
+                with open(events_path, "a") as f:
+                    f.write(json.dumps(evt) + "\n")
+            except Exception:
+                pass
 
     logger.info("Recording stopped")
 

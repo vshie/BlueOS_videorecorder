@@ -817,7 +817,7 @@ function loadSetup() {
 
 <h3>6. Recording Details</h3>
 <ul>
-  <li>Video is recorded in <strong>.ts (MPEG-TS)</strong> container format, which is resilient to power cuts.</li>
+  <li>Video is recorded as MPEG-TS during capture (resilient to power cuts), then automatically remuxed to <strong>.mp4</strong> when recording stops for maximum player compatibility.</li>
   <li>Still capture mode saves JPEG frames at the configured interval.</li>
   <li>Subtitle files (.ass) are generated alongside video recordings with system telemetry data.</li>
   <li>Recording stops automatically if disk space drops below <strong>1 GB</strong>.</li>
@@ -836,7 +836,7 @@ function loadSetup() {
   <li><strong>Camera not detected:</strong> Ensure the USB camera is connected and appears as <code>/dev/video2</code>. Replug and restart the extension.</li>
   <li><strong>Servo not moving:</strong> Verify wiring and that the pigpio daemon is running inside the container. Check extension logs.</li>
   <li><strong>LED not lighting:</strong> Ensure the WS2812 data line is on GPIO 10 and shares a ground with the Pi.</li>
-  <li><strong>Recordings empty or corrupt:</strong> Check disk space. A .ts file can be played even if the recording was interrupted.</li>
+  <li><strong>Recordings empty or corrupt:</strong> Check disk space. If power was lost during recording, a .ts file may remain (not yet remuxed to .mp4) but is still playable.</li>
   <li><strong>Extension logs:</strong> View logs from the BlueOS Extension Manager or run <code>docker logs blueos-videorecorder</code>.</li>
 </ul>
 `;
