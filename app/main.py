@@ -7,7 +7,7 @@ stills at a configurable interval. Controls a camera tilt servo, lumen light, an
 RGB status LED. Supports auto-start via saved recording recipes.
 """
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, Response, jsonify, request, send_file
 import io
 import json
 import os
@@ -739,20 +739,18 @@ def download(filename):
 def _download_zip(zip_name):
     """Bundle a video and its sidecars (.ass, _events.ndjson) into a zip."""
     base = os.path.splitext(zip_name)[0]
-    candidates = []
+    video_file = None
     for ext in (".ts", ".mp4"):
-        vpath = os.path.join(VIDEO_DIR, base + ext)
-        if os.path.exists(vpath):
-            candidates.append(base + ext)
+        if os.path.exists(os.path.join(VIDEO_DIR, base + ext)):
+            video_file = base + ext
             break
 
-    if not candidates:
+    if not video_file:
         return jsonify({"success": False, "message": "Video not found"}), 404
 
-    video_base = os.path.splitext(candidates[0])[0]
-    files_to_zip = [candidates[0]]
+    files_to_zip = [video_file]
     for ext in (".ass", "_events.ndjson"):
-        sidecar = video_base + ext
+        sidecar = base + ext
         if os.path.exists(os.path.join(VIDEO_DIR, sidecar)):
             files_to_zip.append(sidecar)
 
@@ -760,8 +758,15 @@ def _download_zip(zip_name):
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for fname in files_to_zip:
             zf.write(os.path.join(VIDEO_DIR, fname), fname)
-    buf.seek(0)
-    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=zip_name)
+    data = buf.getvalue()
+    return Response(
+        data,
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_name}"',
+            "Content-Length": str(len(data)),
+        },
+    )
 
 
 @app.route("/download_stills/<dirname>")
@@ -779,9 +784,16 @@ def download_stills(dirname):
                     full = os.path.join(root, f)
                     arcname = os.path.join(dirname, os.path.relpath(full, dir_path))
                     zf.write(full, arcname)
-        buf.seek(0)
-        return send_file(buf, mimetype="application/zip", as_attachment=True,
-                         download_name=dirname + ".zip")
+        data = buf.getvalue()
+        zip_name = dirname + ".zip"
+        return Response(
+            data,
+            mimetype="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{zip_name}"',
+                "Content-Length": str(len(data)),
+            },
+        )
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 

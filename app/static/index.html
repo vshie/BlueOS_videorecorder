@@ -570,6 +570,7 @@ async function loadVideoList() {
     const zipName = base + '.zip';
     const a = document.createElement('a');
     a.href = '/download/' + zipName;
+    a.download = zipName;
     a.textContent = base;
     a.style.color = '#1a73e8';
     a.title = 'Download zip: ' + [s.video].concat(s.sidecars||[]).join(', ');
@@ -586,6 +587,7 @@ async function loadVideoList() {
     li.style.borderBottom = '1px solid #eee';
     const a = document.createElement('a');
     a.href = '/download_stills/' + s;
+    a.download = s + '.zip';
     a.textContent = s;
     a.style.color = '#1a73e8';
     a.title = 'Download stills as zip';
