@@ -23,14 +23,42 @@ RECIPE_SCHEMA_DEFAULTS = {
     "rotation_degrees": 0,
     "servo_start_us": 1500,
     "servo_end_us": 1500,
-    "servo_sweep_time_s": 30,
     "servo_pause_points": 0,
     "servo_loiter_time_s": 0,
     "servo_oscillations": 1,
     "servo_fixed": True,
     "light_brightness_pct": 0,
-    "light_on": False,
+    "light_mode": "off",
+    "led_color": "red",
+    "led_blink": "slow",
 }
+
+
+def calculate_sweep_time(duration_minutes, pause_points, loiter_time_s, oscillations):
+    """Auto-calculate sweep_time_s per leg so that oscillations fit the duration.
+
+    Returns dict with sweep_time_s, time_per_oscillation_s, and valid flag.
+    Each leg has pause_points intermediate loiters + 1 extent destination loiter.
+    One oscillation = 2 legs.
+    """
+    duration_s = duration_minutes * 60
+    oscillations = max(oscillations, 1)
+    loiters_per_oscillation = 2 * (pause_points + 1)
+    total_loiter_s = oscillations * loiters_per_oscillation * loiter_time_s
+    remaining_transit_s = duration_s - total_loiter_s
+    if remaining_transit_s <= 0:
+        return {
+            "sweep_time_s": 0,
+            "time_per_oscillation_s": total_loiter_s / oscillations,
+            "valid": False,
+        }
+    sweep_time_s = remaining_transit_s / (2 * oscillations)
+    time_per_osc = 2 * sweep_time_s + loiters_per_oscillation * loiter_time_s
+    return {
+        "sweep_time_s": round(sweep_time_s, 1),
+        "time_per_oscillation_s": round(time_per_osc, 1),
+        "valid": True,
+    }
 
 DEFAULT_RECIPES = [
     {
@@ -43,13 +71,14 @@ DEFAULT_RECIPES = [
         "rotation_degrees": 0,
         "servo_start_us": 1500,
         "servo_end_us": 1500,
-        "servo_sweep_time_s": 30,
         "servo_pause_points": 0,
         "servo_loiter_time_s": 0,
         "servo_oscillations": 1,
         "servo_fixed": True,
         "light_brightness_pct": 80,
-        "light_on": True,
+        "light_mode": "always",
+        "led_color": "red",
+        "led_blink": "slow",
     },
     {
         "id": "deep-drop-2hr",
@@ -61,13 +90,14 @@ DEFAULT_RECIPES = [
         "rotation_degrees": 0,
         "servo_start_us": 1200,
         "servo_end_us": 1800,
-        "servo_sweep_time_s": 60,
         "servo_pause_points": 3,
         "servo_loiter_time_s": 5,
-        "servo_oscillations": 0,
+        "servo_oscillations": 10,
         "servo_fixed": False,
         "light_brightness_pct": 100,
-        "light_on": True,
+        "light_mode": "always",
+        "led_color": "red",
+        "led_blink": "slow",
     },
     {
         "id": "time-lapse-4hr",
@@ -79,13 +109,14 @@ DEFAULT_RECIPES = [
         "rotation_degrees": 0,
         "servo_start_us": 1500,
         "servo_end_us": 1500,
-        "servo_sweep_time_s": 30,
         "servo_pause_points": 0,
         "servo_loiter_time_s": 0,
         "servo_oscillations": 1,
         "servo_fixed": True,
         "light_brightness_pct": 50,
-        "light_on": True,
+        "light_mode": "always",
+        "led_color": "green",
+        "led_blink": "slow",
     },
 ]
 
@@ -98,10 +129,19 @@ def _recipe_path(recipe_id):
     return os.path.join(RECIPES_DIR, f"{recipe_id}.json")
 
 
+VALID_LED_COLORS = ("red", "green", "blue", "yellow", "cyan", "magenta", "white")
+VALID_LED_BLINKS = ("solid", "slow", "fast")
+VALID_LIGHT_MODES = ("off", "always", "pause_only", "snapshot_only")
+
+
 def validate_recipe(data):
     """Validate and fill defaults for a recipe dict. Returns (clean_dict, errors)."""
     errors = []
     clean = dict(RECIPE_SCHEMA_DEFAULTS)
+
+    # Backward compatibility: light_on bool -> light_mode
+    if "light_on" in data and "light_mode" not in data:
+        clean["light_mode"] = "always" if data["light_on"] else "off"
 
     if "name" in data:
         clean["name"] = str(data["name"]).strip()[:80]
@@ -120,7 +160,6 @@ def validate_recipe(data):
         ("auto_start_delay_minutes", 0, 60),
         ("servo_start_us", 1000, 2000),
         ("servo_end_us", 1000, 2000),
-        ("servo_sweep_time_s", 1, 600),
         ("servo_pause_points", 0, 50),
         ("servo_loiter_time_s", 0, 120),
         ("servo_oscillations", 0, 999),
@@ -143,9 +182,26 @@ def validate_recipe(data):
         else:
             clean["rotation_degrees"] = rd
 
-    for bf in ("servo_fixed", "light_on"):
-        if bf in data:
-            clean[bf] = bool(data[bf])
+    if "servo_fixed" in data:
+        clean["servo_fixed"] = bool(data["servo_fixed"])
+
+    if "light_mode" in data:
+        if data["light_mode"] not in VALID_LIGHT_MODES:
+            errors.append(f"light_mode must be one of {VALID_LIGHT_MODES}")
+        else:
+            clean["light_mode"] = data["light_mode"]
+
+    if "led_color" in data:
+        if data["led_color"] not in VALID_LED_COLORS:
+            errors.append(f"led_color must be one of {VALID_LED_COLORS}")
+        else:
+            clean["led_color"] = data["led_color"]
+
+    if "led_blink" in data:
+        if data["led_blink"] not in VALID_LED_BLINKS:
+            errors.append(f"led_blink must be one of {VALID_LED_BLINKS}")
+        else:
+            clean["led_blink"] = data["led_blink"]
 
     if "id" in data:
         clean["id"] = str(data["id"])

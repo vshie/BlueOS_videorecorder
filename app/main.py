@@ -7,14 +7,17 @@ lumen light, and RGB status LED. Supports auto-start via saved recording recipes
 """
 
 from flask import Flask, jsonify, request, send_file
+import io
 import json
 import os
+import re
 import subprocess
 import shlex
 import signal
 import threading
 import time
 import logging
+import zipfile
 from datetime import datetime
 
 app = Flask(__name__)
@@ -32,7 +35,7 @@ from system_telemetry import (
 )
 from recipes import (
     init_default_recipes, list_recipes, get_recipe,
-    save_recipe, delete_recipe,
+    save_recipe, delete_recipe, calculate_sweep_time,
 )
 
 # ── Constants ────────────────────────────────────────────────────────────
@@ -397,7 +400,11 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if mode == "video":
-        filename = f"dropcam_{timestamp}.ts"
+        if active_recipe_for_recording:
+            safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', active_recipe_for_recording.get("name", "recipe").replace(' ', '_'))
+            filename = f"recipe_{safe_name}_{timestamp}.ts"
+        else:
+            filename = f"manual_{timestamp}.ts"
         filepath = os.path.join(VIDEO_DIR, filename)
         current_video_file = filepath
 
@@ -445,7 +452,11 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
         gst_stderr_thread.start()
 
     elif mode == "stills":
-        stills_dir = os.path.join(VIDEO_DIR, f"stills_{timestamp}")
+        if active_recipe_for_recording:
+            safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', active_recipe_for_recording.get("name", "recipe").replace(' ', '_'))
+            stills_dir = os.path.join(VIDEO_DIR, f"stills_recipe_{safe_name}_{timestamp}")
+        else:
+            stills_dir = os.path.join(VIDEO_DIR, f"stills_manual_{timestamp}")
         os.makedirs(stills_dir, exist_ok=True)
         stills_count = 0
         current_video_file = None
@@ -604,7 +615,7 @@ def route_stop():
         hw.stop_sweep()
         hw.light_off()
         _stop_recording_internal()
-        hw.led_off()
+        hw.led_idle()
         return jsonify({"success": True})
     except Exception as e:
         logger.error(f"Stop error: {e}")
@@ -671,7 +682,18 @@ def list_videos():
         ]
         videos.sort(reverse=True)
         stills_dirs.sort(reverse=True)
-        return jsonify({"videos": videos, "stills_sessions": stills_dirs})
+
+        sessions = []
+        for v in videos:
+            base = os.path.splitext(v)[0]
+            sidecars = []
+            for ext in (".ass", "_events.ndjson"):
+                s = base + ext
+                if os.path.exists(os.path.join(VIDEO_DIR, s)):
+                    sidecars.append(s)
+            sessions.append({"video": v, "sidecars": sidecars})
+
+        return jsonify({"videos": videos, "sessions": sessions, "stills_sessions": stills_dirs})
     except Exception as e:
         logger.error(f"List error: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
@@ -680,7 +702,59 @@ def list_videos():
 @app.route("/download/<filename>")
 def download(filename):
     try:
+        if filename.endswith(".zip"):
+            return _download_zip(filename)
         return send_file(os.path.join(VIDEO_DIR, filename), as_attachment=True)
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+def _download_zip(zip_name):
+    """Bundle a video and its sidecars (.ass, _events.ndjson) into a zip."""
+    base = os.path.splitext(zip_name)[0]
+    candidates = []
+    for ext in (".ts", ".mp4"):
+        vpath = os.path.join(VIDEO_DIR, base + ext)
+        if os.path.exists(vpath):
+            candidates.append(base + ext)
+            break
+
+    if not candidates:
+        return jsonify({"success": False, "message": "Video not found"}), 404
+
+    video_base = os.path.splitext(candidates[0])[0]
+    files_to_zip = [candidates[0]]
+    for ext in (".ass", "_events.ndjson"):
+        sidecar = video_base + ext
+        if os.path.exists(os.path.join(VIDEO_DIR, sidecar)):
+            files_to_zip.append(sidecar)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in files_to_zip:
+            zf.write(os.path.join(VIDEO_DIR, fname), fname)
+    buf.seek(0)
+    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=zip_name)
+
+
+@app.route("/download_stills/<dirname>")
+def download_stills(dirname):
+    """Bundle a stills session directory into a zip."""
+    try:
+        dir_path = os.path.join(VIDEO_DIR, dirname)
+        if not os.path.isdir(dir_path):
+            return jsonify({"success": False, "message": "Directory not found"}), 404
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, _dirs, files in os.walk(dir_path):
+                for f in files:
+                    full = os.path.join(root, f)
+                    arcname = os.path.join(dirname, os.path.relpath(full, dir_path))
+                    zf.write(full, arcname)
+        buf.seek(0)
+        return send_file(buf, mimetype="application/zip", as_attachment=True,
+                         download_name=dirname + ".zip")
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -723,6 +797,7 @@ def route_telemetry():
         data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         data["recording"] = recording
         data["light_on"] = hw.is_light_on()
+        data["led_state"] = hw.get_led_state()
         return jsonify(data)
     except Exception as e:
         logger.error(f"Telemetry error: {e}")
@@ -869,7 +944,7 @@ def route_schedule_stop():
     _stop_recording_internal()
     hw.stop_sweep()
     hw.light_off()
-    hw.led_off()
+    hw.led_idle()
     return jsonify({"success": True})
 
 
@@ -885,12 +960,21 @@ def _boot():
     hw.init()
     init_default_recipes()
 
+    def _sweep_snapshot():
+        """Capture a still during a sweep (for snapshot_only light mode)."""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = os.path.join(VIDEO_DIR, f"sweep_snap_{ts}.jpg")
+        _capture_still(path, rotation=image_rotation)
+
     scheduler.configure(
         start_fn=start_recording_with_recipe,
         stop_fn=_stop_recording_internal,
         disk_free_fn=get_disk_free_mb,
         hw=hw,
+        capture_still_fn=_sweep_snapshot,
     )
+
+    hw.led_idle()
 
     cfg = load_config()
     rid = cfg.get("active_recipe_id")

@@ -135,10 +135,11 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
     <div class="form-row">
       <div class="form-group">
         <label>Auto-Start Recipe</label>
-        <select id="autoRecipeSelect" onchange="setActiveRecipe()">
+        <select id="autoRecipeSelect">
           <option value="">None (manual only)</option>
         </select>
       </div>
+      <button class="btn-sm" onclick="setActiveRecipe()" id="btnSaveAutoRecipe">Save</button>
       <button class="btn-primary btn-sm" onclick="startSchedule()" id="btnSchedule">Start Schedule</button>
       <button class="btn-sm" onclick="stopSchedule()" id="btnScheduleStop" disabled>Cancel Schedule</button>
     </div>
@@ -169,7 +170,7 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
         <input type="range" id="servoSlider" min="1000" max="2000" step="10" value="1500" oninput="setServo(this.value)">
       </div>
       <div class="form-group narrow">
-        <label>Light</label>
+        <label>Lumen Light</label>
         <div style="display:flex;gap:6px;align-items:center">
           <input type="range" id="lightSlider" min="0" max="100" step="5" value="0" oninput="setLight(this.value)" style="width:90px">
           <span class="mono" id="lightVal">0</span>%
@@ -187,9 +188,11 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
       <div class="telem-item"><div class="telem-label">CPU Voltage</div><div class="telem-value" id="tCpuVolt">--</div></div>
       <div class="telem-item"><div class="telem-label">CPU Clock</div><div class="telem-value" id="tCpuClk">--</div></div>
       <div class="telem-item"><div class="telem-label">Disk Free</div><div class="telem-value" id="tDisk">--</div></div>
+      <div class="telem-item"><div class="telem-label">System Time</div><div class="telem-value" id="tSysTime" style="font-size:.85em">--</div></div>
       <div class="telem-item"><div class="telem-label">Time Synced</div><div class="telem-value" id="tSync">--</div></div>
+      <div class="telem-item"><div class="telem-label">Status LED</div><div class="telem-value" id="tLed">--</div></div>
       <div class="telem-item"><div class="telem-label">Servo</div><div class="telem-value" id="tServo">--</div></div>
-      <div class="telem-item"><div class="telem-label">Light</div><div class="telem-value" id="tLight">--</div></div>
+      <div class="telem-item"><div class="telem-label">Lumen Light</div><div class="telem-value" id="tLight">--</div></div>
       <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
     </div>
   </div>
@@ -234,7 +237,7 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
       </div>
       <div class="form-group narrow">
         <label>Duration (min)</label>
-        <input type="number" id="rDuration" value="30" min="1" max="480">
+        <input type="number" id="rDuration" value="30" min="1" max="480" oninput="updateSweepCalc()">
       </div>
       <div class="form-group narrow">
         <label>Auto-Start Delay (min)</label>
@@ -269,17 +272,47 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
     </div>
     <div id="sweepFields">
       <div class="form-row">
-        <div class="form-group narrow"><label>Sweep Time (s)</label><input type="number" id="rSweepTime" value="30" min="1" max="600"></div>
-        <div class="form-group narrow"><label>Pause Points</label><input type="number" id="rPausePoints" value="0" min="0" max="50"></div>
-        <div class="form-group narrow"><label>Loiter Time (s)</label><input type="number" id="rLoiterTime" value="0" min="0" max="120"></div>
-        <div class="form-group narrow"><label>Oscillations</label><input type="number" id="rOscillations" value="1" min="0" max="999"></div>
+        <div class="form-group narrow"><label>Pause Points</label><input type="number" id="rPausePoints" value="0" min="0" max="50" oninput="updateSweepCalc()"></div>
+        <div class="form-group narrow"><label>Loiter Time (s)</label><input type="number" id="rLoiterTime" value="0" min="0" max="120" oninput="updateSweepCalc()"></div>
+        <div class="form-group narrow"><label>Oscillations</label><input type="number" id="rOscillations" value="1" min="1" max="999" oninput="updateSweepCalc()"></div>
+      </div>
+      <div id="sweepCalcInfo" class="text-muted mt-8" style="font-size:.88em;padding:6px 10px;background:#f8f9fa;border-radius:4px"></div>
+    </div>
+
+    <h3>Status LED</h3>
+    <div class="form-row">
+      <div class="form-group narrow">
+        <label>LED Color</label>
+        <select id="rLedColor">
+          <option value="red">Red</option>
+          <option value="green">Green</option>
+          <option value="blue">Blue</option>
+          <option value="yellow">Yellow</option>
+          <option value="cyan">Cyan</option>
+          <option value="magenta">Magenta</option>
+          <option value="white">White</option>
+        </select>
+      </div>
+      <div class="form-group narrow">
+        <label>LED Blink</label>
+        <select id="rLedBlink">
+          <option value="slow">Slow Blink</option>
+          <option value="fast">Fast Blink</option>
+          <option value="solid">Solid</option>
+        </select>
       </div>
     </div>
 
-    <h3>Light</h3>
+    <h3>Lumen Light</h3>
     <div class="form-row">
       <div class="form-group narrow">
-        <label><input type="checkbox" id="rLightOn"> Light On During Recording</label>
+        <label>Light Mode</label>
+        <select id="rLightMode">
+          <option value="off">Off</option>
+          <option value="always">Always On</option>
+          <option value="pause_only">Pause Points Only</option>
+          <option value="snapshot_only">Snapshot Only</option>
+        </select>
       </div>
       <div class="form-group narrow">
         <label>Brightness: <span id="rLightBrightVal" class="mono">0</span>%</label>
@@ -410,11 +443,24 @@ async function pollTelemetry() {
   document.getElementById('tCpuVolt').textContent = d.cpu_voltage_v != null ? d.cpu_voltage_v + ' V' : '--';
   document.getElementById('tCpuClk').textContent = d.cpu_clock_mhz != null ? d.cpu_clock_mhz + ' MHz' : '--';
   document.getElementById('tDisk').textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1)+' GB' : '--';
+  document.getElementById('tSysTime').textContent = d.system_time || '--';
   document.getElementById('tSync').textContent = d.time_synced === true ? 'Yes' : d.time_synced === false ? 'No' : '--';
   document.getElementById('tServo').textContent = d.servo_position_us != null ? d.servo_position_us + ' us' : '--';
   document.getElementById('tLight').textContent = d.light_on ? d.light_brightness_pct + '%' : 'Off';
   document.getElementById('tHealth').textContent = isRecording ? (d.recording_ok ? 'OK' : 'STALL') : '--';
   document.getElementById('sysTime').textContent = d.timestamp || '--';
+
+  // LED status display
+  const ledEl = document.getElementById('tLed');
+  if (d.led_state) {
+    const c = d.led_state.color || [0,0,0];
+    const mode = d.led_state.mode || 'off';
+    const colorStr = 'rgb('+c[0]+','+c[1]+','+c[2]+')';
+    const modeLabel = mode === 'off' ? 'Off' : mode === 'solid' ? 'Solid' : mode === 'flash_slow' ? 'Slow Blink' : 'Fast Blink';
+    ledEl.innerHTML = '<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:'+colorStr+';vertical-align:middle;margin-right:4px;border:1px solid #ccc"></span>' + modeLabel;
+  } else {
+    ledEl.textContent = '--';
+  }
 
   if (d.time_synced === false) {
     document.getElementById('timeBanner').classList.remove('hidden');
@@ -485,8 +531,9 @@ let servoDebounce = null;
 function setServo(val) {
   document.getElementById('servoVal').textContent = val;
   clearTimeout(servoDebounce);
-  servoDebounce = setTimeout(() => {
-    api('/servo', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({position_us:+val})});
+  servoDebounce = setTimeout(async () => {
+    await api('/servo', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({position_us:+val})});
+    setTimeout(() => takeSnapshot(), 500);
   }, 80);
 }
 let lightDebounce = null;
@@ -511,25 +558,42 @@ async function loadVideoList() {
   const ul = document.getElementById('videoList');
   ul.innerHTML = '';
   const nf = document.getElementById('noFiles');
-  const items = (d.videos || []).concat(d.stills_sessions || []);
-  if (items.length === 0) { nf.classList.remove('hidden'); return; }
+  const sessions = d.sessions || [];
+  const stills = d.stills_sessions || [];
+  if (sessions.length === 0 && stills.length === 0) { nf.classList.remove('hidden'); return; }
   nf.classList.add('hidden');
-  (d.videos||[]).forEach(v => {
+  sessions.forEach(s => {
+    const li = document.createElement('li');
+    li.style.padding = '4px 0';
+    li.style.borderBottom = '1px solid #eee';
+    const base = s.video.replace(/\.(ts|mp4)$/, '');
+    const zipName = base + '.zip';
+    const a = document.createElement('a');
+    a.href = '/download/' + zipName;
+    a.textContent = base;
+    a.style.color = '#1a73e8';
+    a.title = 'Download zip: ' + [s.video].concat(s.sidecars||[]).join(', ');
+    li.appendChild(a);
+    const badge = document.createElement('span');
+    badge.style.cssText = 'margin-left:8px;font-size:.78em;color:#888';
+    badge.textContent = '(.zip)';
+    li.appendChild(badge);
+    ul.appendChild(li);
+  });
+  stills.forEach(s => {
     const li = document.createElement('li');
     li.style.padding = '4px 0';
     li.style.borderBottom = '1px solid #eee';
     const a = document.createElement('a');
-    a.href = '/download/' + v;
-    a.textContent = v;
+    a.href = '/download_stills/' + s;
+    a.textContent = s;
     a.style.color = '#1a73e8';
+    a.title = 'Download stills as zip';
     li.appendChild(a);
-    ul.appendChild(li);
-  });
-  (d.stills_sessions||[]).forEach(s => {
-    const li = document.createElement('li');
-    li.style.padding = '4px 0';
-    li.textContent = s + ' (stills folder)';
-    li.style.color = '#666';
+    const badge = document.createElement('span');
+    badge.style.cssText = 'margin-left:8px;font-size:.78em;color:#888';
+    badge.textContent = '(stills .zip)';
+    li.appendChild(badge);
     ul.appendChild(li);
   });
 }
@@ -586,17 +650,19 @@ function newRecipe() {
   document.getElementById('rServoStartVal').textContent = '1500';
   document.getElementById('rServoEnd').value = 1500;
   document.getElementById('rServoEndVal').textContent = '1500';
-  document.getElementById('rSweepTime').value = '30';
   document.getElementById('rPausePoints').value = '0';
   document.getElementById('rLoiterTime').value = '0';
   document.getElementById('rOscillations').value = '1';
-  document.getElementById('rLightOn').checked = false;
+  document.getElementById('rLightMode').value = 'off';
   document.getElementById('rLightBright').value = 0;
   document.getElementById('rLightBrightVal').textContent = '0';
+  document.getElementById('rLedColor').value = 'red';
+  document.getElementById('rLedBlink').value = 'slow';
   document.getElementById('editorTitle').textContent = 'New Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
   toggleServoFields();
+  updateSweepCalc();
 }
 
 async function editRecipe(id) {
@@ -615,17 +681,19 @@ async function editRecipe(id) {
   document.getElementById('rServoStartVal').textContent = r.servo_start_us;
   document.getElementById('rServoEnd').value = r.servo_end_us;
   document.getElementById('rServoEndVal').textContent = r.servo_end_us;
-  document.getElementById('rSweepTime').value = r.servo_sweep_time_s;
   document.getElementById('rPausePoints').value = r.servo_pause_points;
   document.getElementById('rLoiterTime').value = r.servo_loiter_time_s;
   document.getElementById('rOscillations').value = r.servo_oscillations;
-  document.getElementById('rLightOn').checked = r.light_on;
+  document.getElementById('rLightMode').value = r.light_mode || (r.light_on ? 'always' : 'off');
   document.getElementById('rLightBright').value = r.light_brightness_pct;
   document.getElementById('rLightBrightVal').textContent = r.light_brightness_pct;
+  document.getElementById('rLedColor').value = r.led_color || 'red';
+  document.getElementById('rLedBlink').value = r.led_blink || 'slow';
   document.getElementById('editorTitle').textContent = 'Edit Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
   toggleServoFields();
+  updateSweepCalc();
 }
 
 function cancelEditor() { document.getElementById('recipeEditor').classList.add('hidden'); }
@@ -641,12 +709,13 @@ async function saveCurrentRecipe() {
     servo_fixed: document.getElementById('rServoFixed').checked,
     servo_start_us: +document.getElementById('rServoStart').value,
     servo_end_us: +document.getElementById('rServoEnd').value,
-    servo_sweep_time_s: +document.getElementById('rSweepTime').value,
     servo_pause_points: +document.getElementById('rPausePoints').value,
     servo_loiter_time_s: +document.getElementById('rLoiterTime').value,
     servo_oscillations: +document.getElementById('rOscillations').value,
-    light_on: document.getElementById('rLightOn').checked,
+    light_mode: document.getElementById('rLightMode').value,
     light_brightness_pct: +document.getElementById('rLightBright').value,
+    led_color: document.getElementById('rLedColor').value,
+    led_blink: document.getElementById('rLedBlink').value,
   };
   const id = document.getElementById('rId').value;
   if (id) body.id = id;
@@ -668,10 +737,32 @@ function toggleServoFields() {
   const fixed = document.getElementById('rServoFixed').checked;
   document.getElementById('servoEndGroup').style.display = fixed ? 'none' : '';
   document.getElementById('sweepFields').style.display = fixed ? 'none' : '';
+  updateSweepCalc();
 }
 function previewServo(val, labelId) {
   document.getElementById(labelId).textContent = val;
   api('/servo', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({position_us:+val})});
+}
+function updateSweepCalc() {
+  const el = document.getElementById('sweepCalcInfo');
+  if (!el) return;
+  const duration = +document.getElementById('rDuration').value || 30;
+  const pp = +document.getElementById('rPausePoints').value || 0;
+  const loiter = +document.getElementById('rLoiterTime').value || 0;
+  const osc = Math.max(+document.getElementById('rOscillations').value || 1, 1);
+  const duration_s = duration * 60;
+  const loiters_per_osc = 2 * (pp + 1);
+  const total_loiter = osc * loiters_per_osc * loiter;
+  const remaining = duration_s - total_loiter;
+  if (remaining <= 0) {
+    el.innerHTML = '<span style="color:#e53935">Warning: loiter time exceeds recording duration. Reduce oscillations, pause points, or loiter time.</span>';
+    return;
+  }
+  const sweep_per_leg = remaining / (2 * osc);
+  const time_per_osc = 2 * sweep_per_leg + loiters_per_osc * loiter;
+  el.textContent = 'Sweep speed: ' + sweep_per_leg.toFixed(1) + 's per leg | '
+    + time_per_osc.toFixed(1) + 's per oscillation | '
+    + osc + ' oscillation' + (osc !== 1 ? 's' : '') + ' in ' + duration + ' min';
 }
 
 /* ── Setup tab content ─────────────────────── */
@@ -693,7 +784,7 @@ function loadSetup() {
   <tr><th>Component</th><th>GPIO</th><th>Physical Pin</th><th>Notes</th></tr>
   <tr><td>RGB Status LED (WS2812)</td><td>GPIO 10 (SPI MOSI)</td><td>Pin 19</td><td>Single NeoPixel data line</td></tr>
   <tr><td>Camera Tilt Servo</td><td>GPIO 21</td><td>Pin 40</td><td>1000-2000 &mu;s PWM</td></tr>
-  <tr><td>Lumen Light</td><td>GPIO 13 (PWM1)</td><td>Pin 33</td><td>1000-2000 &mu;s servo PWM</td></tr>
+  <tr><td>Lumen Light</td><td>GPIO 13 (PWM1)</td><td>Pin 33</td><td>1000-2000 &mu;s servo PWM. Modes: always on, pause points only, or snapshot only</td></tr>
   <tr><td>USB Camera</td><td colspan="2">/dev/video2</td><td>H264 USB camera (1080p 30fps)</td></tr>
 </table>
 <p>All servo/light signals share a common ground with the Pi. The servo and light require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header.</p>
@@ -701,11 +792,12 @@ function loadSetup() {
 <h3>3. LED Status Indicators</h3>
 <table>
   <tr><th>Pattern</th><th>Meaning</th></tr>
-  <tr><td style="color:#e53935;font-weight:bold">Slow red flash</td><td>Recording in progress (normal)</td></tr>
+  <tr><td style="color:#43a047;font-weight:bold">Solid green</td><td>Idle, ready</td></tr>
+  <tr><td style="color:#e53935;font-weight:bold">Slow red flash</td><td>Recording in progress (default, customizable per recipe)</td></tr>
   <tr><td style="color:#f9a825;font-weight:bold">Fast yellow flash</td><td>Recording problem (file not growing) or disk full</td></tr>
   <tr><td style="color:#1a73e8;font-weight:bold">Solid blue</td><td>Recording sequence complete</td></tr>
-  <tr><td style="color:#999">Off</td><td>Idle, no active recipe</td></tr>
 </table>
+<p>Recipe recordings can customize LED color (red, green, blue, yellow, cyan, magenta, white) and blink rate (solid, slow, fast).</p>
 
 <h3>4. Time Synchronization</h3>
 <p>The Raspberry Pi does not have a real-time clock (RTC). Without internet access, the system time resets on each boot. To synchronize the clock:</p>

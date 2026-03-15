@@ -15,6 +15,22 @@ logger = logging.getLogger(__name__)
 
 DISK_FREE_MINIMUM_MB = 1024  # 1 GB
 
+LED_COLOR_MAP = {
+    "red": (255, 0, 0),
+    "green": (0, 255, 0),
+    "blue": (0, 0, 255),
+    "yellow": (255, 255, 0),
+    "cyan": (0, 255, 255),
+    "magenta": (255, 0, 255),
+    "white": (255, 255, 255),
+}
+
+LED_BLINK_RATE = {
+    "solid": 0,
+    "slow": 0.5,
+    "fast": 2.0,
+}
+
 
 class Scheduler:
     def __init__(self):
@@ -24,15 +40,17 @@ class Scheduler:
         self._start_recording_fn = None
         self._stop_recording_fn = None
         self._get_disk_free_fn = None
+        self._capture_still_fn = None
         self._hw = None
         self._state = "idle"
         self._lock = threading.Lock()
         self._remaining_s = 0
 
-    def configure(self, *, start_fn, stop_fn, disk_free_fn, hw):
+    def configure(self, *, start_fn, stop_fn, disk_free_fn, hw, capture_still_fn=None):
         self._start_recording_fn = start_fn
         self._stop_recording_fn = stop_fn
         self._get_disk_free_fn = disk_free_fn
+        self._capture_still_fn = capture_still_fn
         self._hw = hw
 
     def start(self, recipe):
@@ -70,6 +88,19 @@ class Scheduler:
             self._state = state
             self._remaining_s = remaining
 
+    def _apply_recipe_led(self, recipe):
+        """Set LED color/blink from recipe settings."""
+        if not self._hw:
+            return
+        color_name = recipe.get("led_color", "red")
+        blink_name = recipe.get("led_blink", "slow")
+        r, g, b = LED_COLOR_MAP.get(color_name, (255, 0, 0))
+        rate = LED_BLINK_RATE.get(blink_name, 0.5)
+        if rate == 0:
+            self._hw.set_led_color(r, g, b)
+        else:
+            self._hw.flash_led(r, g, b, rate_hz=rate)
+
     def _run(self):
         recipe = self._active_recipe
         if not recipe:
@@ -90,22 +121,41 @@ class Scheduler:
                     self._hw.led_warning()
                 return
 
+            self._apply_recipe_led(recipe)
+
             if self._hw:
+                light_mode = recipe.get("light_mode", "off")
+                # Backward compat
+                if "light_on" in recipe and "light_mode" not in recipe:
+                    light_mode = "always" if recipe["light_on"] else "off"
+                light_brightness = recipe.get("light_brightness_pct", 100)
+
                 if not recipe.get("servo_fixed", True):
-                    self._hw.sweep_servo(
-                        recipe.get("servo_start_us", 1500),
-                        recipe.get("servo_end_us", 1500),
-                        recipe.get("servo_sweep_time_s", 30),
+                    from recipes import calculate_sweep_time
+                    sweep_info = calculate_sweep_time(
+                        recipe.get("duration_minutes", 30),
                         recipe.get("servo_pause_points", 0),
                         recipe.get("servo_loiter_time_s", 0),
                         recipe.get("servo_oscillations", 1),
                     )
+                    sweep_time_s = sweep_info["sweep_time_s"] if sweep_info["valid"] else 30
+                    self._hw.sweep_servo(
+                        recipe.get("servo_start_us", 1500),
+                        recipe.get("servo_end_us", 1500),
+                        sweep_time_s,
+                        recipe.get("servo_pause_points", 0),
+                        recipe.get("servo_loiter_time_s", 0),
+                        recipe.get("servo_oscillations", 1),
+                        light_mode=light_mode,
+                        light_brightness_pct=light_brightness,
+                        capture_still_fn=self._capture_still_fn,
+                    )
                 else:
                     self._hw.set_servo(recipe.get("servo_start_us", 1500))
 
-                if recipe.get("light_on", False):
-                    self._hw.light_on(recipe.get("light_brightness_pct", 100))
-                else:
+                if light_mode == "always":
+                    self._hw.light_on(light_brightness)
+                elif recipe.get("servo_fixed", True) and light_mode == "off":
                     self._hw.light_off()
 
             duration_s = recipe.get("duration_minutes", 30) * 60

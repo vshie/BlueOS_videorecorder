@@ -60,6 +60,8 @@ class HardwareController:
         self._light_on = False
         self._lock = threading.Lock()
         self._initialized = False
+        self._led_color = (0, 0, 0)
+        self._led_mode = "off"
 
     def init(self):
         if self._initialized:
@@ -100,6 +102,9 @@ class HardwareController:
         self._led_stop.set()
         if self._led_thread and self._led_thread.is_alive():
             self._led_thread.join(timeout=2)
+        with self._lock:
+            self._led_color = (r, g, b)
+            self._led_mode = "solid"
         self._set_pixel(r, g, b)
 
     def _set_pixel(self, r, g, b):
@@ -113,6 +118,9 @@ class HardwareController:
         self._led_stop.set()
         if self._led_thread and self._led_thread.is_alive():
             self._led_thread.join(timeout=2)
+        with self._lock:
+            self._led_color = (r, g, b)
+            self._led_mode = "flash_slow" if rate_hz <= 1.0 else "flash_fast"
         self._led_stop.clear()
         self._led_thread = threading.Thread(
             target=self._flash_loop, args=(r, g, b, rate_hz), daemon=True
@@ -134,7 +142,14 @@ class HardwareController:
         self._led_stop.set()
         if self._led_thread and self._led_thread.is_alive():
             self._led_thread.join(timeout=2)
+        with self._lock:
+            self._led_color = (0, 0, 0)
+            self._led_mode = "off"
         self._set_pixel(0, 0, 0)
+
+    def led_idle(self):
+        """Solid green when idle."""
+        self.set_led_color(0, 255, 0)
 
     def led_recording(self):
         self.flash_led(255, 0, 0, rate_hz=0.5)
@@ -144,6 +159,14 @@ class HardwareController:
 
     def led_complete(self):
         self.set_led_color(0, 0, 255)
+
+    def get_led_state(self):
+        """Return current LED state for telemetry."""
+        with self._lock:
+            return {
+                "color": list(self._led_color),
+                "mode": self._led_mode,
+            }
 
     # ── Camera Servo ─────────────────────────────────────────────────────
 
@@ -166,19 +189,55 @@ class HardwareController:
             self._sweep_thread.join(timeout=5)
 
     def sweep_servo(self, start_us, end_us, sweep_time_s, pause_points=0,
-                    loiter_time_s=0, oscillations=1):
+                    loiter_time_s=0, oscillations=1, light_mode="off",
+                    light_brightness_pct=100, capture_still_fn=None):
         self.stop_sweep()
         self._sweep_stop.clear()
         self._sweep_thread = threading.Thread(
             target=self._sweep_loop,
             args=(start_us, end_us, sweep_time_s, pause_points,
-                  loiter_time_s, oscillations),
+                  loiter_time_s, oscillations, light_mode,
+                  light_brightness_pct, capture_still_fn),
             daemon=True,
         )
         self._sweep_thread.start()
 
+    def _do_pause_light(self, light_mode, light_brightness_pct, loiter_time_s,
+                        capture_still_fn):
+        """Handle light/snapshot behavior at a pause point."""
+        if light_mode == "pause_only":
+            self.light_on(light_brightness_pct)
+            if self._sweep_stop.wait(loiter_time_s):
+                self.light_off()
+                return True
+            self.light_off()
+        elif light_mode == "snapshot_only":
+            self.light_on(light_brightness_pct)
+            if self._sweep_stop.wait(2.0):
+                self.light_off()
+                return True
+            if capture_still_fn:
+                try:
+                    capture_still_fn()
+                except Exception as e:
+                    logger.error(f"Snapshot capture during sweep failed: {e}")
+            remaining = max(0, loiter_time_s - 2.0)
+            if remaining > 0:
+                if self._sweep_stop.wait(remaining):
+                    self.light_off()
+                    return True
+            if self._sweep_stop.wait(2.0):
+                self.light_off()
+                return True
+            self.light_off()
+        else:
+            if self._sweep_stop.wait(loiter_time_s):
+                return True
+        return False
+
     def _sweep_loop(self, start_us, end_us, sweep_time_s, pause_points,
-                    loiter_time_s, oscillations):
+                    loiter_time_s, oscillations, light_mode="off",
+                    light_brightness_pct=100, capture_still_fn=None):
         try:
             total_steps = max(int(sweep_time_s * 50), 10)
             step_delay = sweep_time_s / total_steps
@@ -209,14 +268,17 @@ class HardwareController:
                         if (pause_interval > 0 and step > 0
                                 and step < total_steps
                                 and step % pause_interval == 0):
-                            if self._sweep_stop.wait(loiter_time_s):
+                            if self._do_pause_light(light_mode, light_brightness_pct,
+                                                    loiter_time_s, capture_still_fn):
                                 return
                         else:
                             if self._sweep_stop.wait(step_delay):
                                 return
 
+                    # Loiter at extent
                     if loiter_time_s > 0:
-                        if self._sweep_stop.wait(loiter_time_s):
+                        if self._do_pause_light(light_mode, light_brightness_pct,
+                                                loiter_time_s, capture_still_fn):
                             return
 
                     if oscillations <= 1 and direction == 0 and start_us == end_us:
