@@ -456,7 +456,7 @@ async function pollTelemetry() {
     const c = d.led_state.color || [0,0,0];
     const mode = d.led_state.mode || 'off';
     const colorStr = 'rgb('+c[0]+','+c[1]+','+c[2]+')';
-    const modeLabel = mode === 'off' ? 'Off' : mode === 'solid' ? 'Solid' : mode === 'flash_slow' ? 'Slow Blink' : 'Fast Blink';
+    const modeLabel = mode === 'off' ? 'Off' : mode === 'solid' ? 'Solid' : mode === 'breathe' ? 'Breathe' : mode === 'flash_slow' ? 'Slow Blink' : 'Fast Blink';
     ledEl.innerHTML = '<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:'+colorStr+';vertical-align:middle;margin-right:4px;border:1px solid #ccc"></span>' + modeLabel;
   } else {
     ledEl.textContent = '--';
@@ -556,6 +556,61 @@ function toggleLight() {
   document.getElementById('lightToggle').textContent = lightIsOn ? 'On' : 'Off';
 }
 
+/* ── Zip download with progress ───────────── */
+async function downloadZip(url, filename, progressEl) {
+  progressEl.style.display = '';
+  const bar = progressEl.querySelector('.prog-bar');
+  const lbl = progressEl.querySelector('.prog-lbl');
+  bar.style.width = '0%';
+  lbl.textContent = 'Preparing zip\u2026';
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) { lbl.textContent = 'Error ' + resp.status; return; }
+    const total = parseInt(resp.headers.get('Content-Length') || '0', 10);
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let received = 0;
+    if (total) { bar.style.width = '0%'; lbl.textContent = '0 %'; }
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (total) {
+        const pct = Math.min(100, Math.round(received / total * 100));
+        bar.style.width = pct + '%';
+        lbl.textContent = pct + ' %';
+      } else {
+        lbl.textContent = (received / 1048576).toFixed(1) + ' MB';
+      }
+    }
+    bar.style.width = '100%';
+    lbl.textContent = 'Saving\u2026';
+    const blob = new Blob(chunks);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    lbl.textContent = 'Done';
+    setTimeout(() => { progressEl.style.display = 'none'; }, 2000);
+  } catch(e) {
+    lbl.textContent = 'Error: ' + e;
+  }
+}
+function makeProgressBar() {
+  const wrap = document.createElement('div');
+  wrap.className = 'prog-wrap';
+  wrap.style.cssText = 'display:none;margin-top:4px';
+  wrap.innerHTML = '<div style="background:#e0e0e0;border-radius:4px;height:16px;overflow:hidden;position:relative">'
+    + '<div class="prog-bar" style="background:#1a73e8;height:100%;width:0%;transition:width .2s;border-radius:4px"></div>'
+    + '<span class="prog-lbl" style="position:absolute;top:0;left:0;right:0;text-align:center;font-size:11px;line-height:16px;color:#333"></span>'
+    + '</div>';
+  return wrap;
+}
+
 /* ── Video list ────────────────────────────── */
 async function loadVideoList() {
   const d = await api('/list');
@@ -573,16 +628,19 @@ async function loadVideoList() {
     const base = s.video.replace(/\.(ts|mp4)$/, '');
     const zipName = base + '.zip';
     const a = document.createElement('a');
-    a.href = '/download/' + zipName;
-    a.download = zipName;
+    a.href = '#';
     a.textContent = base;
     a.style.color = '#1a73e8';
+    a.style.cursor = 'pointer';
     a.title = 'Download zip: ' + [s.video].concat(s.sidecars||[]).join(', ');
+    const prog = makeProgressBar();
+    a.onclick = (e) => { e.preventDefault(); downloadZip('/download/' + zipName, zipName, prog); };
     li.appendChild(a);
     const badge = document.createElement('span');
     badge.style.cssText = 'margin-left:8px;font-size:.78em;color:#888';
     badge.textContent = '(.zip)';
     li.appendChild(badge);
+    li.appendChild(prog);
     ul.appendChild(li);
   });
   stills.forEach(s => {
@@ -590,16 +648,19 @@ async function loadVideoList() {
     li.style.padding = '4px 0';
     li.style.borderBottom = '1px solid #eee';
     const a = document.createElement('a');
-    a.href = '/download_stills/' + s;
-    a.download = s + '.zip';
+    a.href = '#';
     a.textContent = s;
     a.style.color = '#1a73e8';
+    a.style.cursor = 'pointer';
     a.title = 'Download stills as zip';
+    const prog = makeProgressBar();
+    a.onclick = (e) => { e.preventDefault(); downloadZip('/download_stills/' + s, s + '.zip', prog); };
     li.appendChild(a);
     const badge = document.createElement('span');
     badge.style.cssText = 'margin-left:8px;font-size:.78em;color:#888';
     badge.textContent = '(stills .zip)';
     li.appendChild(badge);
+    li.appendChild(prog);
     ul.appendChild(li);
   });
 }
@@ -801,7 +862,7 @@ function loadSetup() {
 <h3>3. LED Status Indicators</h3>
 <table>
   <tr><th>Pattern</th><th>Meaning</th></tr>
-  <tr><td style="color:#43a047;font-weight:bold">Solid green</td><td>Idle, ready</td></tr>
+  <tr><td style="color:#2196f3;font-weight:bold">Breathing blue</td><td>Idle, ready</td></tr>
   <tr><td style="color:#e53935;font-weight:bold">Slow red flash</td><td>Recording in progress (default, customizable per recipe)</td></tr>
   <tr><td style="color:#f9a825;font-weight:bold">Fast yellow flash</td><td>Recording problem (file not growing) or disk full</td></tr>
   <tr><td style="color:#1a73e8;font-weight:bold">Solid blue</td><td>Recording sequence complete</td></tr>

@@ -195,8 +195,8 @@ def update_ass_file():
 
 
 def adjust_ass_timing(ass_path, video_duration):
-    """Scale ASS dialogue timestamps so they span exactly video_duration.
-    Timestamps stay 0-based (players normalise the video timeline to start at 0)."""
+    """Finalize ASS subtitle timing: scale to match video duration and chain
+    each line's end time to the next line's start so subtitles never disappear."""
     try:
         with open(ass_path, "r") as f:
             lines = f.readlines()
@@ -212,19 +212,31 @@ def adjust_ass_timing(ass_path, video_duration):
                 header.append(line)
         if not dialogues or max_t == 0:
             return
-        scale = video_duration / max_t
-        if abs(scale - 1.0) < 0.005:
-            return
+
+        scale = video_duration / max_t if abs(video_duration / max_t - 1.0) >= 0.005 else 1.0
+
+        parsed = []
+        for line in dialogues:
+            parts = line.split(",", 9)
+            if len(parts) >= 3:
+                t0 = parse_ass_ts(parts[1]) * scale
+                t1 = parse_ass_ts(parts[2]) * scale
+                parsed.append((t0, t1, parts))
+
         with open(ass_path, "w") as f:
             for line in header:
                 f.write(line)
-            for line in dialogues:
-                parts = line.split(",", 9)
-                if len(parts) >= 3:
-                    parts[1] = format_ass_ts(parse_ass_ts(parts[1]) * scale)
-                    parts[2] = format_ass_ts(parse_ass_ts(parts[2]) * scale)
+            for i, (t0, t1, parts) in enumerate(parsed):
+                parts[1] = format_ass_ts(t0)
+                if i + 1 < len(parsed):
+                    parts[2] = format_ass_ts(parsed[i + 1][0])
+                else:
+                    parts[2] = format_ass_ts(video_duration)
                 f.write(",".join(parts))
-        logger.info(f"ASS timing scaled by {scale:.4f}")
+        if scale != 1.0:
+            logger.info(f"ASS timing: scaled by {scale:.4f}, chained end times")
+        else:
+            logger.info("ASS timing: chained end times (no scaling needed)")
     except Exception as e:
         logger.error(f"ASS timing adjust error: {e}")
 
@@ -765,10 +777,13 @@ def _download_zip(zip_name):
         if os.path.exists(os.path.join(VIDEO_DIR, sidecar)):
             files_to_zip.append(sidecar)
 
+    STORED_EXTS = {".ts", ".mp4", ".jpg", ".jpeg", ".png"}
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(buf, "w") as zf:
         for fname in files_to_zip:
-            zf.write(os.path.join(VIDEO_DIR, fname), fname)
+            ext = os.path.splitext(fname)[1].lower()
+            method = zipfile.ZIP_STORED if ext in STORED_EXTS else zipfile.ZIP_DEFLATED
+            zf.write(os.path.join(VIDEO_DIR, fname), fname, compress_type=method)
     data = buf.getvalue()
     return Response(
         data,
@@ -788,13 +803,16 @@ def download_stills(dirname):
         if not os.path.isdir(dir_path):
             return jsonify({"success": False, "message": "Directory not found"}), 404
 
+        IMG_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
         buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(buf, "w") as zf:
             for root, _dirs, files in os.walk(dir_path):
                 for f in files:
                     full = os.path.join(root, f)
                     arcname = os.path.join(dirname, os.path.relpath(full, dir_path))
-                    zf.write(full, arcname)
+                    ext = os.path.splitext(f)[1].lower()
+                    method = zipfile.ZIP_STORED if ext in IMG_EXTS else zipfile.ZIP_DEFLATED
+                    zf.write(full, arcname, compress_type=method)
         data = buf.getvalue()
         zip_name = dirname + ".zip"
         return Response(

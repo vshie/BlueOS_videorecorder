@@ -7,6 +7,7 @@ GPIO assignments:
   - GPIO 13 (Pin 33): Lumen light (1000-2000 us servo-style PWM)
 """
 
+import math
 import threading
 import time
 import logging
@@ -139,6 +140,33 @@ class HardwareController:
             if self._led_stop.wait(half):
                 break
 
+    def breathe_led(self, r, g, b, cycle_s=4.0):
+        """Smooth breathing effect: fades from off to the given color and back."""
+        self._led_stop.set()
+        if self._led_thread and self._led_thread.is_alive():
+            self._led_thread.join(timeout=2)
+        with self._lock:
+            self._led_color = (r, g, b)
+            self._led_mode = "breathe"
+        self._led_stop.clear()
+        self._led_thread = threading.Thread(
+            target=self._breathe_loop, args=(r, g, b, cycle_s), daemon=True
+        )
+        self._led_thread.start()
+
+    def _breathe_loop(self, r, g, b, cycle_s):
+        step_s = 0.03
+        while not self._led_stop.is_set():
+            t = time.monotonic()
+            phase = (t % cycle_s) / cycle_s
+            brightness = (math.sin(phase * 2.0 * math.pi - math.pi / 2.0) + 1.0) / 2.0
+            cr = int(r * brightness)
+            cg = int(g * brightness)
+            cb = int(b * brightness)
+            self._set_pixel(cr, cg, cb)
+            if self._led_stop.wait(step_s):
+                break
+
     def led_off(self):
         self._led_stop.set()
         if self._led_thread and self._led_thread.is_alive():
@@ -149,8 +177,8 @@ class HardwareController:
         self._set_pixel(0, 0, 0)
 
     def led_idle(self):
-        """Solid green when idle. Reduced intensity avoids yellow tint on WS2812B."""
-        self.set_led_color(0, 180, 15)
+        """Breathing blue when idle — fades 0 to 50% over ~4 s cycle."""
+        self.breathe_led(0, 0, 128, cycle_s=4.0)
 
     def led_recording(self):
         self.flash_led(255, 0, 0, rate_hz=0.5)
