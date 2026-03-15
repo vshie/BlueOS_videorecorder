@@ -1377,7 +1377,7 @@ def route_recipe_delete(recipe_id):
     return jsonify({"success": ok})
 
 
-# ── Delete all recordings ─────────────────────────────────────────────────
+# ── Delete recordings ─────────────────────────────────────────────────────
 
 @app.route("/recordings", methods=["DELETE"])
 def route_delete_all_recordings():
@@ -1401,6 +1401,54 @@ def route_delete_all_recordings():
                 errors.append(f"{entry}: {e}")
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    return jsonify({"success": True, "deleted": deleted, "errors": errors})
+
+
+@app.route("/recordings/selected", methods=["DELETE"])
+def route_delete_selected_recordings():
+    """Delete a specific set of recordings identified by location and id."""
+    if recording:
+        return jsonify({"success": False, "message": "Cannot delete while recording"}), 400
+    data = request.get_json(silent=True) or {}
+    items = data.get("items", [])
+    deleted = 0
+    errors = []
+    dropcam_dir = os.path.join(usb_storage.USB_MOUNT_POINT, usb_storage.DROPCAM_DIR)
+    for item in items:
+        location = item.get("location")
+        item_id = item.get("id", "")
+        try:
+            if location == "usb":
+                path = os.path.join(dropcam_dir, item_id)
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                    deleted += 1
+                else:
+                    errors.append(f"USB folder not found: {item_id}")
+            elif location == "local":
+                stills_path = os.path.join(VIDEO_DIR, item_id)
+                if os.path.isdir(stills_path):
+                    shutil.rmtree(stills_path)
+                    deleted += 1
+                else:
+                    found = False
+                    for ext in (".ts", ".mp4"):
+                        vpath = os.path.join(VIDEO_DIR, item_id + ext)
+                        if os.path.exists(vpath):
+                            os.remove(vpath)
+                            found = True
+                    for ext in (".ass", "_events.ndjson"):
+                        spath = os.path.join(VIDEO_DIR, item_id + ext)
+                        if os.path.exists(spath):
+                            os.remove(spath)
+                    if found:
+                        deleted += 1
+                    else:
+                        errors.append(f"Not found: {item_id}")
+            else:
+                errors.append(f"Unknown location for item: {item_id}")
+        except Exception as e:
+            errors.append(f"{item_id}: {e}")
     return jsonify({"success": True, "deleted": deleted, "errors": errors})
 
 
