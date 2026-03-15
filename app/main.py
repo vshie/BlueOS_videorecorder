@@ -76,6 +76,7 @@ stills_count = 0
 remux_active = False
 remux_filename = ""
 remux_progress = 0
+remux_stage = ""
 
 active_recipe_for_recording = None
 image_rotation = 0
@@ -643,14 +644,78 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
     return True
 
 
-def _remux_to_mp4(ts_path):
-    """Remux a .ts file to .mp4 with ffmpeg (copy, no re-encode).
-    Returns the .mp4 path on success, or the original .ts path on failure.
-    Flashes LED slow green while processing (unless a recording is active).
-    Tracks progress via output file size for the GUI."""
-    global remux_active, remux_filename, remux_progress
+def _run_ffmpeg_remux(ts_path, mp4_path, ts_size):
+    """Run the ffmpeg copy-remux, tracking progress.  Returns True on success."""
+    global remux_progress
+    size_gib = ts_size / (1024 ** 3)
+    timeout_s = int(180 + size_gib * 180)
 
-    mp4_path = os.path.splitext(ts_path)[0] + ".mp4"
+    cmd = ["ffmpeg", "-y", "-i", ts_path, "-c", "copy"]
+    if size_gib <= 4:
+        cmd += ["-movflags", "+faststart"]
+    else:
+        logger.info(f"Skipping +faststart for {size_gib:.1f} GiB file to reduce remux time")
+    cmd.append(mp4_path)
+
+    logger.info(f"Remuxing {size_gib:.1f} GiB TS→MP4 (timeout {timeout_s}s)…")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + timeout_s
+    while proc.poll() is None:
+        if time.monotonic() > deadline:
+            proc.kill()
+            proc.wait()
+            raise subprocess.TimeoutExpired(cmd, timeout_s)
+        if ts_size > 0:
+            try:
+                written = os.path.getsize(mp4_path)
+                remux_progress = min(99, int(written * 100 / ts_size))
+            except OSError:
+                pass
+        time.sleep(2)
+
+    if proc.returncode == 0 and os.path.exists(mp4_path):
+        remux_progress = 100
+        return True
+    logger.error(f"Remux to MP4 failed (rc={proc.returncode})")
+    if os.path.exists(mp4_path):
+        try:
+            os.remove(mp4_path)
+        except OSError:
+            pass
+    return False
+
+
+def _copy_file_with_progress(src, dst, label, total_bytes):
+    """Copy src to dst, updating remux_progress 0-100 and remux_stage."""
+    global remux_progress, remux_stage
+    remux_stage = label
+    remux_progress = 0
+    buf_size = 4 * 1024 * 1024  # 4 MB
+    copied = 0
+    with open(src, "rb") as fin, open(dst, "wb") as fout:
+        while True:
+            chunk = fin.read(buf_size)
+            if not chunk:
+                break
+            fout.write(chunk)
+            copied += len(chunk)
+            if total_bytes > 0:
+                remux_progress = min(99, int(copied * 100 / total_bytes))
+    remux_progress = 100
+
+
+def _remux_to_mp4(ts_path, was_usb=False, usb_rec_dir=None):
+    """Remux a .ts file to .mp4 with ffmpeg (copy, no re-encode).
+
+    For USB recordings, picks the fastest strategy that fits:
+      1. In-place on USB (if USB free >= ts_size)
+      2. Remux via local SD, then transfer back (if local SD has room)
+      3. Skip remux and keep .ts (if neither has room)
+
+    Returns the final .mp4 path on success, or the original .ts path on failure.
+    """
+    global remux_active, remux_filename, remux_progress, remux_stage
+
     show_led = not recording
     if show_led:
         hw.flash_led(0, 255, 0, rate_hz=0.5)
@@ -658,61 +723,113 @@ def _remux_to_mp4(ts_path):
     ts_size = 0
     try:
         ts_size = os.path.getsize(ts_path)
-        size_gib = ts_size / (1024 ** 3)
-        timeout_s = int(180 + size_gib * 180)
+    except OSError:
+        pass
 
-        cmd = ["ffmpeg", "-y", "-i", ts_path, "-c", "copy"]
-        if size_gib <= 4:
-            cmd += ["-movflags", "+faststart"]
+    remux_filename = os.path.basename(ts_path)
+    remux_progress = 0
+    remux_stage = ""
+    remux_active = True
+
+    try:
+        if was_usb and usb_rec_dir:
+            return _remux_usb(ts_path, ts_size, usb_rec_dir, show_led)
         else:
-            logger.info(f"Skipping +faststart for {size_gib:.1f} GiB file to reduce remux time")
-        cmd.append(mp4_path)
-
-        remux_filename = os.path.basename(ts_path)
-        remux_progress = 0
-        remux_active = True
-
-        logger.info(f"Remuxing {size_gib:.1f} GiB TS→MP4 (timeout {timeout_s}s)…")
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.monotonic() + timeout_s
-        while proc.poll() is None:
-            if time.monotonic() > deadline:
-                proc.kill()
-                proc.wait()
-                raise subprocess.TimeoutExpired(cmd, timeout_s)
-            if ts_size > 0:
-                try:
-                    written = os.path.getsize(mp4_path)
-                    remux_progress = min(99, int(written * 100 / ts_size))
-                except OSError:
-                    pass
-            time.sleep(2)
-
-        if proc.returncode == 0 and os.path.exists(mp4_path):
-            remux_progress = 100
-            os.remove(ts_path)
-            logger.info(f"Remuxed to MP4: {os.path.basename(mp4_path)}")
-            remux_active = False
-            remux_filename = ""
-            if show_led:
-                hw.led_idle()
-            return mp4_path
-        else:
-            logger.error(f"Remux to MP4 failed (rc={proc.returncode})")
-            if os.path.exists(mp4_path):
-                os.remove(mp4_path)
+            return _remux_local(ts_path, ts_size, show_led)
     except Exception as e:
         logger.error(f"Remux exception: {e}")
-        if os.path.exists(mp4_path):
-            try:
-                os.remove(mp4_path)
-            except OSError:
-                pass
-    remux_active = False
-    remux_filename = ""
+    finally:
+        remux_active = False
+        remux_filename = ""
+        remux_progress = 0
+        remux_stage = ""
+        if show_led:
+            hw.led_idle()
+    return ts_path
+
+
+def _remux_local(ts_path, ts_size, show_led):
+    """Standard in-place remux for local SD recordings."""
+    global remux_progress, remux_stage
+    mp4_path = os.path.splitext(ts_path)[0] + ".mp4"
+    remux_stage = "Remuxing TS→MP4"
+    if _run_ffmpeg_remux(ts_path, mp4_path, ts_size):
+        os.remove(ts_path)
+        logger.info(f"Remuxed to MP4: {os.path.basename(mp4_path)}")
+        return mp4_path
+    return ts_path
+
+
+def _remux_usb(ts_path, ts_size, usb_rec_dir, show_led):
+    """Smart remux for USB recordings.  Picks the best strategy based on space."""
+    global remux_progress, remux_stage
+
+    usb_free = usb_storage.get_free_mb()
+    usb_free_bytes = (usb_free or 0) * 1024 * 1024
+    local_free = get_disk_free_mb(VIDEO_DIR)
+    local_free_bytes = (local_free or 0) * 1024 * 1024
+
+    mp4_on_usb = os.path.splitext(ts_path)[0] + ".mp4"
+    ts_basename = os.path.splitext(os.path.basename(ts_path))[0]
+    size_gib = ts_size / (1024 ** 3)
+
+    # Strategy 1: enough USB space to hold both .ts and .mp4 simultaneously
+    if usb_free_bytes >= ts_size:
+        logger.info(f"USB remux strategy: in-place ({size_gib:.1f} GiB, "
+                    f"{usb_free:.0f} MB free)")
+        remux_stage = "Remuxing TS→MP4 on USB"
+        if _run_ffmpeg_remux(ts_path, mp4_on_usb, ts_size):
+            os.remove(ts_path)
+            logger.info(f"Remuxed in-place on USB: {os.path.basename(mp4_on_usb)}")
+            return mp4_on_usb
+        return ts_path
+
+    # Strategy 2: remux via local SD, then transfer back
+    if local_free_bytes >= ts_size:
+        logger.info(f"USB remux strategy: via local SD ({size_gib:.1f} GiB, "
+                    f"USB {usb_free:.0f} MB / local {local_free:.0f} MB free)")
+
+        local_tmp_mp4 = os.path.join(VIDEO_DIR, ts_basename + ".mp4")
+
+        # Step 1: remux .ts (USB) → .mp4 (local SD)
+        remux_stage = "Remuxing TS→MP4 via local SD"
+        if not _run_ffmpeg_remux(ts_path, local_tmp_mp4, ts_size):
+            return ts_path
+
+        # Step 2: delete .ts from USB to free space
+        remux_stage = "Removing TS from USB"
+        remux_progress = 0
+        try:
+            os.remove(ts_path)
+            logger.info(f"Deleted TS from USB: {os.path.basename(ts_path)}")
+        except OSError as e:
+            logger.error(f"Failed to delete TS from USB: {e}")
+
+        # Step 3: copy .mp4 from local SD back to USB
+        mp4_size = os.path.getsize(local_tmp_mp4)
+        _copy_file_with_progress(
+            local_tmp_mp4, mp4_on_usb,
+            "Transferring MP4 to USB",
+            mp4_size,
+        )
+        logger.info(f"Transferred MP4 to USB: {os.path.basename(mp4_on_usb)}")
+
+        # Step 4: clean up local temp
+        remux_stage = "Cleaning up"
+        try:
+            os.remove(local_tmp_mp4)
+        except OSError:
+            pass
+
+        return mp4_on_usb
+
+    # Strategy 3: neither has room — skip remux
+    logger.warning(f"USB remux: insufficient space on both USB ({usb_free:.0f} MB) "
+                   f"and local ({local_free:.0f} MB) for {size_gib:.1f} GiB file. "
+                   f"Keeping .ts on USB.")
+    remux_stage = "Skipped — insufficient space"
     remux_progress = 0
-    if show_led:
-        hw.led_idle()
+    time.sleep(3)
     return ts_path
 
 
@@ -763,6 +880,9 @@ def _stop_recording_internal():
             gst_process.kill()
             gst_process.wait()
 
+    was_usb = usb_recording
+    usb_rec_dir = recording_base_dir
+
     recording = False
     start_time = None
     gst_process = None
@@ -776,7 +896,7 @@ def _stop_recording_internal():
 
     if video_path and os.path.exists(video_path):
         time.sleep(2)
-        video_path = _remux_to_mp4(video_path)
+        video_path = _remux_to_mp4(video_path, was_usb=was_usb, usb_rec_dir=usb_rec_dir)
         dur, st = get_video_duration(video_path)
         if dur and ass_path and os.path.exists(ass_path):
             adjust_ass_timing(ass_path, dur)
@@ -888,6 +1008,7 @@ def route_status():
                 "active": remux_active,
                 "filename": remux_filename,
                 "progress": remux_progress,
+                "stage": remux_stage,
             } if remux_active else None,
             "usb_storage": usb_storage.get_status(),
             "recording_to": "usb" if usb_recording else "local",

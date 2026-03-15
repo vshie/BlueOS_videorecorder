@@ -141,7 +141,7 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
     <div class="mt-8 text-muted" id="fileSizeText"></div>
     <div id="remuxBar" class="hidden" style="margin-top:8px">
       <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:.85em;color:#43a047;font-weight:500">Remuxing TS→MP4</span>
+        <span id="remuxStage" style="font-size:.85em;color:#43a047;font-weight:500">Remuxing TS→MP4</span>
         <span id="remuxPct" style="font-size:.85em;font-weight:600;min-width:32px;text-align:right">0%</span>
       </div>
       <div style="background:#e0e0e0;border-radius:4px;height:10px;overflow:hidden;margin-top:4px">
@@ -491,6 +491,7 @@ async function pollStatus() {
   const remuxEl = document.getElementById('remuxBar');
   if (d.remux && d.remux.active) {
     remuxEl.classList.remove('hidden');
+    document.getElementById('remuxStage').textContent = d.remux.stage || 'Remuxing TS→MP4';
     document.getElementById('remuxPct').textContent = d.remux.progress + '%';
     document.getElementById('remuxProgBar').style.width = d.remux.progress + '%';
     document.getElementById('remuxFile').textContent = d.remux.filename;
@@ -547,7 +548,7 @@ async function pollStatus() {
     sDot.style.background = '#f9a825';
     sLabel.textContent = 'Storage: Local SD';
     sFree.textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1) + ' GB free' : '';
-    sDetail.textContent = 'USB detected but < 50 GB free — using local storage.';
+    sDetail.textContent = 'USB detected but < 20 GB free — using local storage.';
   } else {
     sDot.className = 'status-dot idle';
     sDot.style.background = '';

@@ -16,7 +16,7 @@ import time
 logger = logging.getLogger(__name__)
 
 USB_MOUNT_POINT = "/mnt/usb"
-USB_MIN_FREE_GB = 50
+USB_MIN_FREE_GB = 20
 DROPCAM_DIR = "DropCam"
 PROBE_INTERVAL_S = 30
 
