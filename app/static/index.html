@@ -139,6 +139,16 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
       </div>
     </div>
     <div class="mt-8 text-muted" id="fileSizeText"></div>
+    <div id="remuxBar" class="hidden" style="margin-top:8px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:.85em;color:#43a047;font-weight:500">Remuxing TS→MP4</span>
+        <span id="remuxPct" style="font-size:.85em;font-weight:600;min-width:32px;text-align:right">0%</span>
+      </div>
+      <div style="background:#e0e0e0;border-radius:4px;height:10px;overflow:hidden;margin-top:4px">
+        <div id="remuxProgBar" style="background:#43a047;height:100%;width:0%;transition:width .5s;border-radius:4px"></div>
+      </div>
+      <div id="remuxFile" style="font-size:.78em;color:#888;margin-top:2px"></div>
+    </div>
   </div>
 
   <!-- Auto-start recipe selector -->
@@ -463,6 +473,17 @@ async function pollStatus() {
   if (d.disk_free_mb != null) fsTxt.push('Disk free: ' + (d.disk_free_mb/1024).toFixed(1) + ' GB');
   if (d.stills_count > 0) fsTxt.push(d.stills_count + ' stills');
   document.getElementById('fileSizeText').textContent = fsTxt.join(' | ');
+
+  // Remux progress
+  const remuxEl = document.getElementById('remuxBar');
+  if (d.remux && d.remux.active) {
+    remuxEl.classList.remove('hidden');
+    document.getElementById('remuxPct').textContent = d.remux.progress + '%';
+    document.getElementById('remuxProgBar').style.width = d.remux.progress + '%';
+    document.getElementById('remuxFile').textContent = d.remux.filename;
+  } else {
+    remuxEl.classList.add('hidden');
+  }
 
   // Schedule status
   const sched = d.scheduler || {};

@@ -72,6 +72,10 @@ stop_stills_thread = False
 stills_dir = None
 stills_count = 0
 
+remux_active = False
+remux_filename = ""
+remux_progress = 0
+
 active_recipe_for_recording = None
 image_rotation = 0
 
@@ -548,13 +552,19 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
 def _remux_to_mp4(ts_path):
     """Remux a .ts file to .mp4 with ffmpeg (copy, no re-encode).
     Returns the .mp4 path on success, or the original .ts path on failure.
-    Flashes LED slow green while processing (unless a recording is active)."""
+    Flashes LED slow green while processing (unless a recording is active).
+    Tracks progress via output file size for the GUI."""
+    global remux_active, remux_filename, remux_progress
+
     mp4_path = os.path.splitext(ts_path)[0] + ".mp4"
     show_led = not recording
     if show_led:
         hw.flash_led(0, 255, 0, rate_hz=0.5)
+
+    ts_size = 0
     try:
-        size_gib = os.path.getsize(ts_path) / (1024 ** 3)
+        ts_size = os.path.getsize(ts_path)
+        size_gib = ts_size / (1024 ** 3)
         timeout_s = int(180 + size_gib * 180)
 
         cmd = ["ffmpeg", "-y", "-i", ts_path, "-c", "copy"]
@@ -564,16 +574,37 @@ def _remux_to_mp4(ts_path):
             logger.info(f"Skipping +faststart for {size_gib:.1f} GiB file to reduce remux time")
         cmd.append(mp4_path)
 
+        remux_filename = os.path.basename(ts_path)
+        remux_progress = 0
+        remux_active = True
+
         logger.info(f"Remuxing {size_gib:.1f} GiB TS→MP4 (timeout {timeout_s}s)…")
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-        if r.returncode == 0 and os.path.exists(mp4_path):
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + timeout_s
+        while proc.poll() is None:
+            if time.monotonic() > deadline:
+                proc.kill()
+                proc.wait()
+                raise subprocess.TimeoutExpired(cmd, timeout_s)
+            if ts_size > 0:
+                try:
+                    written = os.path.getsize(mp4_path)
+                    remux_progress = min(99, int(written * 100 / ts_size))
+                except OSError:
+                    pass
+            time.sleep(2)
+
+        if proc.returncode == 0 and os.path.exists(mp4_path):
+            remux_progress = 100
             os.remove(ts_path)
             logger.info(f"Remuxed to MP4: {os.path.basename(mp4_path)}")
+            remux_active = False
+            remux_filename = ""
             if show_led:
                 hw.led_idle()
             return mp4_path
         else:
-            logger.error(f"Remux to MP4 failed (rc={r.returncode}): {r.stderr[-500:]}")
+            logger.error(f"Remux to MP4 failed (rc={proc.returncode})")
             if os.path.exists(mp4_path):
                 os.remove(mp4_path)
     except Exception as e:
@@ -583,6 +614,9 @@ def _remux_to_mp4(ts_path):
                 os.remove(mp4_path)
             except OSError:
                 pass
+    remux_active = False
+    remux_filename = ""
+    remux_progress = 0
     if show_led:
         hw.led_idle()
     return ts_path
@@ -753,6 +787,11 @@ def route_status():
             "scheduler": sched,
             "rotation_degrees": image_rotation,
             "recipe_name": active_recipe_for_recording["name"] if active_recipe_for_recording else None,
+            "remux": {
+                "active": remux_active,
+                "filename": remux_filename,
+                "progress": remux_progress,
+            } if remux_active else None,
         })
         resp.headers["Cache-Control"] = "no-store"
         return resp
