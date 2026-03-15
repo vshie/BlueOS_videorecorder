@@ -107,6 +107,7 @@ def create_ass_file(video_path):
         f.write("ScriptType: v4.00+\n")
         f.write("WrapStyle: 0\n")
         f.write("ScaledBorderAndShadow: yes\n")
+        f.write("YCbCr Matrix: TV.601\n")
         f.write("PlayResX: 1920\n")
         f.write("PlayResY: 1080\n\n")
         f.write("[V4+ Styles]\n")
@@ -114,8 +115,8 @@ def create_ass_file(video_path):
                 "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
                 "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
                 "Alignment, MarginL, MarginR, MarginV, Encoding\n")
-        f.write("Style: Telem,Consolas,16,&H00FFFFFF,&H000000FF,&H00000000,"
-                "&H80000000,-1,0,0,0,100,100,0,0,3,0,0,7,10,10,10,1\n\n")
+        f.write("Style: Telem,Arial,16,&H00FFFFFF,&H000000FF,&H00000000,"
+                "&H00000000,0,0,0,0,100,100,0,0,1,2,1,7,10,10,10,1\n\n")
         f.write("[Events]\n")
         f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     return ass_path
