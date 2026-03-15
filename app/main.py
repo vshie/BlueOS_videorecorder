@@ -941,6 +941,26 @@ def route_light():
     })
 
 
+@app.route("/led", methods=["POST"])
+def route_led():
+    data = request.get_json(silent=True) or {}
+    r = max(0, min(255, int(data.get("r", 0))))
+    g = max(0, min(255, int(data.get("g", 0))))
+    b = max(0, min(255, int(data.get("b", 0))))
+    mode = data.get("mode", "solid")
+    if mode == "off":
+        hw.led_off()
+    elif mode == "breathe":
+        hw.breathe_led(r, g, b, cycle_s=4.0)
+    elif mode == "flash_slow":
+        hw.flash_led(r, g, b, rate_hz=0.5)
+    elif mode == "flash_fast":
+        hw.flash_led(r, g, b, rate_hz=2.0)
+    else:
+        hw.set_led_color(r, g, b)
+    return jsonify({"success": True, "led_state": hw.get_led_state()})
+
+
 # ── Recipes API ──────────────────────────────────────────────────────────
 
 @app.route("/recipes", methods=["GET"])

@@ -180,6 +180,38 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
     </div>
   </div>
 
+  <!-- LED Configurator -->
+  <div class="card">
+    <h3>Status LED</h3>
+    <div class="form-row mt-8">
+      <div class="form-group">
+        <label>R: <span id="ledRVal" class="mono">0</span></label>
+        <input type="range" id="ledR" min="0" max="255" value="0" oninput="updateLedPreview()">
+      </div>
+      <div class="form-group">
+        <label>G: <span id="ledGVal" class="mono">0</span></label>
+        <input type="range" id="ledG" min="0" max="255" value="0" oninput="updateLedPreview()">
+      </div>
+      <div class="form-group">
+        <label>B: <span id="ledBVal" class="mono">0</span></label>
+        <input type="range" id="ledB" min="0" max="255" value="0" oninput="updateLedPreview()">
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-top:8px">
+      <div id="ledPreview" style="width:28px;height:28px;border-radius:50%;border:2px solid #ccc;background:#000"></div>
+      <select id="ledMode" style="padding:4px 8px;border-radius:4px;border:1px solid #ccc">
+        <option value="solid">Solid</option>
+        <option value="breathe" selected>Breathe</option>
+        <option value="flash_slow">Flash Slow</option>
+        <option value="flash_fast">Flash Fast</option>
+        <option value="off">Off</option>
+      </select>
+      <button class="btn-primary btn-sm" onclick="applyLed()">Apply</button>
+      <button class="btn-sm" onclick="applyIdleLed()">Reset Idle</button>
+      <span id="ledStatus" style="font-size:.82em;color:#666"></span>
+    </div>
+  </div>
+
   <!-- Telemetry -->
   <div class="card">
     <h3>System Telemetry</h3>
@@ -554,6 +586,36 @@ function toggleLight() {
   lightIsOn = !lightIsOn;
   api('/light', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({on:lightIsOn})});
   document.getElementById('lightToggle').textContent = lightIsOn ? 'On' : 'Off';
+}
+
+/* ── LED configurator ─────────────────────── */
+function updateLedPreview() {
+  const r = +document.getElementById('ledR').value;
+  const g = +document.getElementById('ledG').value;
+  const b = +document.getElementById('ledB').value;
+  document.getElementById('ledRVal').textContent = r;
+  document.getElementById('ledGVal').textContent = g;
+  document.getElementById('ledBVal').textContent = b;
+  document.getElementById('ledPreview').style.background = 'rgb('+r+','+g+','+b+')';
+}
+async function applyLed() {
+  const r = +document.getElementById('ledR').value;
+  const g = +document.getElementById('ledG').value;
+  const b = +document.getElementById('ledB').value;
+  const mode = document.getElementById('ledMode').value;
+  document.getElementById('ledStatus').textContent = 'Sending\u2026';
+  const d = await api('/led', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({r, g, b, mode})});
+  document.getElementById('ledStatus').textContent = d.success ? 'Applied' : 'Error';
+  setTimeout(() => { document.getElementById('ledStatus').textContent = ''; }, 2000);
+}
+async function applyIdleLed() {
+  document.getElementById('ledR').value = 0;
+  document.getElementById('ledG').value = 0;
+  document.getElementById('ledB').value = 128;
+  document.getElementById('ledMode').value = 'breathe';
+  updateLedPreview();
+  await applyLed();
 }
 
 /* ── Zip download with progress ───────────── */
