@@ -781,6 +781,34 @@ function makeProgressBar() {
 }
 
 /* ── Video list ────────────────────────────── */
+function _makeListItem(label, title, url, zipName, badgeText, locationBadge) {
+  const li = document.createElement('li');
+  li.style.padding = '4px 0';
+  li.style.borderBottom = '1px solid #eee';
+  const a = document.createElement('a');
+  a.href = '#';
+  a.textContent = label;
+  a.style.color = '#1a73e8';
+  a.style.cursor = 'pointer';
+  a.title = title;
+  const prog = makeProgressBar();
+  a.onclick = (e) => { e.preventDefault(); downloadZip(url, zipName, prog); };
+  li.appendChild(a);
+  if (locationBadge) {
+    const loc = document.createElement('span');
+    loc.style.cssText = 'margin-left:6px;font-size:.72em;padding:1px 5px;border-radius:3px;font-weight:600;vertical-align:middle;' +
+      (locationBadge === 'usb' ? 'background:#e8f5e9;color:#2e7d32' : 'background:#e3f2fd;color:#1565c0');
+    loc.textContent = locationBadge === 'usb' ? 'USB' : 'SD';
+    li.appendChild(loc);
+  }
+  const badge = document.createElement('span');
+  badge.style.cssText = 'margin-left:6px;font-size:.78em;color:#888';
+  badge.textContent = badgeText;
+  li.appendChild(badge);
+  li.appendChild(prog);
+  return li;
+}
+
 async function loadVideoList() {
   const d = await api('/list');
   const ul = document.getElementById('videoList');
@@ -788,49 +816,42 @@ async function loadVideoList() {
   const nf = document.getElementById('noFiles');
   const sessions = d.sessions || [];
   const stills = d.stills_sessions || [];
-  if (sessions.length === 0 && stills.length === 0) { nf.classList.remove('hidden'); return; }
+  const usbSessions = d.usb_sessions || [];
+  const usbStills = d.usb_stills_sessions || [];
+  const total = sessions.length + stills.length + usbSessions.length + usbStills.length;
+  if (total === 0) { nf.classList.remove('hidden'); return; }
   nf.classList.add('hidden');
+
+  const hasUsb = usbSessions.length > 0 || usbStills.length > 0;
+  const hasBoth = hasUsb && (sessions.length > 0 || stills.length > 0);
+
+  // USB recordings first (most recent deployment recordings)
+  usbSessions.forEach(s => {
+    const base = s.video.replace(/\.(ts|mp4)$/, '');
+    const folder = s.usb_folder;
+    const zipName = folder + '.zip';
+    const url = '/download_usb_zip/' + encodeURIComponent(folder);
+    const title = 'Download from USB: ' + [s.video].concat(s.sidecars||[]).join(', ');
+    ul.appendChild(_makeListItem(base, title, url, zipName, '(.zip)', hasBoth ? 'usb' : null));
+  });
+  usbStills.forEach(s => {
+    const url = '/download_usb_zip/' + encodeURIComponent(s);
+    const title = 'Download stills from USB';
+    ul.appendChild(_makeListItem(s, title, url, s + '.zip', '(stills .zip)', hasBoth ? 'usb' : null));
+  });
+
+  // Local SD recordings
   sessions.forEach(s => {
-    const li = document.createElement('li');
-    li.style.padding = '4px 0';
-    li.style.borderBottom = '1px solid #eee';
     const base = s.video.replace(/\.(ts|mp4)$/, '');
     const zipName = base + '.zip';
-    const a = document.createElement('a');
-    a.href = '#';
-    a.textContent = base;
-    a.style.color = '#1a73e8';
-    a.style.cursor = 'pointer';
-    a.title = 'Download zip: ' + [s.video].concat(s.sidecars||[]).join(', ');
-    const prog = makeProgressBar();
-    a.onclick = (e) => { e.preventDefault(); downloadZip('/download/' + zipName, zipName, prog); };
-    li.appendChild(a);
-    const badge = document.createElement('span');
-    badge.style.cssText = 'margin-left:8px;font-size:.78em;color:#888';
-    badge.textContent = '(.zip)';
-    li.appendChild(badge);
-    li.appendChild(prog);
-    ul.appendChild(li);
+    const url = '/download/' + zipName;
+    const title = 'Download zip: ' + [s.video].concat(s.sidecars||[]).join(', ');
+    ul.appendChild(_makeListItem(base, title, url, zipName, '(.zip)', hasBoth ? 'sd' : null));
   });
   stills.forEach(s => {
-    const li = document.createElement('li');
-    li.style.padding = '4px 0';
-    li.style.borderBottom = '1px solid #eee';
-    const a = document.createElement('a');
-    a.href = '#';
-    a.textContent = s;
-    a.style.color = '#1a73e8';
-    a.style.cursor = 'pointer';
-    a.title = 'Download stills as zip';
-    const prog = makeProgressBar();
-    a.onclick = (e) => { e.preventDefault(); downloadZip('/download_stills/' + s, s + '.zip', prog); };
-    li.appendChild(a);
-    const badge = document.createElement('span');
-    badge.style.cssText = 'margin-left:8px;font-size:.78em;color:#888';
-    badge.textContent = '(stills .zip)';
-    li.appendChild(badge);
-    li.appendChild(prog);
-    ul.appendChild(li);
+    const url = '/download_stills/' + s;
+    const title = 'Download stills as zip';
+    ul.appendChild(_makeListItem(s, title, url, s + '.zip', '(stills .zip)', hasBoth ? 'sd' : null));
   });
 }
 

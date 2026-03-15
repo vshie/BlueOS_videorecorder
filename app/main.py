@@ -1041,9 +1041,43 @@ def list_videos():
                 s = base + ext
                 if os.path.exists(os.path.join(VIDEO_DIR, s)):
                     sidecars.append(s)
-            sessions.append({"video": v, "sidecars": sidecars})
+            sessions.append({"video": v, "sidecars": sidecars, "location": "local"})
 
-        return jsonify({"videos": videos, "sessions": sessions, "stills_sessions": stills_dirs})
+        # Scan USB DropCam subfolders
+        usb_sessions = []
+        usb_stills = []
+        dropcam_dir = os.path.join(usb_storage.USB_MOUNT_POINT, usb_storage.DROPCAM_DIR)
+        if usb_storage.is_mounted() and os.path.isdir(dropcam_dir):
+            for folder in sorted(os.listdir(dropcam_dir), reverse=True):
+                folder_path = os.path.join(dropcam_dir, folder)
+                if not os.path.isdir(folder_path):
+                    continue
+                folder_files = os.listdir(folder_path)
+                vids = [f for f in folder_files if f.endswith((".ts", ".mp4"))]
+                has_session_json = "session.json" in folder_files
+                if vids:
+                    v = vids[0]
+                    base = os.path.splitext(v)[0]
+                    sidecars = []
+                    for ext in (".ass", "_events.ndjson"):
+                        if base + ext in folder_files:
+                            sidecars.append(base + ext)
+                    usb_sessions.append({
+                        "video": v,
+                        "sidecars": sidecars,
+                        "location": "usb",
+                        "usb_folder": folder,
+                    })
+                elif has_session_json:
+                    usb_stills.append(folder)
+
+        return jsonify({
+            "videos": videos,
+            "sessions": sessions,
+            "stills_sessions": stills_dirs,
+            "usb_sessions": usb_sessions,
+            "usb_stills_sessions": usb_stills,
+        })
     except Exception as e:
         logger.error(f"List error: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
@@ -1124,6 +1158,59 @@ def download_stills(dirname):
             },
         )
     except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/download_usb_zip/<folder>")
+def download_usb_zip(folder):
+    """Bundle all files in a USB DropCam session folder into a zip."""
+    try:
+        folder = os.path.basename(folder)
+        dir_path = os.path.join(
+            usb_storage.USB_MOUNT_POINT, usb_storage.DROPCAM_DIR, folder
+        )
+        if not os.path.isdir(dir_path):
+            return jsonify({"success": False, "message": "USB folder not found"}), 404
+
+        STORED_EXTS = {".ts", ".mp4", ".jpg", ".jpeg", ".png"}
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for f in sorted(os.listdir(dir_path)):
+                full = os.path.join(dir_path, f)
+                if not os.path.isfile(full):
+                    continue
+                ext = os.path.splitext(f)[1].lower()
+                method = zipfile.ZIP_STORED if ext in STORED_EXTS else zipfile.ZIP_DEFLATED
+                zf.write(full, os.path.join(folder, f), compress_type=method)
+        data = buf.getvalue()
+        zip_name = folder + ".zip"
+        return Response(
+            data,
+            mimetype="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{zip_name}"',
+                "Content-Length": str(len(data)),
+            },
+        )
+    except Exception as e:
+        logger.error(f"USB zip download error: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/download_usb/<folder>/<filename>")
+def download_usb_file(folder, filename):
+    """Download a single file from a USB DropCam session folder."""
+    try:
+        folder = os.path.basename(folder)
+        filename = os.path.basename(filename)
+        file_path = os.path.join(
+            usb_storage.USB_MOUNT_POINT, usb_storage.DROPCAM_DIR, folder, filename
+        )
+        if not os.path.isfile(file_path):
+            return jsonify({"success": False, "message": "File not found on USB"}), 404
+        return send_file(file_path, as_attachment=True)
+    except Exception as e:
+        logger.error(f"USB file download error: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 
