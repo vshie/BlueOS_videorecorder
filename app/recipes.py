@@ -8,6 +8,7 @@ Each recipe defines capture mode, duration, servo movement, and light settings.
 import json
 import logging
 import os
+import re
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ RECIPE_SCHEMA_DEFAULTS = {
     "light_mode": "off",
     "led_color": "red",
     "led_blink": "slow",
+    "still_prefix": "",
 }
 
 
@@ -79,6 +81,7 @@ DEFAULT_RECIPES = [
         "light_mode": "always",
         "led_color": "red",
         "led_blink": "slow",
+        "still_prefix": "",
     },
     {
         "id": "deep-drop-2hr",
@@ -98,6 +101,7 @@ DEFAULT_RECIPES = [
         "light_mode": "always",
         "led_color": "red",
         "led_blink": "slow",
+        "still_prefix": "",
     },
     {
         "id": "time-lapse-4hr",
@@ -117,6 +121,7 @@ DEFAULT_RECIPES = [
         "light_mode": "always",
         "led_color": "green",
         "led_blink": "slow",
+        "still_prefix": "",
     },
 ]
 
@@ -203,6 +208,10 @@ def validate_recipe(data):
         else:
             clean["led_blink"] = data["led_blink"]
 
+    if "still_prefix" in data:
+        pfx = re.sub(r'[^a-zA-Z0-9_-]', '', str(data["still_prefix"]).strip())[:32]
+        clean["still_prefix"] = pfx
+
     if "id" in data:
         clean["id"] = str(data["id"])
 
@@ -225,7 +234,7 @@ def list_recipes():
     _ensure_dir()
     recipes = []
     for fname in sorted(os.listdir(RECIPES_DIR)):
-        if not fname.endswith(".json"):
+        if not fname.endswith(".json") or fname == "dropcam_config.json":
             continue
         try:
             with open(os.path.join(RECIPES_DIR, fname), "r") as f:

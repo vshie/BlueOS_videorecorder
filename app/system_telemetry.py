@@ -125,6 +125,16 @@ def is_time_synced():
     return None
 
 
+def get_cpu_load_avg():
+    """Read 1-minute CPU load average from /proc/loadavg (kernel vfs, Docker-accessible)."""
+    try:
+        with open("/proc/loadavg", "r") as f:
+            return float(f.read().split()[0])
+    except Exception as e:
+        logger.debug(f"CPU load read failed: {e}")
+    return None
+
+
 def get_disk_free_mb(path="/app/videorecordings"):
     """Return free disk space at path in MB."""
     try:
@@ -147,6 +157,7 @@ def get_all_telemetry(servo_position=None, light_brightness=None,
         "cpu_temp_c": get_cpu_temperature(),
         "cpu_voltage_v": get_cpu_voltage(),
         "cpu_clock_mhz": get_cpu_clock_mhz(),
+        "cpu_load_avg": get_cpu_load_avg(),
         "time_synced": is_time_synced(),
         "system_time": get_system_time(),
         "disk_free_mb": get_disk_free_mb(),

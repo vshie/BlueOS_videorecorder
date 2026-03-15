@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import shlex
+import shutil
 import signal
 import threading
 import time
@@ -32,7 +33,7 @@ from hardware import hw
 from scheduler import scheduler
 from system_telemetry import (
     get_cpu_temperature, get_cpu_voltage, get_cpu_clock_mhz,
-    is_time_synced, get_disk_free_mb, get_all_telemetry,
+    get_cpu_load_avg, is_time_synced, get_disk_free_mb, get_all_telemetry,
 )
 from recipes import (
     init_default_recipes, list_recipes, get_recipe,
@@ -41,7 +42,8 @@ from recipes import (
 
 # ── Constants ────────────────────────────────────────────────────────────
 VIDEO_DIR = "/app/videorecordings"
-CONFIG_FILE = os.path.join(VIDEO_DIR, "dropcam_config.json")
+CONFIG_FILE = os.path.join(VIDEO_DIR, "recipes", "dropcam_config.json")
+_OLD_CONFIG_FILE = os.path.join(VIDEO_DIR, "dropcam_config.json")
 VIDEO_DEVICE = "/dev/video2"
 AUDIO_DEVICE = "hw:Camera,0"
 
@@ -77,6 +79,16 @@ image_rotation = 0
 
 def load_config():
     defaults = {"active_recipe_id": None, "rotation_degrees": 0}
+
+    # One-time migration: move config from old location to recipes/ subfolder
+    if not os.path.exists(CONFIG_FILE) and os.path.exists(_OLD_CONFIG_FILE):
+        try:
+            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+            os.rename(_OLD_CONFIG_FILE, CONFIG_FILE)
+            logger.info(f"Migrated config from {_OLD_CONFIG_FILE} to {CONFIG_FILE}")
+        except Exception as e:
+            logger.warning(f"Config migration failed: {e}")
+
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r") as f:
@@ -165,6 +177,7 @@ def update_ass_file():
                 cpu_t = get_cpu_temperature()
                 cpu_v = get_cpu_voltage()
                 cpu_c = get_cpu_clock_mhz()
+                cpu_load = get_cpu_load_avg()
                 servo = hw.get_servo_position()
                 light = hw.get_light_brightness()
                 rname = active_recipe_for_recording["name"] if active_recipe_for_recording else "Manual"
@@ -183,6 +196,8 @@ def update_ass_file():
                     parts.append(f"{cpu_v}V")
                 if cpu_c is not None:
                     parts.append(f"{int(cpu_c)}MHz")
+                if cpu_load is not None:
+                    parts.append(f"Load:{cpu_load:.2f}")
                 text = " | ".join(parts)
 
                 line = f"Dialogue: 0,{t0},{t1},Default,,0,0,0,,{text}\n"
@@ -368,7 +383,9 @@ def stills_capture_loop(interval_s, rotation):
     global stop_stills_thread, stills_count
     while not stop_stills_thread and recording:
         stills_count += 1
-        fname = f"frame_{stills_count:06d}.jpg"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        prefix = (active_recipe_for_recording or {}).get("still_prefix", "").strip()
+        fname = f"{prefix}_{ts}.jpg" if prefix else f"{ts}.jpg"
         fpath = os.path.join(stills_dir, fname)
         _capture_still(fpath, rotation)
         wait_start = time.monotonic()
@@ -991,6 +1008,33 @@ def route_recipe_get(recipe_id):
 def route_recipe_delete(recipe_id):
     ok = delete_recipe(recipe_id)
     return jsonify({"success": ok})
+
+
+# ── Delete all recordings ─────────────────────────────────────────────────
+
+@app.route("/recordings", methods=["DELETE"])
+def route_delete_all_recordings():
+    """Delete all video, stills, and associated sidecar files. Preserves recipes/ and config."""
+    if recording:
+        return jsonify({"success": False, "message": "Cannot delete while recording"}), 400
+    deleted = 0
+    errors = []
+    try:
+        for entry in os.listdir(VIDEO_DIR):
+            path = os.path.join(VIDEO_DIR, entry)
+            if entry == "recipes" or entry == ".snapshot_tmp.jpg":
+                continue
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+                deleted += 1
+            except Exception as e:
+                errors.append(f"{entry}: {e}")
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+    return jsonify({"success": True, "deleted": deleted, "errors": errors})
 
 
 # ── Active recipe / auto-start config ────────────────────────────────────

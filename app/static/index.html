@@ -89,6 +89,17 @@ input[type=range]{width:100%;margin:4px 0;accent-color:#1a73e8}
 .gap-8{gap:8px}
 hr{border:none;border-top:1px solid #eee;margin:12px 0}
 
+/* File browser iframe */
+.file-manager-wrapper{width:100vw;position:relative;left:50%;margin-left:-50vw;padding:0 12px;box-sizing:border-box;margin-top:20px}
+
+/* Delete modal overlay */
+.modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:1000}
+.modal-box{background:#fff;border-radius:10px;padding:24px;max-width:400px;width:90%;box-shadow:0 8px 30px rgba(0,0,0,.2);text-align:center}
+.modal-box h3{margin-bottom:12px}
+.modal-box p{font-size:.92em;color:#555;margin-bottom:16px}
+.modal-box .btn-row{display:flex;gap:8px;justify-content:center}
+.countdown-text{font-size:1.3em;font-weight:700;color:#e53935;margin-bottom:12px}
+
 /* Setup content */
 .setup-content h2{margin-top:20px}
 .setup-content p,.setup-content li{line-height:1.6;font-size:.92em}
@@ -219,6 +230,7 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
       <div class="telem-item"><div class="telem-label">CPU Temp</div><div class="telem-value" id="tCpuTemp">--</div></div>
       <div class="telem-item"><div class="telem-label">CPU Voltage</div><div class="telem-value" id="tCpuVolt">--</div></div>
       <div class="telem-item"><div class="telem-label">CPU Clock</div><div class="telem-value" id="tCpuClk">--</div></div>
+      <div class="telem-item"><div class="telem-label">Load (1m)</div><div class="telem-value" id="tCpuLoad">--</div></div>
       <div class="telem-item"><div class="telem-label">Disk Free</div><div class="telem-value" id="tDisk">--</div></div>
       <div class="telem-item"><div class="telem-label">System Time</div><div class="telem-value" id="tSysTime" style="font-size:.85em">--</div></div>
       <div class="telem-item"><div class="telem-label">Time Synced</div><div class="telem-value" id="tSync">--</div></div>
@@ -231,7 +243,10 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
 
   <!-- Video list -->
   <div class="card">
-    <h3>Recorded Files</h3>
+    <div class="flex-between">
+      <h3>Recorded Files</h3>
+      <button class="btn-danger btn-sm" id="btnDeleteAll" onclick="deleteAllRecordings()">Delete All</button>
+    </div>
     <ul id="videoList" style="list-style:none;margin-top:8px"></ul>
     <div id="noFiles" class="text-muted mt-8">No recordings yet.</div>
   </div>
@@ -267,6 +282,10 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
         <label>Still Interval (s)</label>
         <input type="number" id="rStillInterval" value="1.0" min="0.1" max="3600" step="0.1">
       </div>
+      <div class="form-group" id="stillsPrefixGroup">
+        <label>Still Filename Prefix</label>
+        <input type="text" id="rStillPrefix" maxlength="32" placeholder="e.g. site_A" pattern="[a-zA-Z0-9_-]*" title="Letters, numbers, underscore, hyphen only">
+      </div>
       <div class="form-group narrow">
         <label>Duration (min)</label>
         <input type="number" id="rDuration" value="30" min="1" max="480" oninput="updateSweepCalc()">
@@ -284,6 +303,10 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
           <option value="270">270&deg;</option>
         </select>
       </div>
+    </div>
+
+    <div style="background:#e8f0fe;border-left:3px solid #1a73e8;padding:8px 12px;font-size:.85em;border-radius:4px;margin:10px 0;color:#333">
+      <strong>When storage is low:</strong> If free disk space falls below 1 GB, the active recording will stop automatically and the status LED will flash yellow. The recipe will not resume &mdash; you must manually restart.
     </div>
 
     <h3>Servo</h3>
@@ -366,6 +389,12 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
   <div class="card setup-content" id="setupContent">
     <!-- Populated by JS on load for cleanliness, or directly here -->
   </div>
+</div>
+
+<!-- ═══════════════ FILE BROWSER ═══════════════ -->
+<div class="file-manager-wrapper">
+  <h2 style="padding:8px 0 6px">File Browser</h2>
+  <iframe id="fileBrowserFrame" src="" style="width:100%;height:600px;border:none;border-radius:8px"></iframe>
 </div>
 
 <script>
@@ -474,6 +503,7 @@ async function pollTelemetry() {
   document.getElementById('tCpuTemp').textContent = d.cpu_temp_c != null ? d.cpu_temp_c + ' C' : '--';
   document.getElementById('tCpuVolt').textContent = d.cpu_voltage_v != null ? d.cpu_voltage_v + ' V' : '--';
   document.getElementById('tCpuClk').textContent = d.cpu_clock_mhz != null ? d.cpu_clock_mhz + ' MHz' : '--';
+  document.getElementById('tCpuLoad').textContent = d.cpu_load_avg != null ? d.cpu_load_avg.toFixed(2) : '--';
   document.getElementById('tDisk').textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1)+' GB' : '--';
   document.getElementById('tSysTime').textContent = d.system_time || '--';
   document.getElementById('tSync').textContent = d.time_synced === true ? 'Yes' : d.time_synced === false ? 'No' : '--';
@@ -727,6 +757,56 @@ async function loadVideoList() {
   });
 }
 
+/* ── Delete all recordings ─────────────────── */
+let deleteCountdownTimer = null;
+function deleteAllRecordings() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'deleteModal';
+  overlay.innerHTML = `<div class="modal-box">
+    <h3>Delete All Recordings</h3>
+    <p>This will permanently delete all videos, stills, subtitle files, and logs. Recipes will not be affected.</p>
+    <div class="btn-row">
+      <button class="btn-danger" onclick="startDeleteCountdown()">Yes, Delete</button>
+      <button onclick="closeDeleteModal()">Cancel</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+}
+function closeDeleteModal() {
+  clearInterval(deleteCountdownTimer);
+  const m = document.getElementById('deleteModal');
+  if (m) m.remove();
+}
+function startDeleteCountdown() {
+  let sec = 3;
+  const box = document.querySelector('#deleteModal .modal-box');
+  box.innerHTML = `<div class="countdown-text" id="cdText">Deleting in ${sec}...</div>
+    <button onclick="closeDeleteModal()">Cancel</button>`;
+  deleteCountdownTimer = setInterval(() => {
+    sec--;
+    if (sec > 0) {
+      document.getElementById('cdText').textContent = `Deleting in ${sec}...`;
+    } else {
+      clearInterval(deleteCountdownTimer);
+      executeDeleteAll();
+    }
+  }, 1000);
+}
+async function executeDeleteAll() {
+  const box = document.querySelector('#deleteModal .modal-box');
+  box.innerHTML = '<p>Deleting\u2026</p>';
+  const d = await api('/recordings', {method:'DELETE'});
+  if (d.success) {
+    box.innerHTML = `<p>Deleted ${d.deleted} item(s).</p>
+      <button onclick="closeDeleteModal()">OK</button>`;
+    loadVideoList();
+  } else {
+    box.innerHTML = `<p style="color:#e53935">${d.message || 'Delete failed'}</p>
+      <button onclick="closeDeleteModal()">OK</button>`;
+  }
+}
+
 /* ── Recipes ───────────────────────────────── */
 let allRecipes = [];
 async function loadRecipes() {
@@ -774,6 +854,7 @@ function newRecipe() {
   document.getElementById('rName').value = '';
   document.getElementById('rMode').value = 'video';
   document.getElementById('rStillInterval').value = '1.0';
+  document.getElementById('rStillPrefix').value = '';
   document.getElementById('rDuration').value = '30';
   document.getElementById('rDelay').value = '1';
   document.getElementById('rRotation').value = '0';
@@ -805,6 +886,7 @@ async function editRecipe(id) {
   document.getElementById('rName').value = r.name;
   document.getElementById('rMode').value = r.mode;
   document.getElementById('rStillInterval').value = r.still_interval_s;
+  document.getElementById('rStillPrefix').value = r.still_prefix || '';
   document.getElementById('rDuration').value = r.duration_minutes;
   document.getElementById('rDelay').value = r.auto_start_delay_minutes;
   document.getElementById('rRotation').value = r.rotation_degrees;
@@ -835,6 +917,7 @@ async function saveCurrentRecipe() {
     name: document.getElementById('rName').value,
     mode: document.getElementById('rMode').value,
     still_interval_s: +document.getElementById('rStillInterval').value,
+    still_prefix: document.getElementById('rStillPrefix').value,
     duration_minutes: +document.getElementById('rDuration').value,
     auto_start_delay_minutes: +document.getElementById('rDelay').value,
     rotation_degrees: +document.getElementById('rRotation').value,
@@ -863,7 +946,9 @@ async function deleteRecipeUI(id) {
 }
 
 function toggleStillsFields() {
-  document.getElementById('stillsIntervalGroup').style.display = document.getElementById('rMode').value === 'stills' ? '' : 'none';
+  const isStills = document.getElementById('rMode').value === 'stills';
+  document.getElementById('stillsIntervalGroup').style.display = isStills ? '' : 'none';
+  document.getElementById('stillsPrefixGroup').style.display = isStills ? '' : 'none';
 }
 function toggleServoFields() {
   const fixed = document.getElementById('rServoFixed').checked;
@@ -984,6 +1069,8 @@ pollTelemetry();
 setInterval(pollStatus, 2000);
 setInterval(pollTelemetry, 5000);
 setInterval(loadVideoList, 10000);
+document.getElementById('fileBrowserFrame').src =
+  `http://${window.location.hostname}:7777/files/extensions/videorecorder`;
 
 window.addEventListener('unload', () => {
   clearInterval(durationTimer);
