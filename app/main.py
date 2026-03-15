@@ -123,7 +123,7 @@ def format_ass_ts(seconds):
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
     cs = int((seconds - int(seconds)) * 100)
-    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+    return f"{h:02d}:{m:02d}:{s:02d}.{cs:02d}"
 
 
 def parse_ass_ts(ts):
