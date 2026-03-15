@@ -41,7 +41,7 @@ except ImportError:
     logger.warning("pigpio not available; servo/light control will be simulated")
 
 try:
-    from rpi_ws281x import PixelStrip, Color
+    from rpi_ws281x import PixelStrip, Color, ws
     _neopixel_available = True
 except ImportError:
     logger.warning("rpi_ws281x not available; LED control will be simulated")
@@ -89,7 +89,8 @@ class HardwareController:
             return
         try:
             self._strip = PixelStrip(
-                LED_COUNT, LED_GPIO, 800000, 10, False, LED_BRIGHTNESS, 0
+                LED_COUNT, LED_GPIO, 800000, 10, False, LED_BRIGHTNESS, 0,
+                strip_type=ws.WS2811_STRIP_GRB,
             )
             self._strip.begin()
         except Exception as e:
@@ -148,8 +149,8 @@ class HardwareController:
         self._set_pixel(0, 0, 0)
 
     def led_idle(self):
-        """Solid green when idle."""
-        self.set_led_color(0, 255, 0)
+        """Solid green when idle. Reduced intensity avoids yellow tint on WS2812B."""
+        self.set_led_color(0, 180, 15)
 
     def led_recording(self):
         self.flash_led(255, 0, 0, rate_hz=0.5)
