@@ -4,6 +4,7 @@ and disk space. Uses sysfs fallbacks for Docker container environments where
 vcgencmd and timedatectl may not be available.
 """
 
+import ctypes
 import logging
 import os
 import subprocess
@@ -69,6 +70,27 @@ def get_cpu_clock_mhz():
     return None
 
 
+def _check_adjtimex():
+    """Check kernel NTP discipline status via adjtimex(2).
+
+    The container shares the host kernel, so this works even in Docker.
+    Return values: 0-4 = clock synchronized, 5 = TIME_ERROR (unsynchronized).
+    """
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        # struct timex is ~200 bytes; modes=0 (read-only) is the first field.
+        buf = (ctypes.c_char * 256)()
+        ctypes.memset(buf, 0, 256)
+        result = libc.adjtimex(buf)
+        if result == 5:          # TIME_ERROR — kernel clock not synced
+            return False
+        if 0 <= result <= 4:     # TIME_OK / TIME_INS / TIME_DEL / TIME_OOP / TIME_WAIT
+            return True
+    except Exception as e:
+        logger.debug(f"adjtimex check failed: {e}")
+    return None
+
+
 def is_time_synced():
     """Check if system clock has been synchronized via NTP or browser.
     Returns True if synced, False if not, None if unknown.
@@ -77,6 +99,12 @@ def is_time_synced():
     - BlueOS reaches the internet (NTP), or
     - A user loads the BlueOS web interface (browser time sync).
     """
+    # Preferred: ask the kernel directly (works inside Docker)
+    result = _check_adjtimex()
+    if result is not None:
+        return result
+
+    # Fallback: timedatectl (works on host, not in Docker)
     try:
         out = subprocess.check_output(
             ["timedatectl", "show", "--property=NTPSynchronized"],
@@ -85,19 +113,14 @@ def is_time_synced():
         return out == "NTPSynchronized=yes"
     except Exception:
         pass
-    try:
-        out = subprocess.check_output(
-            ["timedatectl", "status"], timeout=2, stderr=subprocess.DEVNULL
-        ).decode()
-        for line in out.splitlines():
-            if "synchronized" in line.lower():
-                return "yes" in line.lower()
-    except Exception:
-        pass
+
     if os.path.exists("/run/systemd/timesync/synchronized"):
         return True
-    now = datetime.now()
-    if now.year < 2024:
+
+    # Last resort: Pi has no RTC, so a current year means time was set somehow
+    if datetime.now().year >= 2025:
+        return True
+    if datetime.now().year < 2024:
         return False
     return None
 
