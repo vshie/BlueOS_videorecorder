@@ -547,8 +547,12 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0):
 
 def _remux_to_mp4(ts_path):
     """Remux a .ts file to .mp4 with ffmpeg (copy, no re-encode).
-    Returns the .mp4 path on success, or the original .ts path on failure."""
+    Returns the .mp4 path on success, or the original .ts path on failure.
+    Flashes LED slow green while processing (unless a recording is active)."""
     mp4_path = os.path.splitext(ts_path)[0] + ".mp4"
+    show_led = not recording
+    if show_led:
+        hw.flash_led(0, 255, 0, rate_hz=0.5)
     try:
         size_gib = os.path.getsize(ts_path) / (1024 ** 3)
         timeout_s = int(120 + size_gib * 60)
@@ -565,6 +569,8 @@ def _remux_to_mp4(ts_path):
         if r.returncode == 0 and os.path.exists(mp4_path):
             os.remove(ts_path)
             logger.info(f"Remuxed to MP4: {os.path.basename(mp4_path)}")
+            if show_led:
+                hw.led_idle()
             return mp4_path
         else:
             logger.error(f"Remux to MP4 failed (rc={r.returncode}): {r.stderr[-500:]}")
@@ -577,6 +583,8 @@ def _remux_to_mp4(ts_path):
                 os.remove(mp4_path)
             except OSError:
                 pass
+    if show_led:
+        hw.led_idle()
     return ts_path
 
 
