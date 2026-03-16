@@ -161,10 +161,12 @@ class HardwareController:
 
     def _breathe_loop(self, r, g, b, cycle_s):
         step_s = 0.03
+        lo, hi = 10.0 / 255.0, 200.0 / 255.0
         while not self._led_stop.is_set():
             t = time.monotonic()
             phase = (t % cycle_s) / cycle_s
-            brightness = (math.sin(phase * 2.0 * math.pi - math.pi / 2.0) + 1.0) / 2.0
+            unit = (math.sin(phase * 2.0 * math.pi - math.pi / 2.0) + 1.0) / 2.0
+            brightness = lo + (hi - lo) * unit
             cr = int(r * brightness)
             cg = int(g * brightness)
             cb = int(b * brightness)
@@ -186,13 +188,13 @@ class HardwareController:
         self.breathe_led(0, 0, 128, cycle_s=4.0)
 
     def led_recording(self):
-        self.flash_led(255, 0, 0, rate_hz=0.5)
+        self.flash_led(20, 0, 0, rate_hz=0.5)
 
     def led_warning(self):
         self.flash_led(255, 180, 0, rate_hz=2.0)
 
     def led_complete(self):
-        self.set_led_color(0, 0, 255)
+        self.set_led_color(0, 0, 127)
 
     def get_led_state(self):
         """Return current LED state for telemetry."""

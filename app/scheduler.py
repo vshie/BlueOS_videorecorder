@@ -18,13 +18,13 @@ RECORDING_START_RETRIES = 5
 RECORDING_RETRY_INTERVAL_S = 5
 
 LED_COLOR_MAP = {
-    "red": (255, 0, 0),
-    "green": (0, 255, 0),
-    "blue": (0, 0, 255),
-    "yellow": (255, 255, 0),
-    "cyan": (0, 255, 255),
-    "magenta": (255, 0, 255),
-    "white": (255, 255, 255),
+    "red": (20, 0, 0),
+    "green": (0, 20, 0),
+    "blue": (0, 0, 20),
+    "yellow": (20, 20, 0),
+    "cyan": (0, 20, 20),
+    "magenta": (20, 0, 20),
+    "white": (20, 20, 20),
 }
 
 LED_BLINK_RATE = {

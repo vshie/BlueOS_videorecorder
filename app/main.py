@@ -719,7 +719,7 @@ def _remux_to_mp4(ts_path, was_usb=False, usb_rec_dir=None):
 
     show_led = not recording
     if show_led:
-        hw.flash_led(0, 255, 0, rate_hz=0.5)
+        hw.flash_led(0, 20, 0, rate_hz=0.5)
 
     ts_size = 0
     try:
@@ -866,7 +866,7 @@ def _build_session_zip(folder_path):
     remux_active = True
     show_led = not recording
     if show_led:
-        hw.flash_led(0, 200, 255, rate_hz=0.5)
+        hw.flash_led(0, 16, 20, rate_hz=0.5)
 
     STORED_EXTS = {".ts", ".mp4", ".jpg", ".jpeg", ".png"}
     written = 0
