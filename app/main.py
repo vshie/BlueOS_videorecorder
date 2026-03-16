@@ -1313,18 +1313,45 @@ def route_telemetry():
 
 # ── Snapshot ─────────────────────────────────────────────────────────────
 
+SNAPSHOT_PATH = os.path.join(VIDEO_DIR, ".snapshot_tmp.jpg")
+_auto_snap_stop = threading.Event()
+
+
+def _auto_snapshot_loop():
+    """Capture a preview snapshot every 10 s when not recording."""
+    _auto_snap_stop.wait(5)
+    while not _auto_snap_stop.is_set():
+        if not recording:
+            try:
+                _capture_still(SNAPSHOT_PATH, rotation=image_rotation)
+            except Exception:
+                pass
+        _auto_snap_stop.wait(10)
+
+
 @app.route("/snapshot", methods=["GET"])
 def route_snapshot():
-    """Capture and return a JPEG snapshot from the camera."""
+    """Capture a fresh JPEG snapshot from the camera and return it."""
     try:
-        tmp = os.path.join(VIDEO_DIR, ".snapshot_tmp.jpg")
-        ok = _capture_still(tmp, rotation=image_rotation)
-        if ok and os.path.exists(tmp):
-            return send_file(tmp, mimetype="image/jpeg")
+        ok = _capture_still(SNAPSHOT_PATH, rotation=image_rotation)
+        if ok and os.path.exists(SNAPSHOT_PATH):
+            resp = send_file(SNAPSHOT_PATH, mimetype="image/jpeg")
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
         return jsonify({"success": False, "message": "Capture failed"}), 500
     except Exception as e:
         logger.error(f"Snapshot error: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/snapshot/latest", methods=["GET"])
+def route_snapshot_latest():
+    """Serve the most recent cached snapshot without triggering a new capture."""
+    if os.path.exists(SNAPSHOT_PATH):
+        resp = send_file(SNAPSHOT_PATH, mimetype="image/jpeg")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    return "", 204
 
 
 @app.route("/rotate", methods=["POST"])
@@ -1637,6 +1664,7 @@ def _boot():
     hw.led_idle()
 
     threading.Thread(target=_remux_orphaned_ts, daemon=True).start()
+    threading.Thread(target=_auto_snapshot_loop, daemon=True).start()
 
     cfg = load_config()
     global storage_preference

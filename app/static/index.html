@@ -210,7 +210,7 @@ hr{border:none;border-top:1px solid #eee;margin:8px 0}
         </div>
       </div>
       <div class="snapshot-area">
-        <div class="snapshot-placeholder" id="snapPlaceholder">Click "Snapshot" to preview</div>
+        <div class="snapshot-placeholder" id="snapPlaceholder">Waiting for camera...</div>
         <img id="snapImg" class="hidden" alt="Camera snapshot">
       </div>
     </div>
@@ -706,21 +706,28 @@ async function stopSchedule() {
 }
 
 /* ── Snapshot ──────────────────────────────── */
-async function takeSnapshot() {
+function _showSnap(blob) {
   const img = document.getElementById('snapImg');
+  const ph = document.getElementById('snapPlaceholder');
+  if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+  img.src = URL.createObjectURL(blob);
+  img.classList.remove('hidden');
+  ph.classList.add('hidden');
+}
+async function takeSnapshot() {
   const ph = document.getElementById('snapPlaceholder');
   ph.textContent = 'Capturing...';
   try {
     const r = await fetch('/snapshot');
-    if (r.ok) {
-      const blob = await r.blob();
-      img.src = URL.createObjectURL(blob);
-      img.classList.remove('hidden');
-      ph.classList.add('hidden');
-    } else {
-      ph.textContent = 'Capture failed';
-    }
+    if (r.ok) { _showSnap(await r.blob()); }
+    else { ph.textContent = 'Capture failed'; }
   } catch(e) { ph.textContent = 'Error: ' + e; }
+}
+async function pollSnapshot() {
+  try {
+    const r = await fetch('/snapshot/latest');
+    if (r.ok) _showSnap(await r.blob());
+  } catch(e) { /* ignore */ }
 }
 async function cycleRotation() {
   const d = await api('/rotate', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
@@ -1343,9 +1350,11 @@ loadRecipes();
 loadVideoList();
 pollStatus();
 pollTelemetry();
+pollSnapshot();
 setInterval(pollStatus, 2000);
 setInterval(pollTelemetry, 5000);
 setInterval(loadVideoList, 10000);
+setInterval(pollSnapshot, 10000);
 document.getElementById('fileBrowserFrame').src =
   `http://${window.location.hostname}:7777/files/extensions/videorecorder`;
 
