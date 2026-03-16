@@ -844,7 +844,11 @@ function makeProgressBar() {
 /* ── Video list ────────────────────────────── */
 function _makeListItem(label, title, url, zipName, badgeText, locationBadge, deleteData) {
   const li = document.createElement('li');
-  li.style.cssText = 'padding:4px 0;border-bottom:1px solid #eee;display:flex;align-items:center;gap:6px';
+  li.style.cssText = 'padding:4px 0;border-bottom:1px solid #eee';
+
+  // Inline row: checkbox + link + badges
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;gap:6px';
 
   const cb = document.createElement('input');
   cb.type = 'checkbox';
@@ -853,32 +857,35 @@ function _makeListItem(label, title, url, zipName, badgeText, locationBadge, del
   cb.dataset.location = deleteData.location;
   cb.dataset.id = deleteData.id;
   cb.addEventListener('change', _updateDeleteBtn);
-  li.appendChild(cb);
+  row.appendChild(cb);
 
-  const content = document.createElement('span');
-  content.style.flex = '1';
   const a = document.createElement('a');
   a.href = '#';
   a.textContent = label;
-  a.style.color = '#1a73e8';
-  a.style.cursor = 'pointer';
+  a.style.cssText = 'color:#1a73e8;cursor:pointer;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
   a.title = title;
-  const prog = makeProgressBar();
-  a.onclick = (e) => { e.preventDefault(); downloadZip(url, zipName, prog); };
-  content.appendChild(a);
+  row.appendChild(a);
+
   if (locationBadge) {
     const loc = document.createElement('span');
-    loc.style.cssText = 'margin-left:6px;font-size:.72em;padding:1px 5px;border-radius:3px;font-weight:600;vertical-align:middle;' +
+    loc.style.cssText = 'font-size:.72em;padding:1px 5px;border-radius:3px;font-weight:600;flex-shrink:0;' +
       (locationBadge === 'usb' ? 'background:#e8f5e9;color:#2e7d32' : 'background:#e3f2fd;color:#1565c0');
     loc.textContent = locationBadge === 'usb' ? 'USB' : 'SD';
-    content.appendChild(loc);
+    row.appendChild(loc);
   }
+
   const badge = document.createElement('span');
-  badge.style.cssText = 'margin-left:6px;font-size:.78em;color:#888';
+  badge.style.cssText = 'font-size:.78em;color:#888;flex-shrink:0';
   badge.textContent = badgeText;
-  content.appendChild(badge);
-  content.appendChild(prog);
-  li.appendChild(content);
+  row.appendChild(badge);
+
+  li.appendChild(row);
+
+  // Progress bar lives as a block sibling of the row, not inside an inline element
+  const prog = makeProgressBar();
+  a.onclick = (e) => { e.preventDefault(); downloadZip(url, zipName, prog); };
+  li.appendChild(prog);
+
   return li;
 }
 
