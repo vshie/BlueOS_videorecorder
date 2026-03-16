@@ -111,7 +111,12 @@ class HardwareController:
 
     def _set_pixel(self, r, g, b):
         if self._strip:
-            self._strip.setPixelColor(0, Color(r, g, b))
+            # Work around SPI bit-boundary bleed on GPIO 10: the LSB of each
+            # transmitted byte can leak into the MSB of the next byte.  Since
+            # bytes are sent R, G, B, an odd R value injects ~128 into Green
+            # and an odd G value injects ~128 into Blue.  Clearing the LSB of
+            # R and G prevents this with imperceptible color loss (max 1/255).
+            self._strip.setPixelColor(0, Color(r & 0xFE, g & 0xFE, b))
             self._strip.show()
         else:
             logger.debug(f"LED sim: ({r},{g},{b})")
