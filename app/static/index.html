@@ -842,6 +842,108 @@ function makeProgressBar() {
 }
 
 /* ── Video list ────────────────────────────── */
+function _fmtSize(bytes) {
+  if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+  if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
+  return bytes + ' B';
+}
+
+function _makeDirectLink(filename, url, size) {
+  const li = document.createElement('li');
+  li.style.cssText = 'padding:2px 0 2px 24px;display:flex;align-items:center;gap:6px';
+  const a = document.createElement('a');
+  a.href = url;
+  a.textContent = filename;
+  a.style.cssText = 'color:#1a73e8;cursor:pointer;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.84em';
+  a.title = 'Download ' + filename;
+  li.appendChild(a);
+  const sz = document.createElement('span');
+  sz.style.cssText = 'font-size:.75em;color:#888;flex-shrink:0;font-family:"SF Mono","Fira Code",monospace';
+  sz.textContent = _fmtSize(size);
+  li.appendChild(sz);
+  return li;
+}
+
+function _makeUsbSession(folder, files, deleteData, locationBadge) {
+  const frag = document.createDocumentFragment();
+  const li = document.createElement('li');
+  li.style.cssText = 'padding:4px 0;border-bottom:1px solid #eee';
+
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;gap:6px';
+
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.className = 'rec-check';
+  cb.style.cssText = 'width:14px;height:14px;flex-shrink:0;cursor:pointer;accent-color:#e53935';
+  cb.dataset.location = deleteData.location;
+  cb.dataset.id = deleteData.id;
+  cb.addEventListener('change', _updateDeleteBtn);
+  row.appendChild(cb);
+
+  const zipFile = files.find(f => f.name.endsWith('.zip'));
+  const otherFiles = files.filter(f => !f.name.endsWith('.zip'));
+
+  if (zipFile) {
+    const a = document.createElement('a');
+    a.href = '/download_usb/' + encodeURIComponent(folder) + '/' + encodeURIComponent(zipFile.name);
+    a.textContent = folder;
+    a.style.cssText = 'color:#1a73e8;cursor:pointer;font-weight:600;font-size:.88em;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    a.title = 'Download ' + zipFile.name;
+    row.appendChild(a);
+    const sz = document.createElement('span');
+    sz.style.cssText = 'font-size:.75em;color:#888;flex-shrink:0;font-family:"SF Mono","Fira Code",monospace';
+    sz.textContent = _fmtSize(zipFile.size);
+    row.appendChild(sz);
+  } else {
+    const lbl = document.createElement('strong');
+    lbl.style.cssText = 'font-size:.88em;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    lbl.textContent = folder;
+    row.appendChild(lbl);
+    const pending = document.createElement('span');
+    pending.style.cssText = 'font-size:.72em;color:#999;flex-shrink:0;font-style:italic';
+    pending.textContent = 'zip pending';
+    row.appendChild(pending);
+  }
+
+  if (locationBadge) {
+    const loc = document.createElement('span');
+    loc.style.cssText = 'font-size:.72em;padding:1px 5px;border-radius:3px;font-weight:600;flex-shrink:0;' +
+      (locationBadge === 'usb' ? 'background:#e8f5e9;color:#2e7d32' : 'background:#e3f2fd;color:#1565c0');
+    loc.textContent = locationBadge === 'usb' ? 'USB' : 'SD';
+    row.appendChild(loc);
+  }
+
+  if (otherFiles.length > 0) {
+    const tog = document.createElement('button');
+    tog.textContent = '▸';
+    tog.title = 'Show individual files';
+    tog.style.cssText = 'border:none;background:none;cursor:pointer;font-size:.9em;color:#888;padding:0 2px;flex-shrink:0';
+    row.appendChild(tog);
+    li.appendChild(row);
+    frag.appendChild(li);
+
+    const detail = document.createElement('ul');
+    detail.style.cssText = 'list-style:none;display:none';
+    otherFiles.forEach(f => {
+      const fUrl = '/download_usb/' + encodeURIComponent(folder) + '/' + encodeURIComponent(f.name);
+      detail.appendChild(_makeDirectLink(f.name, fUrl, f.size));
+    });
+    frag.appendChild(detail);
+
+    tog.onclick = () => {
+      const open = detail.style.display !== 'none';
+      detail.style.display = open ? 'none' : '';
+      tog.textContent = open ? '▸' : '▾';
+    };
+  } else {
+    li.appendChild(row);
+    frag.appendChild(li);
+  }
+  return frag;
+}
+
 function _makeListItem(label, title, url, zipName, badgeText, locationBadge, deleteData) {
   const li = document.createElement('li');
   li.style.cssText = 'padding:4px 0;border-bottom:1px solid #eee';
@@ -934,6 +1036,8 @@ async function loadVideoList() {
   const d = await api('/list');
   const ul = document.getElementById('videoList');
   ul.innerHTML = '';
+  const selAll = document.getElementById('selectAllRec');
+  if (selAll) { selAll.checked = false; selAll.indeterminate = false; }
   const nf = document.getElementById('noFiles');
   const sessions = d.sessions || [];
   const stills = d.stills_sessions || [];
@@ -946,19 +1050,14 @@ async function loadVideoList() {
   const hasUsb = usbSessions.length > 0 || usbStills.length > 0;
   const hasBoth = hasUsb && (sessions.length > 0 || stills.length > 0);
 
-  // USB recordings first (most recent deployment recordings)
+  // USB recordings — zip link when ready, expandable individual files
   usbSessions.forEach(s => {
-    const base = s.video.replace(/\.(ts|mp4)$/, '');
     const folder = s.usb_folder;
-    const zipName = folder + '.zip';
-    const url = '/download_usb_zip/' + encodeURIComponent(folder);
-    const title = 'Download from USB: ' + [s.video].concat(s.sidecars||[]).join(', ');
-    ul.appendChild(_makeListItem(base, title, url, zipName, '(.zip)', hasBoth ? 'usb' : null, {location:'usb', id:folder}));
+    ul.appendChild(_makeUsbSession(folder, s.files || [], {location:'usb', id:folder}, hasBoth ? 'usb' : null));
   });
   usbStills.forEach(s => {
-    const url = '/download_usb_zip/' + encodeURIComponent(s);
-    const title = 'Download stills from USB';
-    ul.appendChild(_makeListItem(s, title, url, s + '.zip', '(stills .zip)', hasBoth ? 'usb' : null, {location:'usb', id:s}));
+    const folder = s.folder || s;
+    ul.appendChild(_makeUsbSession(folder, s.files || [], {location:'usb', id:folder}, hasBoth ? 'usb' : null));
   });
 
   // Local SD recordings

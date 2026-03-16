@@ -834,6 +834,74 @@ def _remux_usb(ts_path, ts_size, usb_rec_dir, show_led):
     return ts_path
 
 
+def _build_session_zip(folder_path):
+    """Create a .zip of all files in *folder_path* (in-place, next to the files).
+
+    Uses the remux_* globals for progress feedback so the UI shows a progress bar.
+    Skips any pre-existing .zip to avoid re-zipping.  Returns the zip path or None.
+    """
+    global remux_active, remux_filename, remux_progress, remux_stage
+
+    folder_name = os.path.basename(folder_path)
+    zip_path = os.path.join(folder_path, folder_name + ".zip")
+
+    if os.path.exists(zip_path):
+        logger.info(f"Session zip already exists: {zip_path}")
+        return zip_path
+
+    files = []
+    for f in sorted(os.listdir(folder_path)):
+        fp = os.path.join(folder_path, f)
+        if os.path.isfile(fp) and not f.endswith(".zip"):
+            files.append((f, fp, os.path.getsize(fp)))
+    if not files:
+        return None
+
+    total_bytes = sum(sz for _, _, sz in files)
+    logger.info(f"Building session zip: {zip_path}  ({len(files)} files, {total_bytes / 1048576:.1f} MB)")
+
+    remux_filename = folder_name + ".zip"
+    remux_progress = 0
+    remux_stage = "Building session zip"
+    remux_active = True
+    show_led = not recording
+    if show_led:
+        hw.flash_led(0, 200, 255, rate_hz=0.5)
+
+    STORED_EXTS = {".ts", ".mp4", ".jpg", ".jpeg", ".png"}
+    written = 0
+    try:
+        tmp_path = zip_path + ".tmp"
+        with zipfile.ZipFile(tmp_path, "w") as zf:
+            for fname, fpath, fsize in files:
+                ext = os.path.splitext(fname)[1].lower()
+                method = zipfile.ZIP_STORED if ext in STORED_EXTS else zipfile.ZIP_DEFLATED
+                zf.write(fpath, fname, compress_type=method)
+                written += fsize
+                if total_bytes > 0:
+                    remux_progress = min(99, int(written * 100 / total_bytes))
+        os.rename(tmp_path, zip_path)
+        remux_progress = 100
+        logger.info(f"Session zip complete: {zip_path}")
+        return zip_path
+    except Exception as e:
+        logger.error(f"Session zip failed: {e}")
+        for p in (zip_path, zip_path + ".tmp"):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        return None
+    finally:
+        remux_active = False
+        remux_filename = ""
+        remux_progress = 0
+        remux_stage = ""
+        if show_led:
+            hw.led_idle()
+
+
 def _stop_recording_internal():
     global gst_process, recording, start_time, current_video_file
     global current_ass_file, current_events_file
@@ -883,6 +951,7 @@ def _stop_recording_internal():
 
     was_usb = usb_recording
     usb_rec_dir = recording_base_dir
+    saved_stills_dir = stills_dir
 
     recording = False
     start_time = None
@@ -913,6 +982,11 @@ def _stop_recording_internal():
                     f.write(json.dumps(evt) + "\n")
             except Exception:
                 pass
+
+    if was_usb and usb_rec_dir and os.path.isdir(usb_rec_dir):
+        _build_session_zip(usb_rec_dir)
+    elif was_usb and saved_stills_dir and os.path.isdir(saved_stills_dir):
+        _build_session_zip(saved_stills_dir)
 
     logger.info("Recording stopped")
 
@@ -1064,14 +1138,25 @@ def list_videos():
                     for ext in (".ass", "_events.ndjson"):
                         if base + ext in folder_files:
                             sidecars.append(base + ext)
+                    all_files = []
+                    for f in sorted(folder_files):
+                        fp = os.path.join(folder_path, f)
+                        if os.path.isfile(fp):
+                            all_files.append({"name": f, "size": os.path.getsize(fp)})
                     usb_sessions.append({
                         "video": v,
                         "sidecars": sidecars,
                         "location": "usb",
                         "usb_folder": folder,
+                        "files": all_files,
                     })
                 elif has_session_json:
-                    usb_stills.append(folder)
+                    stills_files = []
+                    for f in sorted(folder_files):
+                        fp = os.path.join(folder_path, f)
+                        if os.path.isfile(fp):
+                            stills_files.append({"name": f, "size": os.path.getsize(fp)})
+                    usb_stills.append({"folder": folder, "files": stills_files})
 
         return jsonify({
             "videos": videos,
@@ -1160,42 +1245,6 @@ def download_stills(dirname):
             },
         )
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
-
-
-@app.route("/download_usb_zip/<folder>")
-def download_usb_zip(folder):
-    """Bundle all files in a USB DropCam session folder into a zip."""
-    try:
-        folder = os.path.basename(folder)
-        dir_path = os.path.join(
-            usb_storage.USB_MOUNT_POINT, usb_storage.DROPCAM_DIR, folder
-        )
-        if not os.path.isdir(dir_path):
-            return jsonify({"success": False, "message": "USB folder not found"}), 404
-
-        STORED_EXTS = {".ts", ".mp4", ".jpg", ".jpeg", ".png"}
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w") as zf:
-            for f in sorted(os.listdir(dir_path)):
-                full = os.path.join(dir_path, f)
-                if not os.path.isfile(full):
-                    continue
-                ext = os.path.splitext(f)[1].lower()
-                method = zipfile.ZIP_STORED if ext in STORED_EXTS else zipfile.ZIP_DEFLATED
-                zf.write(full, os.path.join(folder, f), compress_type=method)
-        data = buf.getvalue()
-        zip_name = folder + ".zip"
-        return Response(
-            data,
-            mimetype="application/zip",
-            headers={
-                "Content-Disposition": f'attachment; filename="{zip_name}"',
-                "Content-Length": str(len(data)),
-            },
-        )
-    except Exception as e:
-        logger.error(f"USB zip download error: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 
