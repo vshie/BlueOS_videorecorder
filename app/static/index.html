@@ -297,7 +297,10 @@ hr{border:none;border-top:1px solid #eee;margin:8px 0}
           <input type="checkbox" id="selectAllRec" onchange="toggleSelectAll(this)" title="Select all" style="width:14px;height:14px;cursor:pointer;accent-color:#e53935">
           <h3 style="margin:0">Recorded Files</h3>
         </div>
-        <button class="btn-danger btn-sm" id="btnDeleteSelected" onclick="deleteSelectedRecordings()" disabled>Delete Selected</button>
+        <div style="display:flex;gap:4px">
+          <button class="btn-primary btn-sm" id="btnProcessSelected" onclick="processSelectedRecordings()" disabled>Process</button>
+          <button class="btn-danger btn-sm" id="btnDeleteSelected" onclick="deleteSelectedRecordings()" disabled>Delete Selected</button>
+        </div>
       </div>
       <ul id="videoList" style="list-style:none;margin-top:6px"></ul>
       <div id="noFiles" class="text-muted mt-8">No recordings yet.</div>
@@ -872,7 +875,8 @@ function _makeDirectLink(filename, url, size) {
   return li;
 }
 
-function _makeUsbSession(folder, files, deleteData, locationBadge) {
+function _makeUsbSession(folder, files, deleteData, locationBadge, videoFile) {
+  const isTs = videoFile && videoFile.endsWith('.ts');
   const frag = document.createDocumentFragment();
   const li = document.createElement('li');
   li.style.cssText = 'padding:4px 0;border-bottom:1px solid #eee';
@@ -886,7 +890,8 @@ function _makeUsbSession(folder, files, deleteData, locationBadge) {
   cb.style.cssText = 'width:14px;height:14px;flex-shrink:0;cursor:pointer;accent-color:#e53935';
   cb.dataset.location = deleteData.location;
   cb.dataset.id = deleteData.id;
-  cb.addEventListener('change', _updateDeleteBtn);
+  cb.dataset.ts = isTs ? '1' : '';
+  cb.addEventListener('change', _updateSelectionBtns);
   row.appendChild(cb);
 
   const zipFile = files.find(f => f.name.endsWith('.zip'));
@@ -912,6 +917,13 @@ function _makeUsbSession(folder, files, deleteData, locationBadge) {
     pending.style.cssText = 'font-size:.72em;color:#999;flex-shrink:0;font-style:italic';
     pending.textContent = 'zip pending';
     row.appendChild(pending);
+  }
+
+  if (isTs) {
+    const tsBadge = document.createElement('span');
+    tsBadge.style.cssText = 'font-size:.68em;padding:1px 5px;border-radius:3px;font-weight:600;flex-shrink:0;background:#fff3cd;color:#856404';
+    tsBadge.textContent = '.ts';
+    row.appendChild(tsBadge);
   }
 
   if (locationBadge) {
@@ -951,11 +963,11 @@ function _makeUsbSession(folder, files, deleteData, locationBadge) {
   return frag;
 }
 
-function _makeListItem(label, title, url, zipName, badgeText, locationBadge, deleteData) {
+function _makeListItem(label, title, url, zipName, badgeText, locationBadge, deleteData, videoFile) {
+  const isTs = videoFile && videoFile.endsWith('.ts');
   const li = document.createElement('li');
   li.style.cssText = 'padding:4px 0;border-bottom:1px solid #eee';
 
-  // Inline row: checkbox + link + badges
   const row = document.createElement('div');
   row.style.cssText = 'display:flex;align-items:center;gap:6px';
 
@@ -965,7 +977,8 @@ function _makeListItem(label, title, url, zipName, badgeText, locationBadge, del
   cb.style.cssText = 'width:14px;height:14px;flex-shrink:0;cursor:pointer;accent-color:#e53935';
   cb.dataset.location = deleteData.location;
   cb.dataset.id = deleteData.id;
-  cb.addEventListener('change', _updateDeleteBtn);
+  cb.dataset.ts = isTs ? '1' : '';
+  cb.addEventListener('change', _updateSelectionBtns);
   row.appendChild(cb);
 
   const a = document.createElement('a');
@@ -974,6 +987,13 @@ function _makeListItem(label, title, url, zipName, badgeText, locationBadge, del
   a.style.cssText = 'color:#1a73e8;cursor:pointer;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
   a.title = title;
   row.appendChild(a);
+
+  if (isTs) {
+    const tsBadge = document.createElement('span');
+    tsBadge.style.cssText = 'font-size:.68em;padding:1px 5px;border-radius:3px;font-weight:600;flex-shrink:0;background:#fff3cd;color:#856404';
+    tsBadge.textContent = '.ts';
+    row.appendChild(tsBadge);
+  }
 
   if (locationBadge) {
     const loc = document.createElement('span');
@@ -998,24 +1018,32 @@ function _makeListItem(label, title, url, zipName, badgeText, locationBadge, del
   return li;
 }
 
-function _updateDeleteBtn() {
+function _updateSelectionBtns() {
   const boxes = document.querySelectorAll('.rec-check');
-  const checked = document.querySelectorAll('.rec-check:checked').length;
-  const btn = document.getElementById('btnDeleteSelected');
-  if (btn) {
-    btn.disabled = checked === 0;
-    btn.textContent = checked > 0 ? `Delete Selected (${checked})` : 'Delete Selected';
+  const checkedAll = Array.from(document.querySelectorAll('.rec-check:checked'));
+  const checkedCount = checkedAll.length;
+  const tsCount = checkedAll.filter(c => c.dataset.ts === '1').length;
+
+  const btnDel = document.getElementById('btnDeleteSelected');
+  if (btnDel) {
+    btnDel.disabled = checkedCount === 0;
+    btnDel.textContent = checkedCount > 0 ? `Delete (${checkedCount})` : 'Delete Selected';
+  }
+  const btnProc = document.getElementById('btnProcessSelected');
+  if (btnProc) {
+    btnProc.disabled = tsCount === 0;
+    btnProc.textContent = tsCount > 0 ? `Process (${tsCount})` : 'Process';
   }
   const selAll = document.getElementById('selectAllRec');
   if (selAll) {
-    selAll.checked = boxes.length > 0 && checked === boxes.length;
-    selAll.indeterminate = checked > 0 && checked < boxes.length;
+    selAll.checked = boxes.length > 0 && checkedCount === boxes.length;
+    selAll.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
   }
 }
 
 function toggleSelectAll(cb) {
   document.querySelectorAll('.rec-check').forEach(c => c.checked = cb.checked);
-  _updateDeleteBtn();
+  _updateSelectionBtns();
 }
 
 async function deleteSelectedRecordings() {
@@ -1035,7 +1063,28 @@ async function deleteSelectedRecordings() {
     loadVideoList();
   } else {
     alert(d.message || 'Delete failed');
-    _updateDeleteBtn();
+    _updateSelectionBtns();
+  }
+}
+
+async function processSelectedRecordings() {
+  const checked = Array.from(document.querySelectorAll('.rec-check:checked'))
+    .filter(c => c.dataset.ts === '1');
+  if (checked.length === 0) return;
+  const items = checked.map(c => ({location: c.dataset.location, id: c.dataset.id}));
+  const btn = document.getElementById('btnProcessSelected');
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  const d = await api('/recordings/process', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({items})
+  });
+  if (d.success) {
+    btn.textContent = `Processing ${d.count}…`;
+  } else {
+    alert(d.message || 'Process failed');
+    _updateSelectionBtns();
   }
 }
 
@@ -1060,11 +1109,11 @@ async function loadVideoList() {
   // USB recordings — zip link when ready, expandable individual files
   usbSessions.forEach(s => {
     const folder = s.usb_folder;
-    ul.appendChild(_makeUsbSession(folder, s.files || [], {location:'usb', id:folder}, hasBoth ? 'usb' : null));
+    ul.appendChild(_makeUsbSession(folder, s.files || [], {location:'usb', id:folder}, hasBoth ? 'usb' : null, s.video));
   });
   usbStills.forEach(s => {
     const folder = s.folder || s;
-    ul.appendChild(_makeUsbSession(folder, s.files || [], {location:'usb', id:folder}, hasBoth ? 'usb' : null));
+    ul.appendChild(_makeUsbSession(folder, s.files || [], {location:'usb', id:folder}, hasBoth ? 'usb' : null, ''));
   });
 
   // Local SD recordings
@@ -1073,15 +1122,15 @@ async function loadVideoList() {
     const zipName = base + '.zip';
     const url = '/download/' + zipName;
     const title = 'Download zip: ' + [s.video].concat(s.sidecars||[]).join(', ');
-    ul.appendChild(_makeListItem(base, title, url, zipName, '(.zip)', hasBoth ? 'sd' : null, {location:'local', id:base}));
+    ul.appendChild(_makeListItem(base, title, url, zipName, '(.zip)', hasBoth ? 'sd' : null, {location:'local', id:base}, s.video));
   });
   stills.forEach(s => {
     const url = '/download_stills/' + s;
     const title = 'Download stills as zip';
-    ul.appendChild(_makeListItem(s, title, url, s + '.zip', '(stills .zip)', hasBoth ? 'sd' : null, {location:'local', id:s}));
+    ul.appendChild(_makeListItem(s, title, url, s + '.zip', '(stills .zip)', hasBoth ? 'sd' : null, {location:'local', id:s}, ''));
   });
 
-  _updateDeleteBtn();
+  _updateSelectionBtns();
 }
 
 /* ── Delete recordings (removed: deleteAll modal replaced by deleteSelected) */

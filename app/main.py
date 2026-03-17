@@ -1528,6 +1528,58 @@ def route_delete_selected_recordings():
     return jsonify({"success": True, "deleted": deleted, "errors": errors})
 
 
+# ── Process (remux) recordings ───────────────────────────────────────────
+
+@app.route("/recordings/process", methods=["POST"])
+def route_process_selected():
+    """Remux selected .ts recordings to .mp4 in a background thread."""
+    if recording:
+        return jsonify({"success": False, "message": "Cannot process while recording"}), 400
+    if remux_active:
+        return jsonify({"success": False, "message": "Processing already in progress"}), 400
+
+    data = request.get_json(silent=True) or {}
+    items = data.get("items", [])
+    ts_jobs = []
+    dropcam_dir = os.path.join(usb_storage.USB_MOUNT_POINT, usb_storage.DROPCAM_DIR)
+
+    for item in items:
+        location = item.get("location")
+        item_id = item.get("id", "")
+        if location == "local":
+            ts_path = os.path.join(VIDEO_DIR, item_id + ".ts")
+            if os.path.exists(ts_path):
+                ts_jobs.append({"path": ts_path, "was_usb": False, "usb_rec_dir": None})
+        elif location == "usb":
+            folder_path = os.path.join(dropcam_dir, item_id)
+            if os.path.isdir(folder_path):
+                for f in os.listdir(folder_path):
+                    if f.endswith(".ts"):
+                        ts_jobs.append({
+                            "path": os.path.join(folder_path, f),
+                            "was_usb": True,
+                            "usb_rec_dir": folder_path,
+                        })
+
+    if not ts_jobs:
+        return jsonify({"success": False, "message": "No unprocessed .ts files found"}), 404
+
+    def _process_batch():
+        for job in ts_jobs:
+            mp4_path = _remux_to_mp4(job["path"], was_usb=job["was_usb"],
+                                     usb_rec_dir=job["usb_rec_dir"])
+            ass_path = os.path.splitext(job["path"])[0] + ".ass"
+            if os.path.exists(ass_path):
+                dur, _ = get_video_duration(mp4_path)
+                if dur:
+                    adjust_ass_timing(ass_path, dur)
+            if job["was_usb"] and job["usb_rec_dir"]:
+                _build_session_zip(job["usb_rec_dir"])
+
+    threading.Thread(target=_process_batch, daemon=True).start()
+    return jsonify({"success": True, "count": len(ts_jobs)})
+
+
 # ── Active recipe / auto-start config ────────────────────────────────────
 
 @app.route("/active_recipe", methods=["GET"])
