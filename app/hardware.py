@@ -1,10 +1,15 @@
 """
-Hardware control for DropCam: RGB LED (WS2812), camera servo, and lumen light.
+Hardware control for DropCam: RGB LED (WS2812), camera servo, lumen light,
+and auxiliary servo-style PWM outputs.
 
 GPIO assignments:
   - GPIO 10 (Pin 19, SPI MOSI): WS2812/NeoPixel RGB status LED
   - GPIO 21 (Pin 40): Camera tilt servo (1000-2000 us PWM)
   - GPIO 13 (Pin 33): Lumen light (1000-2000 us servo-style PWM)
+  - GPIO 20 (Pin 38): Camera focus (1000-2000 us servo-style PWM)
+  - GPIO 26 (Pin 37): Zoom (1000-2000 us servo-style PWM)
+  - GPIO 16 (Pin 36): Pan (1000-2000 us servo-style PWM)
+  - GPIO 19 (Pin 35): External servo (1000-2000 us servo-style PWM)
 """
 
 import math
@@ -19,6 +24,17 @@ logger = logging.getLogger(__name__)
 LED_GPIO = 10
 SERVO_GPIO = 21
 LIGHT_GPIO = 13
+FOCUS_GPIO = 20
+ZOOM_GPIO = 26
+PAN_GPIO = 16
+EXT_SERVO_GPIO = 19
+
+AUX_PWM_GPIOS = {
+    "focus": FOCUS_GPIO,
+    "zoom": ZOOM_GPIO,
+    "pan": PAN_GPIO,
+    "ext_servo": EXT_SERVO_GPIO,
+}
 
 # Servo PWM range (microseconds)
 SERVO_MIN_US = 1000
@@ -59,6 +75,7 @@ class HardwareController:
         self._servo_position = SERVO_MID_US
         self._light_brightness = 0
         self._light_on = False
+        self._aux_positions = {name: SERVO_MID_US for name in AUX_PWM_GPIOS}
         self._lock = threading.Lock()
         self._initialized = False
         self._led_color = (0, 0, 0)
@@ -363,6 +380,41 @@ class HardwareController:
         with self._lock:
             return self._light_on
 
+    # ── Auxiliary Servo PWM Outputs ────────────────────────────────────
+
+    def set_aux_pwm(self, channel, position_us):
+        """Set an auxiliary PWM channel. channel is one of: focus, zoom, pan, ext_servo."""
+        if channel not in AUX_PWM_GPIOS:
+            raise ValueError(f"Unknown aux PWM channel: {channel}")
+        position_us = max(SERVO_MIN_US, min(SERVO_MAX_US, int(position_us)))
+        gpio = AUX_PWM_GPIOS[channel]
+        with self._lock:
+            self._aux_positions[channel] = position_us
+        if self._pi:
+            self._pi.set_servo_pulsewidth(gpio, position_us)
+        else:
+            logger.debug(f"Aux PWM sim [{channel}]: {position_us} us")
+
+    def get_aux_pwm(self, channel):
+        if channel not in AUX_PWM_GPIOS:
+            raise ValueError(f"Unknown aux PWM channel: {channel}")
+        with self._lock:
+            return self._aux_positions[channel]
+
+    def get_all_aux_pwm(self):
+        with self._lock:
+            return dict(self._aux_positions)
+
+    def aux_pwm_off(self, channel):
+        """Stop sending pulses on an auxiliary channel (sets pulse width to 0)."""
+        if channel not in AUX_PWM_GPIOS:
+            raise ValueError(f"Unknown aux PWM channel: {channel}")
+        gpio = AUX_PWM_GPIOS[channel]
+        if self._pi:
+            self._pi.set_servo_pulsewidth(gpio, 0)
+        else:
+            logger.debug(f"Aux PWM sim [{channel}]: off")
+
     # ── Cleanup ──────────────────────────────────────────────────────────
 
     def cleanup(self):
@@ -373,6 +425,8 @@ class HardwareController:
             try:
                 self._pi.set_servo_pulsewidth(SERVO_GPIO, 0)
                 self._pi.set_servo_pulsewidth(LIGHT_GPIO, 0)
+                for gpio in AUX_PWM_GPIOS.values():
+                    self._pi.set_servo_pulsewidth(gpio, 0)
                 self._pi.stop()
             except Exception:
                 pass
