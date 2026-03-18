@@ -47,6 +47,8 @@ CONFIG_FILE = os.path.join(VIDEO_DIR, "recipes", "dropcam_config.json")
 _OLD_CONFIG_FILE = os.path.join(VIDEO_DIR, "dropcam_config.json")
 VIDEO_DEVICE = "/dev/video2"
 AUDIO_DEVICE = "hw:Camera,0"
+RTSP_ENDPOINT = "rtsp://admin:blue@192.168.2.10:554/stream_0"
+RADCAM_IP = "192.168.2.10"
 
 # ── Recording state ──────────────────────────────────────────────────────
 gst_process = None
@@ -84,11 +86,20 @@ image_rotation = 0
 usb_recording = False
 usb_failover_count = 0
 recording_base_dir = None
+radcam_mode = False
 
 # ── Config ───────────────────────────────────────────────────────────────
 
 def load_config():
-    defaults = {"active_recipe_id": None, "rotation_degrees": 0, "storage_preference": "usb"}
+    defaults = {
+        "active_recipe_id": None,
+        "rotation_degrees": 0,
+        "storage_preference": "usb",
+        "radcam_focus_us": 900,
+        "radcam_zoom_us": 900,
+        "radcam_pan_us": 1500,
+        "radcam_ext_servo_us": 1500,
+    }
 
     # One-time migration: move config from old location to recipes/ subfolder
     if not os.path.exists(CONFIG_FILE) and os.path.exists(_OLD_CONFIG_FILE):
@@ -137,15 +148,18 @@ storage_preference = _cfg.get("storage_preference", "usb")
 def create_ass_file(video_path):
     base = os.path.splitext(video_path)[0]
     ass_path = base + ".ass"
+    title = "RadCam Telemetry" if radcam_mode else "DropCam Telemetry"
+    res_x = "3840" if radcam_mode else "1920"
+    res_y = "2160" if radcam_mode else "1080"
     with open(ass_path, "w") as f:
         f.write("[Script Info]\n")
-        f.write("Title: DropCam Telemetry\n")
+        f.write(f"Title: {title}\n")
         f.write("ScriptType: v4.00+\n")
         f.write("WrapStyle: 0\n")
         f.write("ScaledBorderAndShadow: yes\n")
         f.write("YCbCr Matrix: TV.601\n")
-        f.write("PlayResX: 1920\n")
-        f.write("PlayResY: 1080\n\n")
+        f.write(f"PlayResX: {res_x}\n")
+        f.write(f"PlayResY: {res_y}\n\n")
         f.write("[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
                 "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
@@ -199,6 +213,9 @@ def update_ass_file():
                 parts.append(f"Time:{now_str}")
                 parts.append(f"Servo:{servo}us")
                 parts.append(f"Light:{light}%")
+                if radcam_mode:
+                    parts.append(f"Focus:{hw.get_aux_pwm('focus')}us")
+                    parts.append(f"Zoom:{hw.get_aux_pwm('zoom')}us")
                 parts.append(f"Recipe:{rname}")
                 parts.append(f"Rec:{ok}")
                 if cpu_t is not None:
@@ -423,15 +440,23 @@ def recording_health_watchdog():
 # ── Stills capture ───────────────────────────────────────────────────────
 
 def _capture_still(output_path, rotation=0):
-    """Capture a single JPEG frame from the USB camera."""
+    """Capture a single JPEG frame from the USB camera or RTSP stream."""
     try:
         tmp = output_path + ".tmp.jpg"
-        cmd = [
-            "ffmpeg", "-y", "-f", "v4l2", "-input_format", "h264",
-            "-video_size", "1920x1080", "-i", VIDEO_DEVICE,
-            "-frames:v", "1", "-q:v", "2", tmp,
-        ]
-        subprocess.run(cmd, timeout=10, capture_output=True)
+        if radcam_mode:
+            cmd = [
+                "ffmpeg", "-y", "-rtsp_transport", "tcp",
+                "-i", RTSP_ENDPOINT,
+                "-frames:v", "1", "-q:v", "2", tmp,
+            ]
+            subprocess.run(cmd, timeout=15, capture_output=True)
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-f", "v4l2", "-input_format", "h264",
+                "-video_size", "1920x1080", "-i", VIDEO_DEVICE,
+                "-frames:v", "1", "-q:v", "2", tmp,
+            ]
+            subprocess.run(cmd, timeout=10, capture_output=True)
         if rotation and rotation != 0:
             _rotate_image(tmp, rotation)
         os.rename(tmp, output_path)
@@ -545,19 +570,30 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
             basename = f"{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
         else:
             basename = f"recipe_{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
-        filename = basename + ".ts"
-        filepath = os.path.join(rec_dir, filename)
-        current_video_file = filepath
 
-        pipeline = (
-            f"v4l2src do-timestamp=true device={VIDEO_DEVICE} ! "
-            "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
-            "h264parse ! queue ! mux. "
-            f"alsasrc device={AUDIO_DEVICE} ! "
-            "audio/x-raw,format=S16LE,rate=44100,channels=1 ! "
-            "audioconvert ! audioresample ! avenc_aac ! queue ! mux. "
-            f"mpegtsmux name=mux ! filesink location={filepath}"
-        )
+        if radcam_mode:
+            filename = basename + ".mp4"
+            filepath = os.path.join(rec_dir, filename)
+            current_video_file = filepath
+            pipeline = (
+                f"rtspsrc location={RTSP_ENDPOINT} "
+                "protocols=tcp latency=500 retry=5 timeout=5000000 "
+                "! rtph265depay ! h265parse ! "
+                f"mp4mux fragment-duration=5000 ! filesink location={filepath}"
+            )
+        else:
+            filename = basename + ".ts"
+            filepath = os.path.join(rec_dir, filename)
+            current_video_file = filepath
+            pipeline = (
+                f"v4l2src do-timestamp=true device={VIDEO_DEVICE} ! "
+                "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
+                "h264parse ! queue ! mux. "
+                f"alsasrc device={AUDIO_DEVICE} ! "
+                "audio/x-raw,format=S16LE,rate=44100,channels=1 ! "
+                "audioconvert ! audioresample ! avenc_aac ! queue ! mux. "
+                f"mpegtsmux name=mux ! filesink location={filepath}"
+            )
         command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
 
         try:
@@ -966,7 +1002,8 @@ def _stop_recording_internal():
 
     if video_path and os.path.exists(video_path):
         time.sleep(2)
-        video_path = _remux_to_mp4(video_path, was_usb=was_usb, usb_rec_dir=usb_rec_dir)
+        if video_path.endswith(".ts"):
+            video_path = _remux_to_mp4(video_path, was_usb=was_usb, usb_rec_dir=usb_rec_dir)
         dur, st = get_video_duration(video_path)
         if dur and ass_path and os.path.exists(ass_path):
             adjust_ass_timing(ass_path, dur)
@@ -999,9 +1036,13 @@ def index():
 
 @app.route("/register_service")
 def register_service():
+    name = "RadCam" if radcam_mode else "DropCam"
+    desc = ("H265 4K RTSP recorder with servo, focus, and zoom control"
+            if radcam_mode
+            else "Standalone drop camera recorder with servo and light control")
     return jsonify({
-        "name": "DropCam",
-        "description": "Standalone drop camera recorder with servo and light control",
+        "name": name,
+        "description": desc,
         "icon": "mdi-video",
         "company": "Blue Robotics",
         "version": "1.0",
@@ -1089,6 +1130,7 @@ def route_status():
             "recording_to": "usb" if usb_recording else "local",
             "usb_failover_count": usb_failover_count,
             "storage_preference": storage_preference,
+            "radcam_mode": radcam_mode,
         })
         resp.headers["Cache-Control"] = "no-store"
         return resp
@@ -1305,6 +1347,9 @@ def route_telemetry():
         data["recording"] = recording
         data["light_on"] = hw.is_light_on()
         data["led_state"] = hw.get_led_state()
+        data["radcam_mode"] = radcam_mode
+        if radcam_mode:
+            data["aux_pwm"] = hw.get_all_aux_pwm()
         return jsonify(data)
     except Exception as e:
         logger.error(f"Telemetry error: {e}")
@@ -1420,6 +1465,31 @@ def route_led():
     else:
         hw.set_led_color(r, g, b)
     return jsonify({"success": True, "led_state": hw.get_led_state()})
+
+
+# ── Auxiliary PWM control ─────────────────────────────────────────────
+
+@app.route("/aux_pwm", methods=["GET"])
+def route_aux_pwm_get():
+    return jsonify({"success": True, "aux_pwm": hw.get_all_aux_pwm()})
+
+
+@app.route("/aux_pwm", methods=["POST"])
+def route_aux_pwm_set():
+    data = request.get_json(silent=True) or {}
+    channel = data.get("channel")
+    position_us = data.get("position_us")
+    if not channel or position_us is None:
+        return jsonify({"success": False, "message": "channel and position_us required"}), 400
+    try:
+        hw.set_aux_pwm(channel, int(position_us))
+    except ValueError as e:
+        return jsonify({"success": False, "message": str(e)}), 400
+    cfg = load_config()
+    config_key = f"radcam_{channel}_us"
+    cfg[config_key] = int(position_us)
+    save_config(cfg)
+    return jsonify({"success": True, "channel": channel, "position_us": hw.get_aux_pwm(channel)})
 
 
 # ── Recipes API ──────────────────────────────────────────────────────────
@@ -1655,15 +1725,37 @@ CAMERA_BOOT_RETRIES = 10
 CAMERA_RETRY_INTERVAL_S = 3
 
 
+def _ping_radcam():
+    """Try to reach the RadCam at 192.168.2.10. Returns True if reachable."""
+    try:
+        result = subprocess.run(
+            ["ping", "-c", "1", "-W", "2", RADCAM_IP],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception as e:
+        logger.debug(f"RadCam ping failed: {e}")
+        return False
+
+
 def _wait_for_camera():
-    """Block until the camera device is available or retries are exhausted."""
+    """Block until a camera source is available. Checks USB first, then RadCam RTSP."""
+    global radcam_mode
     for attempt in range(1, CAMERA_BOOT_RETRIES + 1):
         if os.path.exists(VIDEO_DEVICE):
             logger.info(f"Camera {VIDEO_DEVICE} available (attempt {attempt})")
+            radcam_mode = False
             return True
         logger.info(f"Waiting for camera {VIDEO_DEVICE} (attempt {attempt}/{CAMERA_BOOT_RETRIES})...")
         time.sleep(CAMERA_RETRY_INTERVAL_S)
-    logger.warning(f"Camera {VIDEO_DEVICE} not found after {CAMERA_BOOT_RETRIES} attempts")
+
+    logger.info(f"USB camera not found, checking for RadCam at {RADCAM_IP}...")
+    if _ping_radcam():
+        radcam_mode = True
+        logger.info(f"RadCam detected at {RADCAM_IP} — entering RadCam mode (H265 4K RTSP)")
+        return True
+
+    logger.warning(f"No camera source found (USB or RadCam)")
     return False
 
 
@@ -1726,13 +1818,22 @@ def _boot():
     logger.info(f"Boot config: active_recipe_id={rid!r}, rotation={cfg.get('rotation_degrees', 0)}, "
                 f"storage_preference={storage_preference!r}")
 
+    camera_ok = _wait_for_camera()
+
+    if radcam_mode:
+        logger.info("Applying saved RadCam PWM settings from config")
+        hw.set_aux_pwm("focus", cfg.get("radcam_focus_us", 900))
+        hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 900))
+        hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
+        hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
+        init_default_recipes(radcam=True)
+
     if rid:
         recipe = get_recipe(rid)
         if recipe:
             logger.info(f"Auto-start recipe: {recipe['name']} "
                         f"(delay {recipe.get('auto_start_delay_minutes', 1)} min, "
                         f"mode={recipe.get('mode', 'video')})")
-            camera_ok = _wait_for_camera()
             if not camera_ok:
                 logger.warning("Proceeding with auto-start despite camera not yet detected — "
                                "scheduler delay may allow it time to appear")
@@ -1742,7 +1843,8 @@ def _boot():
     else:
         logger.info("No active recipe configured (active_recipe_id is null), waiting for manual control")
 
-    logger.info("=== DropCam boot sequence complete ===")
+    mode_label = "RadCam" if radcam_mode else "DropCam"
+    logger.info(f"=== {mode_label} boot sequence complete ===")
 
 
 if __name__ == "__main__":

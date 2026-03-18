@@ -47,6 +47,7 @@ class Scheduler:
         self._state = "idle"
         self._lock = threading.Lock()
         self._remaining_s = 0
+        self._focus_sweep_thread = None
 
     def configure(self, *, start_fn, stop_fn, disk_free_fn, hw, capture_still_fn=None):
         self._start_recording_fn = start_fn
@@ -67,6 +68,8 @@ class Scheduler:
     def stop(self):
         """Cancel any running schedule."""
         self._stop.set()
+        if self._focus_sweep_thread and self._focus_sweep_thread.is_alive():
+            self._focus_sweep_thread.join(timeout=5)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=10)
         with self._lock:
@@ -135,6 +138,21 @@ class Scheduler:
 
             self._apply_recipe_led(recipe)
 
+            if recipe.get("radcam_focus_finder") and self._hw:
+                zoom_us = recipe.get("focus_finder_zoom_us", 900)
+                self._hw.set_aux_pwm("zoom", zoom_us)
+                start_us = recipe.get("focus_sweep_start_us", 870)
+                end_us = recipe.get("focus_sweep_end_us", 2130)
+                duration_s = recipe.get("duration_minutes", 2) * 60
+                self._focus_sweep_thread = threading.Thread(
+                    target=self._focus_sweep_loop,
+                    args=(start_us, end_us, duration_s),
+                    daemon=True,
+                )
+                self._focus_sweep_thread.start()
+                logger.info(f"Focus finder: sweeping {start_us}-{end_us} us over "
+                            f"{duration_s}s at zoom {zoom_us} us")
+
             if self._hw:
                 light_mode = recipe.get("light_mode", "off")
                 # Backward compat
@@ -189,6 +207,23 @@ class Scheduler:
             self._set_state("error")
             if self._hw:
                 self._hw.led_warning()
+
+    def _focus_sweep_loop(self, start_us, end_us, duration_s):
+        """Linearly increment focus PWM from start to end over duration."""
+        step_interval = 0.5
+        total_steps = max(int(duration_s / step_interval), 1)
+        for step in range(total_steps + 1):
+            if self._stop.is_set():
+                return
+            t = step / total_steps
+            pos = int(start_us + (end_us - start_us) * t)
+            try:
+                self._hw.set_aux_pwm("focus", pos)
+            except Exception as e:
+                logger.error(f"Focus sweep error: {e}")
+            if self._stop.wait(step_interval):
+                return
+        logger.info("Focus sweep complete")
 
     def _countdown(self, state, total_s, check_disk=False):
         """Wait for total_s seconds, updating remaining time. Checks disk if requested."""

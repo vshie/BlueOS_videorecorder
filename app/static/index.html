@@ -120,12 +120,74 @@ hr{border:none;border-top:1px solid #eee;margin:8px 0}
 .setup-content table{width:100%;border-collapse:collapse;margin:8px 0}
 .setup-content th,.setup-content td{border:1px solid #ddd;padding:5px 8px;text-align:left;font-size:.86em}
 .setup-content th{background:#f0f0f0}
+
+/* ── RadCam 80s Theme ────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
+
+body.radcam{font-family:'Orbitron','SF Mono',monospace;background:#0d0221;color:#e0d0ff}
+body.radcam h1,body.radcam h2,body.radcam h3{color:#ff6ec7}
+body.radcam h3{text-shadow:0 0 8px rgba(255,110,199,.4)}
+
+body.radcam .tabs{border-bottom-color:#2a1a4e}
+body.radcam .tab{color:#8a6fad}
+body.radcam .tab:hover{color:#ff6ec7}
+body.radcam .tab.active{color:#00fff7;border-bottom-color:#00fff7;text-shadow:0 0 10px rgba(0,255,247,.5)}
+
+body.radcam .card{background:rgba(20,10,50,.85);border:1px solid #2a1a5e;box-shadow:0 0 12px rgba(255,110,199,.1),inset 0 0 30px rgba(13,2,33,.5)}
+body.radcam .card:hover{box-shadow:0 0 18px rgba(0,255,247,.15),inset 0 0 30px rgba(13,2,33,.5)}
+
+body.radcam button,body.radcam .btn{border-color:#5a3a8a;background:rgba(30,15,60,.8);color:#e0d0ff}
+body.radcam button:hover,body.radcam .btn:hover{background:rgba(255,110,199,.15);border-color:#ff6ec7;box-shadow:0 0 10px rgba(255,110,199,.3)}
+body.radcam .btn-start{background:rgba(0,255,247,.15);color:#00fff7;border-color:#00fff7}
+body.radcam .btn-start:hover:not(:disabled){background:rgba(0,255,247,.3);box-shadow:0 0 12px rgba(0,255,247,.4)}
+body.radcam .btn-stop{background:rgba(255,0,128,.15);color:#ff0080;border-color:#ff0080}
+body.radcam .btn-stop:hover:not(:disabled){background:rgba(255,0,128,.3);box-shadow:0 0 12px rgba(255,0,128,.4)}
+body.radcam .btn-primary{background:rgba(0,255,247,.15);color:#00fff7;border-color:#00fff7}
+body.radcam .btn-primary:hover{background:rgba(0,255,247,.3);box-shadow:0 0 10px rgba(0,255,247,.3)}
+body.radcam .btn-danger{background:rgba(255,0,128,.15);color:#ff0080;border-color:#ff0080}
+body.radcam .btn-danger:hover{background:rgba(255,0,128,.3)}
+
+body.radcam select,body.radcam input[type=text],body.radcam input[type=number]{background:rgba(20,10,50,.9);border-color:#3a2a6e;color:#e0d0ff}
+body.radcam select:focus,body.radcam input:focus{border-color:#00fff7;box-shadow:0 0 6px rgba(0,255,247,.3)}
+body.radcam label{color:#9a8abf}
+body.radcam input[type=range]{accent-color:#ff6ec7}
+
+body.radcam .telem-item{background:rgba(30,15,60,.6);border:1px solid #2a1a4e}
+body.radcam .telem-label{color:#8a6fad}
+body.radcam .telem-value{color:#00fff7}
+
+body.radcam .status-dot.idle{background:#5a3a8a}
+body.radcam .status-dot.recording{background:#ff0080;box-shadow:0 0 10px rgba(255,0,128,.6)}
+body.radcam .status-dot.complete{background:#00fff7;box-shadow:0 0 10px rgba(0,255,247,.6)}
+
+body.radcam .recipe-item{background:rgba(20,10,50,.6);border-color:#2a1a5e}
+body.radcam .recipe-item .name{color:#ff6ec7}
+body.radcam .recipe-item .meta{color:#8a6fad}
+
+body.radcam .banner.warn{background:rgba(255,110,199,.1);border-color:#ff6ec7;color:#ff6ec7}
+body.radcam .banner.info{background:rgba(0,255,247,.1);border-color:#00fff7;color:#00fff7}
+
+body.radcam .text-muted{color:#6a5a8f}
+body.radcam .mono{font-family:'Orbitron','SF Mono',monospace}
+body.radcam hr{border-top-color:#2a1a4e}
+body.radcam .snapshot-area{background:#120835}
+body.radcam a{color:#00fff7}
+body.radcam .setup-content th{background:rgba(30,15,60,.8);color:#ff6ec7;border-color:#2a1a5e}
+body.radcam .setup-content td{border-color:#2a1a5e;color:#c0b0e0}
+
+body.radcam::after{content:'';position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9999;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.03) 2px,rgba(0,0,0,.03) 4px)}
+
+.radcam-logo{height:32px;vertical-align:middle;filter:invert(1)}
+.radcam-controls{display:none}
+body.radcam .radcam-controls{display:block}
+.radcam-only{display:none}
+body.radcam .radcam-only{display:block}
 </style>
 </head>
 <body>
 
 <div class="flex-between mb-8">
-  <h1>DropCam</h1>
+  <h1 id="appTitle">DropCam</h1>
   <span class="text-muted mono" id="sysTime">--</span>
 </div>
 
@@ -225,7 +287,7 @@ hr{border:none;border-top:1px solid #eee;margin:8px 0}
       <h3>Manual Controls</h3>
       <div class="form-row mt-8">
         <div class="form-group">
-          <label>Servo Position: <span id="servoVal" class="mono">1500</span> us</label>
+          <label>Tilt Servo: <span id="servoVal" class="mono">1500</span> us</label>
           <input type="range" id="servoSlider" min="1000" max="2000" step="10" value="1500" oninput="setServo(this.value)">
         </div>
         <div class="form-group narrow">
@@ -234,6 +296,18 @@ hr{border:none;border-top:1px solid #eee;margin:8px 0}
             <input type="range" id="lightSlider" min="0" max="100" step="5" value="0" oninput="setLight(this.value)" style="width:80px">
             <span class="mono" id="lightVal">0</span>%
             <button class="btn-sm" id="lightToggle" onclick="toggleLight()">Off</button>
+          </div>
+        </div>
+      </div>
+      <div class="radcam-controls">
+        <div class="form-row mt-8">
+          <div class="form-group">
+            <label>Focus: <span id="focusVal" class="mono">900</span> us</label>
+            <input type="range" id="focusSlider" min="500" max="2500" step="10" value="900" oninput="setAuxPwm('focus',this.value,'focusVal')">
+          </div>
+          <div class="form-group">
+            <label>Zoom: <span id="zoomVal" class="mono">900</span> us</label>
+            <input type="range" id="zoomSlider" min="500" max="2500" step="10" value="900" oninput="setAuxPwm('zoom',this.value,'zoomVal')">
           </div>
         </div>
       </div>
@@ -286,6 +360,8 @@ hr{border:none;border-top:1px solid #eee;margin:8px 0}
         <div class="telem-item"><div class="telem-label">Status LED</div><div class="telem-value" id="tLed">--</div></div>
         <div class="telem-item"><div class="telem-label">Servo</div><div class="telem-value" id="tServo">--</div></div>
         <div class="telem-item"><div class="telem-label">Lumen Light</div><div class="telem-value" id="tLight">--</div></div>
+        <div class="telem-item radcam-only"><div class="telem-label">Focus</div><div class="telem-value" id="tFocus">--</div></div>
+        <div class="telem-item radcam-only"><div class="telem-label">Zoom</div><div class="telem-value" id="tZoom">--</div></div>
         <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
       </div>
     </div>
@@ -389,7 +465,37 @@ hr{border:none;border-top:1px solid #eee;margin:8px 0}
         <div class="form-group narrow"><label>Loiter Time (s)</label><input type="number" id="rLoiterTime" value="0" min="0" max="3600" oninput="updateSweepCalc()"></div>
         <div class="form-group narrow"><label>Oscillations</label><input type="number" id="rOscillations" value="1" min="1" max="999" oninput="updateSweepCalc()"></div>
       </div>
-      <div id="sweepCalcInfo" class="text-muted mt-8" style="font-size:.88em;padding:6px 10px;background:#f8f9fa;border-radius:4px"></div>
+      <div id="sweepCalcInfo" class="text-muted mt-8" style="font-size:.88em;padding:6px 10px;background:#f8f9fa;border-radius:4px">      </div>
+    </div>
+
+    <div class="radcam-only" id="focusFinderSection">
+      <h3>Focus Finder (RadCam)</h3>
+      <div class="form-row">
+        <div class="form-group narrow">
+          <label><input type="checkbox" id="rFocusFinder" onchange="toggleFocusFinderFields()"> Enable Focus Finder</label>
+        </div>
+      </div>
+      <div id="focusFinderFields" style="display:none">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Zoom Level: <span id="rFocusFinderZoomVal" class="mono">900</span> us</label>
+            <input type="range" id="rFocusFinderZoom" min="500" max="2500" step="10" value="900" oninput="document.getElementById('rFocusFinderZoomVal').textContent=this.value">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Focus Sweep Start: <span id="rFocusSweepStartVal" class="mono">870</span> us</label>
+            <input type="range" id="rFocusSweepStart" min="500" max="2500" step="10" value="870" oninput="document.getElementById('rFocusSweepStartVal').textContent=this.value">
+          </div>
+          <div class="form-group">
+            <label>Focus Sweep End: <span id="rFocusSweepEndVal" class="mono">2130</span> us</label>
+            <input type="range" id="rFocusSweepEnd" min="500" max="2500" step="10" value="2130" oninput="document.getElementById('rFocusSweepEndVal').textContent=this.value">
+          </div>
+        </div>
+        <div style="background:rgba(0,255,247,.08);border-left:3px solid #00fff7;padding:8px 12px;font-size:.85em;border-radius:4px;margin:8px 0">
+          Recording will sweep focus from start to end over the recipe duration. Review the .ass subtitle file to find the best focus value for the selected zoom level.
+        </div>
+      </div>
     </div>
 
     <h3>Status LED</h3>
@@ -461,6 +567,7 @@ let isRecording = false;
 let recStartTime = null;
 let durationTimer = null;
 let lightIsOn = false;
+let isRadcamMode = false;
 
 /* ── Tabs ──────────────────────────────────── */
 document.querySelectorAll('.tab').forEach(t => {
@@ -670,6 +777,25 @@ async function pollTelemetry() {
   } else {
     document.getElementById('timeBanner').classList.add('hidden');
   }
+
+  if (d.radcam_mode && !isRadcamMode) {
+    isRadcamMode = true;
+    document.body.classList.add('radcam');
+    document.getElementById('appTitle').innerHTML = '<img src="/static/radcam_logo.png" alt="RadCam" class="radcam-logo">';
+    document.title = 'RadCam';
+  }
+  if (d.aux_pwm) {
+    document.getElementById('tFocus').textContent = d.aux_pwm.focus + ' us';
+    document.getElementById('tZoom').textContent = d.aux_pwm.zoom + ' us';
+    if (!document.getElementById('focusSlider')._userSet) {
+      document.getElementById('focusSlider').value = d.aux_pwm.focus;
+      document.getElementById('focusVal').textContent = d.aux_pwm.focus;
+    }
+    if (!document.getElementById('zoomSlider')._userSet) {
+      document.getElementById('zoomSlider').value = d.aux_pwm.zoom;
+      document.getElementById('zoomVal').textContent = d.aux_pwm.zoom;
+    }
+  }
 }
 
 /* ── Recording controls ────────────────────── */
@@ -764,6 +890,20 @@ function toggleLight() {
   lightIsOn = !lightIsOn;
   api('/light', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({on:lightIsOn})});
   document.getElementById('lightToggle').textContent = lightIsOn ? 'On' : 'Off';
+}
+
+/* ── Aux PWM (RadCam focus/zoom) ──────────── */
+let auxDebounce = {};
+function setAuxPwm(channel, val, labelId) {
+  document.getElementById(labelId).textContent = val;
+  const slider = channel === 'focus' ? document.getElementById('focusSlider') : document.getElementById('zoomSlider');
+  slider._userSet = true;
+  clearTimeout(auxDebounce[channel]);
+  auxDebounce[channel] = setTimeout(async () => {
+    await api('/aux_pwm', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({channel, position_us:+val})});
+    slider._userSet = false;
+    setTimeout(() => takeSnapshot(), 500);
+  }, 120);
 }
 
 /* ── LED configurator ─────────────────────── */
@@ -1199,10 +1339,18 @@ function newRecipe() {
   document.getElementById('rLightBrightVal').textContent = '0';
   document.getElementById('rLedColor').value = 'red';
   document.getElementById('rLedBlink').value = 'slow';
+  document.getElementById('rFocusFinder').checked = false;
+  document.getElementById('rFocusFinderZoom').value = 900;
+  document.getElementById('rFocusFinderZoomVal').textContent = '900';
+  document.getElementById('rFocusSweepStart').value = 870;
+  document.getElementById('rFocusSweepStartVal').textContent = '870';
+  document.getElementById('rFocusSweepEnd').value = 2130;
+  document.getElementById('rFocusSweepEndVal').textContent = '2130';
   document.getElementById('editorTitle').textContent = 'New Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
   toggleServoFields();
+  toggleFocusFinderFields();
   updateSweepCalc();
 }
 
@@ -1231,10 +1379,18 @@ async function editRecipe(id) {
   document.getElementById('rLightBrightVal').textContent = r.light_brightness_pct;
   document.getElementById('rLedColor').value = r.led_color || 'red';
   document.getElementById('rLedBlink').value = r.led_blink || 'slow';
+  document.getElementById('rFocusFinder').checked = !!r.radcam_focus_finder;
+  document.getElementById('rFocusFinderZoom').value = r.focus_finder_zoom_us || 900;
+  document.getElementById('rFocusFinderZoomVal').textContent = r.focus_finder_zoom_us || 900;
+  document.getElementById('rFocusSweepStart').value = r.focus_sweep_start_us || 870;
+  document.getElementById('rFocusSweepStartVal').textContent = r.focus_sweep_start_us || 870;
+  document.getElementById('rFocusSweepEnd').value = r.focus_sweep_end_us || 2130;
+  document.getElementById('rFocusSweepEndVal').textContent = r.focus_sweep_end_us || 2130;
   document.getElementById('editorTitle').textContent = 'Edit Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
   toggleServoFields();
+  toggleFocusFinderFields();
   updateSweepCalc();
 }
 
@@ -1259,6 +1415,10 @@ async function saveCurrentRecipe() {
     light_brightness_pct: +document.getElementById('rLightBright').value,
     led_color: document.getElementById('rLedColor').value,
     led_blink: document.getElementById('rLedBlink').value,
+    radcam_focus_finder: document.getElementById('rFocusFinder').checked,
+    focus_sweep_start_us: +document.getElementById('rFocusSweepStart').value,
+    focus_sweep_end_us: +document.getElementById('rFocusSweepEnd').value,
+    focus_finder_zoom_us: +document.getElementById('rFocusFinderZoom').value,
   };
   const id = document.getElementById('rId').value;
   if (id) body.id = id;
@@ -1283,6 +1443,10 @@ function toggleServoFields() {
   document.getElementById('servoEndGroup').style.display = fixed ? 'none' : '';
   document.getElementById('sweepFields').style.display = fixed ? 'none' : '';
   updateSweepCalc();
+}
+function toggleFocusFinderFields() {
+  const on = document.getElementById('rFocusFinder').checked;
+  document.getElementById('focusFinderFields').style.display = on ? '' : 'none';
 }
 function previewServo(val, labelId) {
   document.getElementById(labelId).textContent = val;
@@ -1329,11 +1493,15 @@ function loadSetup() {
 <table>
   <tr><th>Component</th><th>GPIO</th><th>Physical Pin</th><th>Notes</th></tr>
   <tr><td>RGB Status LED (WS2812)</td><td>GPIO 10 (SPI MOSI)</td><td>Pin 19</td><td>Single NeoPixel data line</td></tr>
-  <tr><td>Camera Tilt Servo</td><td>GPIO 21</td><td>Pin 40</td><td>1000-2000 &mu;s PWM</td></tr>
   <tr><td>Lumen Light</td><td>GPIO 13 (PWM1)</td><td>Pin 33</td><td>1000-2000 &mu;s servo PWM. Modes: always on, pause points only, or snapshot only</td></tr>
+  <tr><td>Camera Focus</td><td>GPIO 20</td><td>Pin 38</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
+  <tr><td>Zoom</td><td>GPIO 26</td><td>Pin 37</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
+  <tr><td>Pan</td><td>GPIO 16</td><td>Pin 36</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
+  <tr><td>External Servo</td><td>GPIO 19</td><td>Pin 35</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
+  <tr><td>Camera Tilt Servo</td><td>GPIO 21</td><td>Pin 40</td><td>1000-2000 &mu;s PWM</td></tr>
   <tr><td>USB Camera</td><td colspan="2">/dev/video2</td><td>H264 USB camera (1080p 30fps)</td></tr>
 </table>
-<p>All servo/light signals share a common ground with the Pi. The servo and light require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header.</p>
+<p>All servo/light/PWM signals share a common ground with the Pi. Servos, lights, and motors require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header.</p>
 
 <h3>3. LED Status Indicators</h3>
 <p>When retrieving a deployed camera, the LED tells you exactly what state the system is in:</p>

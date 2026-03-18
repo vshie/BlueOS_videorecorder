@@ -33,6 +33,10 @@ RECIPE_SCHEMA_DEFAULTS = {
     "led_color": "red",
     "led_blink": "slow",
     "still_prefix": "",
+    "radcam_focus_finder": False,
+    "focus_sweep_start_us": 870,
+    "focus_sweep_end_us": 2130,
+    "focus_finder_zoom_us": 900,
 }
 
 
@@ -125,6 +129,33 @@ DEFAULT_RECIPES = [
     },
 ]
 
+RADCAM_DEFAULT_RECIPES = [
+    {
+        "id": "radcam-focus-finder",
+        "name": "RadCam Focus Finder",
+        "mode": "video",
+        "still_interval_s": 1.0,
+        "duration_minutes": 2,
+        "auto_start_delay_minutes": 0,
+        "rotation_degrees": 0,
+        "servo_start_us": 1500,
+        "servo_end_us": 1500,
+        "servo_pause_points": 0,
+        "servo_loiter_time_s": 0,
+        "servo_oscillations": 1,
+        "servo_fixed": True,
+        "light_brightness_pct": 0,
+        "light_mode": "off",
+        "led_color": "cyan",
+        "led_blink": "fast",
+        "still_prefix": "",
+        "radcam_focus_finder": True,
+        "focus_sweep_start_us": 870,
+        "focus_sweep_end_us": 2130,
+        "focus_finder_zoom_us": 900,
+    },
+]
+
 
 def _ensure_dir():
     os.makedirs(RECIPES_DIR, exist_ok=True)
@@ -212,21 +243,51 @@ def validate_recipe(data):
         pfx = re.sub(r'[^a-zA-Z0-9_-]', '', str(data["still_prefix"]).strip())[:32]
         clean["still_prefix"] = pfx
 
+    if "radcam_focus_finder" in data:
+        clean["radcam_focus_finder"] = bool(data["radcam_focus_finder"])
+
+    for fld, lo, hi in [
+        ("focus_sweep_start_us", 500, 2500),
+        ("focus_sweep_end_us", 500, 2500),
+        ("focus_finder_zoom_us", 500, 2500),
+    ]:
+        if fld in data:
+            try:
+                val = int(float(data[fld]))
+                if val < lo or val > hi:
+                    errors.append(f"{fld} must be between {lo} and {hi}")
+                else:
+                    clean[fld] = val
+            except (ValueError, TypeError):
+                errors.append(f"{fld} must be a number")
+
     if "id" in data:
         clean["id"] = str(data["id"])
 
     return clean, errors
 
 
-def init_default_recipes():
-    """Create default recipe files if the recipes dir is empty."""
+def init_default_recipes(radcam=False):
+    """Create default recipe files if the recipes dir is empty.
+
+    When radcam=True, also ensure the RadCam-specific recipes exist.
+    """
     _ensure_dir()
     existing = list_recipes()
-    if existing:
-        return
-    for recipe in DEFAULT_RECIPES:
-        save_recipe(recipe, recipe["id"])
-    logger.info(f"Initialized {len(DEFAULT_RECIPES)} default recipes")
+    if not existing:
+        for recipe in DEFAULT_RECIPES:
+            save_recipe(recipe, recipe["id"])
+        logger.info(f"Initialized {len(DEFAULT_RECIPES)} default recipes")
+
+    if radcam:
+        existing_ids = {r["id"] for r in list_recipes()}
+        added = 0
+        for recipe in RADCAM_DEFAULT_RECIPES:
+            if recipe["id"] not in existing_ids:
+                save_recipe(recipe, recipe["id"])
+                added += 1
+        if added:
+            logger.info(f"Initialized {added} RadCam default recipe(s)")
 
 
 def list_recipes():
