@@ -37,6 +37,8 @@ RECIPE_SCHEMA_DEFAULTS = {
     "focus_sweep_start_us": 870,
     "focus_sweep_end_us": 2130,
     "focus_finder_zoom_us": 900,
+    "radcam_focus_us": 900,
+    "radcam_zoom_us": 900,
 }
 
 
@@ -250,6 +252,8 @@ def validate_recipe(data):
         ("focus_sweep_start_us", 500, 2500),
         ("focus_sweep_end_us", 500, 2500),
         ("focus_finder_zoom_us", 500, 2500),
+        ("radcam_focus_us", 500, 2500),
+        ("radcam_zoom_us", 500, 2500),
     ]:
         if fld in data:
             try:

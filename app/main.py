@@ -1492,6 +1492,27 @@ def route_aux_pwm_set():
     return jsonify({"success": True, "channel": channel, "position_us": hw.get_aux_pwm(channel)})
 
 
+# ── RadCam detection (manual) ────────────────────────────────────────────
+
+@app.route("/detect_radcam", methods=["POST"])
+def route_detect_radcam():
+    global radcam_mode
+    if radcam_mode:
+        return jsonify({"success": True, "message": "Already in RadCam mode"})
+    if not _ping_radcam():
+        return jsonify({"success": False, "message": f"RadCam not reachable at {RADCAM_IP}"}), 404
+    radcam_mode = True
+    logger.info(f"Manual RadCam detection succeeded — switching to RadCam mode")
+    cfg = load_config()
+    hw.set_aux_pwm("focus", cfg.get("radcam_focus_us", 900))
+    hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 900))
+    hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
+    hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
+    init_default_recipes(radcam=True)
+    register_service()
+    return jsonify({"success": True, "message": "RadCam detected, mode switched"})
+
+
 # ── Recipes API ──────────────────────────────────────────────────────────
 
 @app.route("/recipes", methods=["GET"])
@@ -1739,8 +1760,15 @@ def _ping_radcam():
 
 
 def _wait_for_camera():
-    """Block until a camera source is available. Checks USB first, then RadCam RTSP."""
+    """Block until a camera source is available. Pings RadCam first (fast), then USB retries."""
     global radcam_mode
+
+    logger.info(f"Checking for RadCam at {RADCAM_IP}...")
+    if _ping_radcam():
+        radcam_mode = True
+        logger.info(f"RadCam detected at {RADCAM_IP} — entering RadCam mode (H265 4K RTSP)")
+        return True
+
     for attempt in range(1, CAMERA_BOOT_RETRIES + 1):
         if os.path.exists(VIDEO_DEVICE):
             logger.info(f"Camera {VIDEO_DEVICE} available (attempt {attempt})")
@@ -1749,13 +1777,7 @@ def _wait_for_camera():
         logger.info(f"Waiting for camera {VIDEO_DEVICE} (attempt {attempt}/{CAMERA_BOOT_RETRIES})...")
         time.sleep(CAMERA_RETRY_INTERVAL_S)
 
-    logger.info(f"USB camera not found, checking for RadCam at {RADCAM_IP}...")
-    if _ping_radcam():
-        radcam_mode = True
-        logger.info(f"RadCam detected at {RADCAM_IP} — entering RadCam mode (H265 4K RTSP)")
-        return True
-
-    logger.warning(f"No camera source found (USB or RadCam)")
+    logger.warning("No camera source found (USB or RadCam)")
     return False
 
 

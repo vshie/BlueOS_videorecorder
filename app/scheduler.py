@@ -138,6 +138,14 @@ class Scheduler:
 
             self._apply_recipe_led(recipe)
 
+            if self._hw:
+                if "radcam_focus_us" in recipe:
+                    self._hw.set_aux_pwm("focus", recipe["radcam_focus_us"])
+                    logger.info(f"Recipe applied focus={recipe['radcam_focus_us']} us")
+                if "radcam_zoom_us" in recipe:
+                    self._hw.set_aux_pwm("zoom", recipe["radcam_zoom_us"])
+                    logger.info(f"Recipe applied zoom={recipe['radcam_zoom_us']} us")
+
             if recipe.get("radcam_focus_finder") and self._hw:
                 zoom_us = recipe.get("focus_finder_zoom_us", 900)
                 self._hw.set_aux_pwm("zoom", zoom_us)

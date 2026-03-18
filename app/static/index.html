@@ -178,17 +178,29 @@ body.radcam .setup-content td{border-color:#2a1a5e;color:#c0b0e0}
 body.radcam::after{content:'';position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9999;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.03) 2px,rgba(0,0,0,.03) 4px)}
 
 .radcam-logo{height:32px;vertical-align:middle;filter:invert(1)}
-.radcam-controls{display:none}
-body.radcam .radcam-controls{display:block}
 .radcam-only{display:none}
 body.radcam .radcam-only{display:block}
+body.radcam #btnDetectRadcam{display:none}
+
+/* Subtabs */
+.subtabs{display:flex;gap:2px}
+.subtab{padding:3px 10px;border:1px solid #ccc;border-radius:4px 4px 0 0;background:none;font-size:.8em;cursor:pointer}
+.subtab.active{background:#fff;border-bottom-color:#fff;font-weight:600}
+.subtab-content{display:none}
+.subtab-content.active{display:block}
+body.radcam .subtab{border-color:#5a3a8a;color:#8a6fad}
+body.radcam .subtab:hover{color:#ff6ec7}
+body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgba(20,10,50,.85);color:#00fff7;font-weight:600}
 </style>
 </head>
 <body>
 
 <div class="flex-between mb-8">
   <h1 id="appTitle">DropCam</h1>
-  <span class="text-muted mono" id="sysTime">--</span>
+  <div style="display:flex;align-items:center;gap:10px">
+    <button class="btn-sm" id="btnDetectRadcam" onclick="detectRadcam()">Detect RadCam</button>
+    <span class="text-muted mono" id="sysTime">--</span>
+  </div>
 </div>
 
 <div id="timeBanner" class="banner warn hidden">System clock may not be synchronized. Connect a device to the BlueOS WiFi AP and load this page to sync time.</div>
@@ -299,49 +311,63 @@ body.radcam .radcam-only{display:block}
           </div>
         </div>
       </div>
-      <div class="radcam-controls">
-        <div class="form-row mt-8">
-          <div class="form-group">
-            <label>Focus: <span id="focusVal" class="mono">900</span> us</label>
-            <input type="range" id="focusSlider" min="500" max="2500" step="10" value="900" oninput="setAuxPwm('focus',this.value,'focusVal')">
-          </div>
-          <div class="form-group">
-            <label>Zoom: <span id="zoomVal" class="mono">900</span> us</label>
-            <input type="range" id="zoomSlider" min="500" max="2500" step="10" value="900" oninput="setAuxPwm('zoom',this.value,'zoomVal')">
-          </div>
-        </div>
-      </div>
     </div>
 
-    <!-- LED Configurator -->
+    <!-- Adjustments (LED + Focus/Zoom tabs) -->
     <div class="card">
-      <h3>Status LED</h3>
-      <div class="form-row mt-8">
-        <div class="form-group">
-          <label>R: <span id="ledRVal" class="mono">0</span></label>
-          <input type="range" id="ledR" min="0" max="255" value="0" oninput="updateLedPreview()">
-        </div>
-        <div class="form-group">
-          <label>G: <span id="ledGVal" class="mono">0</span></label>
-          <input type="range" id="ledG" min="0" max="255" value="0" oninput="updateLedPreview()">
-        </div>
-        <div class="form-group">
-          <label>B: <span id="ledBVal" class="mono">0</span></label>
-          <input type="range" id="ledB" min="0" max="255" value="0" oninput="updateLedPreview()">
+      <div class="flex-between mb-8">
+        <h3>Adjustments</h3>
+        <div class="subtabs">
+          <button class="subtab active" data-subtab="led" onclick="switchSubtab(this)">LED</button>
+          <button class="subtab" data-subtab="focuszoom" onclick="switchSubtab(this)">Focus / Zoom</button>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
-        <div id="ledPreview" style="width:24px;height:24px;border-radius:50%;border:2px solid #ccc;background:#000;flex-shrink:0"></div>
-        <select id="ledMode" style="padding:3px 7px;border-radius:4px;border:1px solid #ccc;font-size:.85em">
-          <option value="solid">Solid</option>
-          <option value="breathe" selected>Breathe</option>
-          <option value="flash_slow">Flash Slow</option>
-          <option value="flash_fast">Flash Fast</option>
-          <option value="off">Off</option>
-        </select>
-        <button class="btn-primary btn-sm" onclick="applyLed()">Apply</button>
-        <button class="btn-sm" onclick="applyIdleLed()">Reset Idle</button>
-        <span id="ledStatus" style="font-size:.8em;color:#666"></span>
+      <div class="subtab-content active" id="subtab-led">
+        <div class="form-row mt-8">
+          <div class="form-group">
+            <label>R: <span id="ledRVal" class="mono">0</span></label>
+            <input type="range" id="ledR" min="0" max="255" value="0" oninput="updateLedPreview()">
+          </div>
+          <div class="form-group">
+            <label>G: <span id="ledGVal" class="mono">0</span></label>
+            <input type="range" id="ledG" min="0" max="255" value="0" oninput="updateLedPreview()">
+          </div>
+          <div class="form-group">
+            <label>B: <span id="ledBVal" class="mono">0</span></label>
+            <input type="range" id="ledB" min="0" max="255" value="0" oninput="updateLedPreview()">
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+          <div id="ledPreview" style="width:24px;height:24px;border-radius:50%;border:2px solid #ccc;background:#000;flex-shrink:0"></div>
+          <select id="ledMode" style="padding:3px 7px;border-radius:4px;border:1px solid #ccc;font-size:.85em">
+            <option value="solid">Solid</option>
+            <option value="breathe" selected>Breathe</option>
+            <option value="flash_slow">Flash Slow</option>
+            <option value="flash_fast">Flash Fast</option>
+            <option value="off">Off</option>
+          </select>
+          <button class="btn-primary btn-sm" onclick="applyLed()">Apply</button>
+          <button class="btn-sm" onclick="applyIdleLed()">Reset Idle</button>
+          <span id="ledStatus" style="font-size:.8em;color:#666"></span>
+        </div>
+      </div>
+      <div class="subtab-content" id="subtab-focuszoom">
+        <div class="form-group mt-8">
+          <label>Focus</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="range" id="focusSlider" min="500" max="2500" step="10" value="900" oninput="syncAuxInput('focus',this.value)">
+            <input type="number" id="focusInput" min="500" max="2500" step="10" value="900" style="width:70px" oninput="syncAuxSlider('focus',this.value)">
+            <span class="mono text-muted">us</span>
+          </div>
+        </div>
+        <div class="form-group mt-8">
+          <label>Zoom</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="range" id="zoomSlider" min="500" max="2500" step="10" value="900" oninput="syncAuxInput('zoom',this.value)">
+            <input type="number" id="zoomInput" min="500" max="2500" step="10" value="900" style="width:70px" oninput="syncAuxSlider('zoom',this.value)">
+            <span class="mono text-muted">us</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -466,6 +492,27 @@ body.radcam .radcam-only{display:block}
         <div class="form-group narrow"><label>Oscillations</label><input type="number" id="rOscillations" value="1" min="1" max="999" oninput="updateSweepCalc()"></div>
       </div>
       <div id="sweepCalcInfo" class="text-muted mt-8" style="font-size:.88em;padding:6px 10px;background:#f8f9fa;border-radius:4px">      </div>
+    </div>
+
+    <div class="radcam-only" id="recipeFocusZoomSection">
+      <h3>RadCam Optics</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Focus: <span id="rRecFocusVal" class="mono">900</span> us</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="range" id="rRecFocus" min="500" max="2500" step="10" value="900" oninput="document.getElementById('rRecFocusVal').textContent=this.value;document.getElementById('rRecFocusNum').value=this.value">
+            <input type="number" id="rRecFocusNum" min="500" max="2500" step="10" value="900" style="width:70px" oninput="document.getElementById('rRecFocusVal').textContent=this.value;document.getElementById('rRecFocus').value=this.value">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Zoom: <span id="rRecZoomVal" class="mono">900</span> us</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="range" id="rRecZoom" min="500" max="2500" step="10" value="900" oninput="document.getElementById('rRecZoomVal').textContent=this.value;document.getElementById('rRecZoomNum').value=this.value">
+            <input type="number" id="rRecZoomNum" min="500" max="2500" step="10" value="900" style="width:70px" oninput="document.getElementById('rRecZoomVal').textContent=this.value;document.getElementById('rRecZoom').value=this.value">
+          </div>
+        </div>
+      </div>
+      <div class="text-muted mt-8" style="font-size:.82em">These values will be applied when this recipe starts recording.</div>
     </div>
 
     <div class="radcam-only" id="focusFinderSection">
@@ -783,17 +830,18 @@ async function pollTelemetry() {
     document.body.classList.add('radcam');
     document.getElementById('appTitle').innerHTML = '<img src="/static/radcam_logo.png" alt="RadCam" class="radcam-logo">';
     document.title = 'RadCam';
+    switchSubtab(document.querySelector('[data-subtab="focuszoom"]'));
   }
   if (d.aux_pwm) {
     document.getElementById('tFocus').textContent = d.aux_pwm.focus + ' us';
     document.getElementById('tZoom').textContent = d.aux_pwm.zoom + ' us';
     if (!document.getElementById('focusSlider')._userSet) {
       document.getElementById('focusSlider').value = d.aux_pwm.focus;
-      document.getElementById('focusVal').textContent = d.aux_pwm.focus;
+      document.getElementById('focusInput').value = d.aux_pwm.focus;
     }
     if (!document.getElementById('zoomSlider')._userSet) {
       document.getElementById('zoomSlider').value = d.aux_pwm.zoom;
-      document.getElementById('zoomVal').textContent = d.aux_pwm.zoom;
+      document.getElementById('zoomInput').value = d.aux_pwm.zoom;
     }
   }
 }
@@ -894,9 +942,8 @@ function toggleLight() {
 
 /* ── Aux PWM (RadCam focus/zoom) ──────────── */
 let auxDebounce = {};
-function setAuxPwm(channel, val, labelId) {
-  document.getElementById(labelId).textContent = val;
-  const slider = channel === 'focus' ? document.getElementById('focusSlider') : document.getElementById('zoomSlider');
+function setAuxPwm(channel, val) {
+  const slider = document.getElementById(channel + 'Slider');
   slider._userSet = true;
   clearTimeout(auxDebounce[channel]);
   auxDebounce[channel] = setTimeout(async () => {
@@ -904,6 +951,44 @@ function setAuxPwm(channel, val, labelId) {
     slider._userSet = false;
     setTimeout(() => takeSnapshot(), 500);
   }, 120);
+}
+function syncAuxInput(channel, val) {
+  document.getElementById(channel + 'Input').value = val;
+  setAuxPwm(channel, val);
+}
+function syncAuxSlider(channel, val) {
+  document.getElementById(channel + 'Slider').value = val;
+  setAuxPwm(channel, val);
+}
+
+/* ── Subtab switching ────────────────────── */
+function switchSubtab(btn) {
+  const parent = btn.closest('.card');
+  parent.querySelectorAll('.subtab').forEach(t => t.classList.remove('active'));
+  parent.querySelectorAll('.subtab-content').forEach(c => c.classList.remove('active'));
+  btn.classList.add('active');
+  parent.querySelector('#subtab-' + btn.dataset.subtab).classList.add('active');
+}
+
+/* ── Detect RadCam (manual) ───────────────── */
+async function detectRadcam() {
+  const btn = document.getElementById('btnDetectRadcam');
+  btn.disabled = true;
+  btn.textContent = 'Detecting…';
+  const d = await api('/detect_radcam', {method:'POST'});
+  if (d.success) {
+    isRadcamMode = true;
+    document.body.classList.add('radcam');
+    document.getElementById('appTitle').innerHTML = '<img src="/static/radcam_logo.png" alt="RadCam" class="radcam-logo">';
+    document.title = 'RadCam';
+    btn.style.display = 'none';
+    switchSubtab(document.querySelector('[data-subtab="focuszoom"]'));
+    loadRecipes();
+  } else {
+    alert(d.message || 'RadCam not detected');
+    btn.disabled = false;
+    btn.textContent = 'Detect RadCam';
+  }
 }
 
 /* ── LED configurator ─────────────────────── */
@@ -1346,6 +1431,14 @@ function newRecipe() {
   document.getElementById('rFocusSweepStartVal').textContent = '870';
   document.getElementById('rFocusSweepEnd').value = 2130;
   document.getElementById('rFocusSweepEndVal').textContent = '2130';
+  const curFocus = document.getElementById('focusSlider').value || '900';
+  const curZoom = document.getElementById('zoomSlider').value || '900';
+  document.getElementById('rRecFocus').value = curFocus;
+  document.getElementById('rRecFocusNum').value = curFocus;
+  document.getElementById('rRecFocusVal').textContent = curFocus;
+  document.getElementById('rRecZoom').value = curZoom;
+  document.getElementById('rRecZoomNum').value = curZoom;
+  document.getElementById('rRecZoomVal').textContent = curZoom;
   document.getElementById('editorTitle').textContent = 'New Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
@@ -1386,6 +1479,14 @@ async function editRecipe(id) {
   document.getElementById('rFocusSweepStartVal').textContent = r.focus_sweep_start_us || 870;
   document.getElementById('rFocusSweepEnd').value = r.focus_sweep_end_us || 2130;
   document.getElementById('rFocusSweepEndVal').textContent = r.focus_sweep_end_us || 2130;
+  const rFocus = r.radcam_focus_us || 900;
+  const rZoom = r.radcam_zoom_us || 900;
+  document.getElementById('rRecFocus').value = rFocus;
+  document.getElementById('rRecFocusNum').value = rFocus;
+  document.getElementById('rRecFocusVal').textContent = rFocus;
+  document.getElementById('rRecZoom').value = rZoom;
+  document.getElementById('rRecZoomNum').value = rZoom;
+  document.getElementById('rRecZoomVal').textContent = rZoom;
   document.getElementById('editorTitle').textContent = 'Edit Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
@@ -1419,6 +1520,8 @@ async function saveCurrentRecipe() {
     focus_sweep_start_us: +document.getElementById('rFocusSweepStart').value,
     focus_sweep_end_us: +document.getElementById('rFocusSweepEnd').value,
     focus_finder_zoom_us: +document.getElementById('rFocusFinderZoom').value,
+    radcam_focus_us: +document.getElementById('rRecFocus').value,
+    radcam_zoom_us: +document.getElementById('rRecZoom').value,
   };
   const id = document.getElementById('rId').value;
   if (id) body.id = id;
