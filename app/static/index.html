@@ -446,9 +446,15 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         <label>Still Filename Prefix</label>
         <input type="text" id="rStillPrefix" maxlength="32" placeholder="e.g. site_A" pattern="[a-zA-Z0-9_-]*" title="Letters, numbers, underscore, hyphen only">
       </div>
-      <div class="form-group" style="min-width:14em;flex:1">
+      <div class="form-group" style="min-width:18em;flex:1.2">
         <label>Duration</label>
-        <input type="text" id="rDuration" value="30" placeholder="e.g. 90, 90 min, 4.65 hours" autocomplete="off" oninput="updateSweepCalc()" title="Minutes or hours — examples: 120, 90 min, 2h, 4.65 hours (max 32 hours)">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+          <input type="number" id="rDuration" value="30" min="0" step="any" style="width:6.5em" oninput="updateSweepCalc()" title="Recording length (use Minutes or Hours)">
+          <span style="display:inline-flex;align-items:center;gap:12px;font-size:.9em;white-space:nowrap">
+            <label style="font-weight:normal;margin:0;cursor:pointer"><input type="radio" name="rDurationUnit" id="rDurationUnitMin" value="minutes" checked onchange="onRecipeDurationUnitChange()"> Minutes</label>
+            <label style="font-weight:normal;margin:0;cursor:pointer"><input type="radio" name="rDurationUnit" id="rDurationUnitHr" value="hours" onchange="onRecipeDurationUnitChange()"> Hours</label>
+          </span>
+        </div>
       </div>
       <div class="form-group narrow">
         <label>Auto-Start Delay (min)</label>
@@ -1402,6 +1408,44 @@ function populateRecipeDropdown() {
 }
 function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 
+let recipeDurationUnitLast = 'minutes';
+
+function fmtRecipeDurationInput(x) {
+  if (x == null || Number.isNaN(x)) return '';
+  const n = Number(x);
+  if (Math.abs(n - Math.round(n)) < 1e-9) return String(Math.round(n));
+  const t = n.toFixed(4).replace(/\.?0+$/, '');
+  return t || '0';
+}
+
+function setRecipeDurationUnit(unit) {
+  recipeDurationUnitLast = unit;
+  document.getElementById('rDurationUnitMin').checked = unit === 'minutes';
+  document.getElementById('rDurationUnitHr').checked = unit === 'hours';
+}
+
+function onRecipeDurationUnitChange() {
+  const now = document.getElementById('rDurationUnitHr').checked ? 'hours' : 'minutes';
+  const inp = document.getElementById('rDuration');
+  const v = parseFloat(inp.value);
+  if (!Number.isNaN(v) && recipeDurationUnitLast !== now) {
+    if (recipeDurationUnitLast === 'minutes' && now === 'hours') {
+      inp.value = fmtRecipeDurationInput(v / 60);
+    } else {
+      inp.value = fmtRecipeDurationInput(v * 60);
+    }
+  }
+  recipeDurationUnitLast = now;
+  updateSweepCalc();
+}
+
+/** Duration in minutes from the recipe form (NaN if the number field is invalid). */
+function getRecipeDurationMinutesFromForm() {
+  const v = parseFloat(document.getElementById('rDuration').value);
+  if (Number.isNaN(v)) return NaN;
+  return document.getElementById('rDurationUnitHr').checked ? v * 60 : v;
+}
+
 function newRecipe() {
   document.getElementById('rId').value = '';
   document.getElementById('rName').value = '';
@@ -1409,6 +1453,7 @@ function newRecipe() {
   document.getElementById('rStillInterval').value = '1.0';
   document.getElementById('rStillPrefix').value = '';
   document.getElementById('rDuration').value = '30';
+  setRecipeDurationUnit('minutes');
   document.getElementById('rDelay').value = '1';
   document.getElementById('rRotation').value = '0';
   document.getElementById('rServoFixed').checked = true;
@@ -1456,7 +1501,9 @@ async function editRecipe(id) {
   document.getElementById('rMode').value = r.mode;
   document.getElementById('rStillInterval').value = r.still_interval_s;
   document.getElementById('rStillPrefix').value = r.still_prefix || '';
-  document.getElementById('rDuration').value = r.duration_minutes == null ? '30' : String(r.duration_minutes);
+  const dm = r.duration_minutes == null ? 30 : Number(r.duration_minutes);
+  document.getElementById('rDuration').value = fmtRecipeDurationInput(dm);
+  setRecipeDurationUnit('minutes');
   document.getElementById('rDelay').value = r.auto_start_delay_minutes;
   document.getElementById('rRotation').value = r.rotation_degrees;
   document.getElementById('rServoFixed').checked = r.servo_fixed;
@@ -1498,12 +1545,17 @@ async function editRecipe(id) {
 function cancelEditor() { document.getElementById('recipeEditor').classList.add('hidden'); }
 
 async function saveCurrentRecipe() {
+  const dm = getRecipeDurationMinutesFromForm();
+  if (Number.isNaN(dm) || dm <= 0) {
+    alert('Enter a valid duration (positive number).');
+    return;
+  }
   const body = {
     name: document.getElementById('rName').value,
     mode: document.getElementById('rMode').value,
     still_interval_s: +document.getElementById('rStillInterval').value,
     still_prefix: document.getElementById('rStillPrefix').value,
-    duration_minutes: document.getElementById('rDuration').value.trim(),
+    duration_minutes: dm,
     auto_start_delay_minutes: +document.getElementById('rDelay').value,
     rotation_degrees: +document.getElementById('rRotation').value,
     servo_fixed: document.getElementById('rServoFixed').checked,
@@ -1555,26 +1607,10 @@ function previewServo(val, labelId) {
   document.getElementById(labelId).textContent = val;
   api('/servo', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({position_us:+val})});
 }
-/** Parse recipe duration field; returns minutes or NaN (same rules as server). */
-function parseRecipeDuration(raw) {
-  if (raw == null || String(raw).trim() === '') return NaN;
-  if (typeof raw === 'number' && !Number.isNaN(raw)) return raw;
-  const s = String(raw).trim().toLowerCase();
-  let m;
-  if ((m = s.match(/^(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*$/)))
-    return parseFloat(m[1]) * 60;
-  if ((m = s.match(/^(\d+(?:\.\d+)?)\s*(?:minutes?|mins?)\s*$/)))
-    return parseFloat(m[1]);
-  if ((m = s.match(/^(\d+(?:\.\d+)?)\s*m\s*$/)))
-    return parseFloat(m[1]);
-  if ((m = s.match(/^(\d+(?:\.\d+)?)\s*$/)))
-    return parseFloat(m[1]);
-  return NaN;
-}
 function updateSweepCalc() {
   const el = document.getElementById('sweepCalcInfo');
   if (!el) return;
-  let duration = parseRecipeDuration(document.getElementById('rDuration').value);
+  let duration = getRecipeDurationMinutesFromForm();
   if (Number.isNaN(duration)) duration = 30;
   const pp = +document.getElementById('rPausePoints').value || 0;
   const loiter = +document.getElementById('rLoiterTime').value || 0;
@@ -1590,9 +1626,10 @@ function updateSweepCalc() {
   const sweep_per_leg = remaining / (2 * osc);
   const time_per_osc = 2 * sweep_per_leg + loiters_per_osc * loiter;
   const fmtMin = (s) => s >= 60 ? (s / 60).toFixed(1) + ' min' : s.toFixed(0) + 's';
-  const durLabel = duration >= 120 && duration % 60 < 0.05
-    ? (duration / 60).toFixed(2).replace(/\.?0+$/, '') + ' h'
-    : (Math.round(duration * 100) / 100) + ' min';
+  const hoursMode = document.getElementById('rDurationUnitHr').checked;
+  const durLabel = hoursMode
+    ? fmtRecipeDurationInput(duration / 60) + ' h'
+    : fmtRecipeDurationInput(duration) + ' min';
   el.textContent = 'Sweep speed: ' + fmtMin(sweep_per_leg) + ' per leg | '
     + fmtMin(time_per_osc) + ' per oscillation | '
     + osc + ' oscillation' + (osc !== 1 ? 's' : '') + ' in ' + durLabel;
