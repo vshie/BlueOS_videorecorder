@@ -446,9 +446,9 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         <label>Still Filename Prefix</label>
         <input type="text" id="rStillPrefix" maxlength="32" placeholder="e.g. site_A" pattern="[a-zA-Z0-9_-]*" title="Letters, numbers, underscore, hyphen only">
       </div>
-      <div class="form-group narrow">
-        <label>Duration (min)</label>
-        <input type="number" id="rDuration" value="30" min="1" max="480" oninput="updateSweepCalc()">
+      <div class="form-group" style="min-width:14em;flex:1">
+        <label>Duration</label>
+        <input type="text" id="rDuration" value="30" placeholder="e.g. 90, 90 min, 4.65 hours" autocomplete="off" oninput="updateSweepCalc()" title="Minutes or hours — examples: 120, 90 min, 2h, 4.65 hours (max 32 hours)">
       </div>
       <div class="form-group narrow">
         <label>Auto-Start Delay (min)</label>
@@ -1456,7 +1456,7 @@ async function editRecipe(id) {
   document.getElementById('rMode').value = r.mode;
   document.getElementById('rStillInterval').value = r.still_interval_s;
   document.getElementById('rStillPrefix').value = r.still_prefix || '';
-  document.getElementById('rDuration').value = r.duration_minutes;
+  document.getElementById('rDuration').value = r.duration_minutes == null ? '30' : String(r.duration_minutes);
   document.getElementById('rDelay').value = r.auto_start_delay_minutes;
   document.getElementById('rRotation').value = r.rotation_degrees;
   document.getElementById('rServoFixed').checked = r.servo_fixed;
@@ -1503,7 +1503,7 @@ async function saveCurrentRecipe() {
     mode: document.getElementById('rMode').value,
     still_interval_s: +document.getElementById('rStillInterval').value,
     still_prefix: document.getElementById('rStillPrefix').value,
-    duration_minutes: +document.getElementById('rDuration').value,
+    duration_minutes: document.getElementById('rDuration').value.trim(),
     auto_start_delay_minutes: +document.getElementById('rDelay').value,
     rotation_degrees: +document.getElementById('rRotation').value,
     servo_fixed: document.getElementById('rServoFixed').checked,
@@ -1555,10 +1555,27 @@ function previewServo(val, labelId) {
   document.getElementById(labelId).textContent = val;
   api('/servo', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({position_us:+val})});
 }
+/** Parse recipe duration field; returns minutes or NaN (same rules as server). */
+function parseRecipeDuration(raw) {
+  if (raw == null || String(raw).trim() === '') return NaN;
+  if (typeof raw === 'number' && !Number.isNaN(raw)) return raw;
+  const s = String(raw).trim().toLowerCase();
+  let m;
+  if ((m = s.match(/^(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*$/)))
+    return parseFloat(m[1]) * 60;
+  if ((m = s.match(/^(\d+(?:\.\d+)?)\s*(?:minutes?|mins?)\s*$/)))
+    return parseFloat(m[1]);
+  if ((m = s.match(/^(\d+(?:\.\d+)?)\s*m\s*$/)))
+    return parseFloat(m[1]);
+  if ((m = s.match(/^(\d+(?:\.\d+)?)\s*$/)))
+    return parseFloat(m[1]);
+  return NaN;
+}
 function updateSweepCalc() {
   const el = document.getElementById('sweepCalcInfo');
   if (!el) return;
-  const duration = +document.getElementById('rDuration').value || 30;
+  let duration = parseRecipeDuration(document.getElementById('rDuration').value);
+  if (Number.isNaN(duration)) duration = 30;
   const pp = +document.getElementById('rPausePoints').value || 0;
   const loiter = +document.getElementById('rLoiterTime').value || 0;
   const osc = Math.max(+document.getElementById('rOscillations').value || 1, 1);
@@ -1573,9 +1590,12 @@ function updateSweepCalc() {
   const sweep_per_leg = remaining / (2 * osc);
   const time_per_osc = 2 * sweep_per_leg + loiters_per_osc * loiter;
   const fmtMin = (s) => s >= 60 ? (s / 60).toFixed(1) + ' min' : s.toFixed(0) + 's';
+  const durLabel = duration >= 120 && duration % 60 < 0.05
+    ? (duration / 60).toFixed(2).replace(/\.?0+$/, '') + ' h'
+    : (Math.round(duration * 100) / 100) + ' min';
   el.textContent = 'Sweep speed: ' + fmtMin(sweep_per_leg) + ' per leg | '
     + fmtMin(time_per_osc) + ' per oscillation | '
-    + osc + ' oscillation' + (osc !== 1 ? 's' : '') + ' in ' + duration + ' min';
+    + osc + ' oscillation' + (osc !== 1 ? 's' : '') + ' in ' + durLabel;
 }
 
 /* ── Setup tab content ─────────────────────── */
@@ -1643,7 +1663,7 @@ function loadSetup() {
   <li>Still capture mode saves JPEG frames at the configured interval.</li>
   <li>Subtitle files (.ass) are generated alongside video recordings with system telemetry data.</li>
   <li>Recording stops automatically if disk space drops below <strong>1 GB</strong>.</li>
-  <li>Maximum recommended recording duration: <strong>8 hours</strong> (limited by SD card endurance and power supply).</li>
+  <li>Recipe duration is capped at <strong>32 hours</strong> for now (until field battery/runtime limits are confirmed). Storage, power, and SD endurance still apply.</li>
 </ul>
 
 <h3>7. File Management</h3>

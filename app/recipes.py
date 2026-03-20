@@ -15,11 +15,43 @@ logger = logging.getLogger(__name__)
 
 RECIPES_DIR = "/app/videorecordings/recipes"
 
+# Max recipe recording length (minutes). Raised from 8h while battery/runtime limits are TBD.
+RECIPE_MAX_DURATION_MINUTES = 32 * 60
+
+
+def parse_duration_to_minutes(value):
+    """Interpret user/API duration as minutes.
+
+    Accepts int/float (minutes), or strings such as:
+    ``120``, ``90 min``, ``4.65 hours``, ``2h``, ``30m``.
+    """
+    if isinstance(value, bool):
+        raise ValueError("invalid duration")
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip().lower()
+    if not s:
+        raise ValueError("empty duration")
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*$", s)
+    if m:
+        return float(m.group(1)) * 60
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*(?:minutes?|mins?)\s*$", s)
+    if m:
+        return float(m.group(1))
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*m\s*$", s)
+    if m:
+        return float(m.group(1))
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*$", s)
+    if m:
+        return float(m.group(1))
+    raise ValueError("unrecognized duration format")
+
+
 RECIPE_SCHEMA_DEFAULTS = {
     "name": "Untitled",
     "mode": "video",
     "still_interval_s": 1.0,
-    "duration_minutes": 30,
+    "duration_minutes": 30.0,
     "auto_start_delay_minutes": 1,
     "rotation_degrees": 0,
     "servo_start_us": 1500,
@@ -192,9 +224,23 @@ def validate_recipe(data):
         else:
             clean["mode"] = data["mode"]
 
+    if "duration_minutes" in data:
+        try:
+            dm = parse_duration_to_minutes(data["duration_minutes"])
+        except ValueError:
+            errors.append(
+                "duration_minutes: use minutes (e.g. 90) or hours (e.g. 4.65 hours)"
+            )
+        else:
+            if dm < 1 or dm > RECIPE_MAX_DURATION_MINUTES:
+                errors.append(
+                    f"duration must be between 1 minute and {RECIPE_MAX_DURATION_MINUTES} minutes (32 hours)"
+                )
+            else:
+                clean["duration_minutes"] = round(dm, 2)
+
     for fld, lo, hi in [
         ("still_interval_s", 0.1, 3600),
-        ("duration_minutes", 1, 480),
         ("auto_start_delay_minutes", 0, 60),
         ("servo_start_us", 1000, 2000),
         ("servo_end_us", 1000, 2000),
