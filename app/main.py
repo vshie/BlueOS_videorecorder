@@ -275,11 +275,12 @@ def start():
 
         # RTSP H.265 — towfish-style chain; transport is UDP only (not TCP interleaved).
         # h265parse config-interval=-1: re-insert VPS/SPS/PPS on each IDR (valid GStreamer API; see docs).
+        # rtph265depay: omit wait-for-keyframe (towfish uses it) — property needs GStreamer >= 1.26; image has 1.16.
         mux_element = "mp4mux fragment-duration=5000"
         rtsp_pipeline = (
             f"rtspsrc location={RTSP_H265_ENDPOINT} protocols=udp is-live=true "
             "latency=5000 retry=5 timeout=5000000 "
-            "! rtph265depay wait-for-keyframe=true "
+            "! rtph265depay "
             "! h265parse config-interval=-1 "
             "! queue max-size-time=30000000000 max-size-bytes=0 max-size-buffers=0 "
             "leaky=downstream silent=true "
