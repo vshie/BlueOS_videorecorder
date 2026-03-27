@@ -26,11 +26,35 @@ stop_subtitle_thread = False
 current_subtitle_file_h264 = None
 current_subtitle_file_rtsp = None
 
-# RTSP H.265 from RadCam (same endpoint as towfish / dropcam branches)
+# RTSP H.265 from RadCam — pipeline matches towfish branch /start (not dropcam-specific).
 RTSP_H265_ENDPOINT = "rtsp://admin:blue@192.168.2.10:554/stream_0"
+# Towfish default is UDP; set STREAM_PROTOCOL=tcp for TCP (same as towfish persisted config).
+DEFAULT_STREAM_PROTOCOL = "udp"
+VALID_STREAM_PROTOCOLS = ("udp", "tcp")
+_stream_proto = os.environ.get("STREAM_PROTOCOL", DEFAULT_STREAM_PROTOCOL).strip().lower()
+stream_protocol = (
+    _stream_proto if _stream_proto in VALID_STREAM_PROTOCOLS else DEFAULT_STREAM_PROTOCOL
+)
 
 # exploreHD USB H.264 — only record when this V4L2 device exists (RadCam is RTSP only).
 USB_H264_DEVICE = "/dev/video2"
+
+
+def _log_gst_process_exit(proc_name, proc):
+    """Read and log GStreamer stdout/stderr after the child has exited (PIPE safe)."""
+    if proc is None or proc.poll() is None:
+        return
+    try:
+        stdout, stderr = proc.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        logger.warning("%s: communicate() timed out while reading output", proc_name)
+        return
+    out = (stdout or b"").decode(errors="replace").strip()
+    err = (stderr or b"").decode(errors="replace").strip()
+    if out:
+        logger.warning("%s stdout (exit %s): %s", proc_name, proc.returncode, out[-4000:])
+    if err:
+        logger.warning("%s stderr (exit %s): %s", proc_name, proc.returncode, err[-8000:])
 
 
 def usb_h264_device_available():
@@ -256,17 +280,19 @@ def start():
             )
             h264_command = ["gst-launch-1.0", "-e"] + shlex.split(h264_pipeline)
 
-        # Pipeline for RTSP H265: TCP + live tuning (dropcam), depay/parse/queue/mux
-        # (towfish) — fragment-duration helps recover partial files on abrupt stop.
+        # RTSP H.265 — identical element chain to towfish (mp4 container branch only here).
+        protocol_prop = f"protocols={stream_protocol} " if stream_protocol == "tcp" else ""
+        mux_element = "mp4mux fragment-duration=5000"
         rtsp_pipeline = (
-            f"rtspsrc location={RTSP_H265_ENDPOINT} protocols=tcp is-live=true "
+            f"rtspsrc location={RTSP_H265_ENDPOINT} is-live=true "
+            f"{protocol_prop}"
             "latency=5000 retry=5 timeout=5000000 "
             "! rtph265depay wait-for-keyframe=true "
             "! h265parse config-interval=-1 "
             "! queue max-size-time=30000000000 max-size-bytes=0 max-size-buffers=0 "
             "leaky=downstream silent=true "
-            "! mp4mux fragment-duration=5000 ! "
-            f"filesink location={filepath_rtsp} sync=false"
+            f"! {mux_element} "
+            f"! filesink location={filepath_rtsp} sync=false"
         )
 
         rtsp_command = ["gst-launch-1.0", "-e"] + shlex.split(rtsp_pipeline)
@@ -285,12 +311,7 @@ def start():
                 logger.info("Starting H264 recording with command: %s", " ".join(h264_command))
 
                 if process.poll() is not None:
-                    stdout, stderr = process.communicate()
-                    logger.error(
-                        "H264 process failed to start. stdout: %s, stderr: %s",
-                        stdout.decode(),
-                        stderr.decode(),
-                    )
+                    _log_gst_process_exit("H264", process)
                     process = None
                     current_subtitle_file_h264 = None
                 else:
@@ -308,11 +329,14 @@ def start():
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE)
             
-            logger.info(f"Starting RTSP recording with command: {' '.join(rtsp_command)}")
+            logger.info(
+                "Starting RTSP recording (stream_protocol=%s) with command: %s",
+                stream_protocol,
+                " ".join(rtsp_command),
+            )
             
             if rtsp_process.poll() is not None:
-                stdout, stderr = rtsp_process.communicate()
-                logger.error(f"RTSP process failed to start. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
+                _log_gst_process_exit("RTSP", rtsp_process)
                 rtsp_process = None
             else:
                 rtsp_started = True
@@ -437,17 +461,19 @@ def get_status():
         # Check if processes have died and clean up individually
         if process and process.poll() is not None:
             logger.warning("H264 recording process has died")
+            _log_gst_process_exit("H264", process)
             try:
                 process.kill()
-            except:
+            except Exception:
                 pass
             process = None
             
         if rtsp_process and rtsp_process.poll() is not None:
             logger.warning("RTSP recording process has died")
+            _log_gst_process_exit("RTSP", rtsp_process)
             try:
                 rtsp_process.kill()
-            except:
+            except Exception:
                 pass
             rtsp_process = None
         
