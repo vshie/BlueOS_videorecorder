@@ -25,6 +25,9 @@ stop_subtitle_thread = False
 current_subtitle_file_h264 = None
 current_subtitle_file_rtsp = None
 
+# RTSP H.265 from RadCam (same endpoint as towfish / dropcam branches)
+RTSP_H265_ENDPOINT = "rtsp://admin:blue@192.168.2.10:554/stream_0"
+
 # Mavlink URLs
 ahrs2_url = 'http://host.docker.internal/mavlink2rest/mavlink/vehicles/1/components/1/messages/AHRS2'
 vfr_hud_url = 'http://host.docker.internal/mavlink2rest/mavlink/vehicles/1/components/1/messages/VFR_HUD'
@@ -227,10 +230,18 @@ def start():
 
         h264_command = ["gst-launch-1.0", "-e"] + shlex.split(h264_pipeline)
 
-        # Pipeline for RTSP H265 stream
-        rtsp_pipeline = ("rtspsrc location=rtsp://admin:blue@192.168.2.10:554/stream_0 ! "
-            "rtph265depay ! h265parse ! mp4mux ! "
-            f"filesink location={filepath_rtsp}")
+        # Pipeline for RTSP H265: TCP + live tuning (dropcam), depay/parse/queue/mux
+        # (towfish) — fragment-duration helps recover partial files on abrupt stop.
+        rtsp_pipeline = (
+            f"rtspsrc location={RTSP_H265_ENDPOINT} protocols=tcp is-live=true "
+            "latency=5000 retry=5 timeout=5000000 "
+            "! rtph265depay wait-for-keyframe=true "
+            "! h265parse config-interval=-1 "
+            "! queue max-size-time=30000000000 max-size-bytes=0 max-size-buffers=0 "
+            "leaky=downstream silent=true "
+            "! mp4mux fragment-duration=5000 ! "
+            f"filesink location={filepath_rtsp} sync=false"
+        )
 
         rtsp_command = ["gst-launch-1.0", "-e"] + shlex.split(rtsp_pipeline)
 
