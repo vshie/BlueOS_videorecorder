@@ -26,15 +26,8 @@ stop_subtitle_thread = False
 current_subtitle_file_h264 = None
 current_subtitle_file_rtsp = None
 
-# RTSP H.265 from RadCam — pipeline matches towfish branch /start (not dropcam-specific).
+# RTSP H.265 from RadCam — RTP/RTCP over UDP (explicit protocols=udp on rtspsrc).
 RTSP_H265_ENDPOINT = "rtsp://admin:blue@192.168.2.10:554/stream_0"
-# Towfish default is UDP; set STREAM_PROTOCOL=tcp for TCP (same as towfish persisted config).
-DEFAULT_STREAM_PROTOCOL = "udp"
-VALID_STREAM_PROTOCOLS = ("udp", "tcp")
-_stream_proto = os.environ.get("STREAM_PROTOCOL", DEFAULT_STREAM_PROTOCOL).strip().lower()
-stream_protocol = (
-    _stream_proto if _stream_proto in VALID_STREAM_PROTOCOLS else DEFAULT_STREAM_PROTOCOL
-)
 
 # exploreHD USB H.264 — only record when this V4L2 device exists (RadCam is RTSP only).
 USB_H264_DEVICE = "/dev/video2"
@@ -280,12 +273,11 @@ def start():
             )
             h264_command = ["gst-launch-1.0", "-e"] + shlex.split(h264_pipeline)
 
-        # RTSP H.265 — identical element chain to towfish (mp4 container branch only here).
-        protocol_prop = f"protocols={stream_protocol} " if stream_protocol == "tcp" else ""
+        # RTSP H.265 — towfish-style chain; transport is UDP only (not TCP interleaved).
+        # h265parse config-interval=-1: re-insert VPS/SPS/PPS on each IDR (valid GStreamer API; see docs).
         mux_element = "mp4mux fragment-duration=5000"
         rtsp_pipeline = (
-            f"rtspsrc location={RTSP_H265_ENDPOINT} is-live=true "
-            f"{protocol_prop}"
+            f"rtspsrc location={RTSP_H265_ENDPOINT} protocols=udp is-live=true "
             "latency=5000 retry=5 timeout=5000000 "
             "! rtph265depay wait-for-keyframe=true "
             "! h265parse config-interval=-1 "
@@ -329,11 +321,7 @@ def start():
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE)
             
-            logger.info(
-                "Starting RTSP recording (stream_protocol=%s) with command: %s",
-                stream_protocol,
-                " ".join(rtsp_command),
-            )
+            logger.info("Starting RTSP recording (UDP) with command: %s", " ".join(rtsp_command))
             
             if rtsp_process.poll() is not None:
                 _log_gst_process_exit("RTSP", rtsp_process)
