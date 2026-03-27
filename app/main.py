@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request, send_file
 import os
+import stat
 import subprocess
 from datetime import datetime
 import logging
@@ -27,6 +28,19 @@ current_subtitle_file_rtsp = None
 
 # RTSP H.265 from RadCam (same endpoint as towfish / dropcam branches)
 RTSP_H265_ENDPOINT = "rtsp://admin:blue@192.168.2.10:554/stream_0"
+
+# exploreHD USB H.264 — only record when this V4L2 device exists (RadCam is RTSP only).
+USB_H264_DEVICE = "/dev/video2"
+
+
+def usb_h264_device_available():
+    """True if the USB H.264 camera device node exists and is a character device."""
+    try:
+        st = os.stat(USB_H264_DEVICE)
+        return stat.S_ISCHR(st.st_mode)
+    except OSError:
+        return False
+
 
 # Mavlink URLs
 ahrs2_url = 'http://host.docker.internal/mavlink2rest/mavlink/vehicles/1/components/1/messages/AHRS2'
@@ -196,13 +210,23 @@ def start():
         time.sleep(1)
             
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename_h264 = f"video_h264_{timestamp}.mp4"
         filename_rtsp = f"video_rtsp_{timestamp}.mp4"
-        filepath_h264 = os.path.join("/app/videorecordings", filename_h264)
         filepath_rtsp = os.path.join("/app/videorecordings", filename_rtsp)
-        
-        # Create subtitle files for both video streams
-        current_subtitle_file_h264 = create_subtitle_file(filepath_h264)
+
+        record_usb_h264 = usb_h264_device_available()
+        if not record_usb_h264:
+            logger.info(
+                "Skipping USB H.264 recording: %s not present or not a character device",
+                USB_H264_DEVICE,
+            )
+
+        filepath_h264 = None
+        current_subtitle_file_h264 = None
+        if record_usb_h264:
+            filename_h264 = f"video_h264_{timestamp}.mp4"
+            filepath_h264 = os.path.join("/app/videorecordings", filename_h264)
+            current_subtitle_file_h264 = create_subtitle_file(filepath_h264)
+
         current_subtitle_file_rtsp = create_subtitle_file(filepath_rtsp)
         
         # Set recording state and start time BEFORE starting video processes
@@ -223,12 +247,14 @@ def start():
             subtitle_files.append(f"RTSP: {current_subtitle_file_rtsp}")
         logger.info(f"Started telemetry subtitle generation: {'; '.join(subtitle_files)}")
         
-        # Pipeline for H264 stream from /dev/video2
-        h264_pipeline = ("v4l2src device=/dev/video2 ! "
-            "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
-            f"h264parse ! mp4mux ! filesink location={filepath_h264}")
-
-        h264_command = ["gst-launch-1.0", "-e"] + shlex.split(h264_pipeline)
+        h264_command = None
+        if record_usb_h264:
+            h264_pipeline = (
+                f"v4l2src device={USB_H264_DEVICE} ! "
+                "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
+                f"h264parse ! mp4mux ! filesink location={filepath_h264}"
+            )
+            h264_command = ["gst-launch-1.0", "-e"] + shlex.split(h264_pipeline)
 
         # Pipeline for RTSP H265: TCP + live tuning (dropcam), depay/parse/queue/mux
         # (towfish) — fragment-duration helps recover partial files on abrupt stop.
@@ -245,25 +271,35 @@ def start():
 
         rtsp_command = ["gst-launch-1.0", "-e"] + shlex.split(rtsp_pipeline)
 
-        # Start H264 recording process
+        # Start H264 recording process (USB exploreHD only — skipped if device missing)
         h264_started = False
-        try:
-            process = subprocess.Popen(h264_command,
-                               stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE)
-            
-            logger.info(f"Starting H264 recording with command: {' '.join(h264_command)}")
-            
-            if process.poll() is not None:
-                stdout, stderr = process.communicate()
-                logger.error(f"H264 process failed to start. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
+        process = None
+        if h264_command:
+            try:
+                process = subprocess.Popen(
+                    h264_command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+                logger.info("Starting H264 recording with command: %s", " ".join(h264_command))
+
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    logger.error(
+                        "H264 process failed to start. stdout: %s, stderr: %s",
+                        stdout.decode(),
+                        stderr.decode(),
+                    )
+                    process = None
+                    current_subtitle_file_h264 = None
+                else:
+                    h264_started = True
+                    logger.info("H264 recording started successfully")
+            except Exception as e:
+                logger.error("Failed to start H264 recording: %s", str(e))
                 process = None
-            else:
-                h264_started = True
-                logger.info("H264 recording started successfully")
-        except Exception as e:
-            logger.error(f"Failed to start H264 recording: {str(e)}")
-            process = None
+                current_subtitle_file_h264 = None
         
         # Start RTSP recording process
         rtsp_started = False
@@ -372,7 +408,7 @@ def stop():
         current_subtitle_file_h264 = None
         current_subtitle_file_rtsp = None
         
-        logger.info("Both recording processes stopped successfully")
+        logger.info("Recording stopped (all active streams finalized)")
         return jsonify({"success": True})
     except Exception as e:
         logger.error(f"Error in stop endpoint: {str(e)}")
