@@ -46,7 +46,10 @@ timeout_buffer = bind_add_param('T_BUFFER',17,1.3) -- Buffer multiplier for time
 -- New parameter for surface maintaining throttle
 surface_depth_threshold = bind_add_param('SURF_DEPTH',19,0.65) -- Depth threshold to increase throttle (m)
 -- Water sampling parameters
-ws_interval = bind_add_param('WS_INTERVAL',20,5.0) -- Water sampling interval depth (m)
+-- WS_EN: 1=perform depth-interval sampling (relay), 0=skip entirely. Use this if the GCS will not
+-- save HOVER_WS_INTERVAL=0 (many editors enforce a positive min when default is non-zero).
+ws_enable = bind_add_param('WS_EN',15,1) -- 0=off, 1=on (non-zero = on)
+ws_interval = bind_add_param('WS_INTERVAL',20,5.0) -- Water sampling interval depth (m), used only if WS_EN>0
 ws_htime = bind_add_param('WS_HTIME',21,0.5) -- Water sampling hover time (minutes)
 
 -- Simulation variables
@@ -466,11 +469,16 @@ function control_dive_mission()
         gcs:send_text(6, string.format("Switch closed - starting countdown. Timeout: %.1f min", dive_timeout))
         timer = millis() -- start overall dive clock
         
-        -- Initialize water sampling depth
-        ws_next_depth = ws_interval:get()  -- First sampling at WS_INTERVAL depth
+        -- Initialize water sampling depth (disabled when HOVER_WS_EN = 0)
+        if ws_enable:get() > 0.5 then
+            ws_next_depth = ws_interval:get()
+            gcs:send_text(6, string.format("Water sampling on - max %d samples, first at %.1fm, interval %.1fm",
+                ws_max_samples, ws_next_depth, ws_interval:get()))
+        else
+            ws_next_depth = 0
+            gcs:send_text(6, "Water sampling disabled (HOVER_WS_EN=0)")
+        end
         ws_sample_count = 0  -- Reset sample count for new mission
-        gcs:send_text(6, string.format("Water sampling initialized - max %d samples, first at %.1fm, interval %.1fm", 
-            ws_max_samples, ws_next_depth, ws_interval:get()))
         
         -- Reset ALT_HOLD tracking for new mission
         alt_hold_exit_detected = false
@@ -517,7 +525,7 @@ function control_dive_mission()
         end
         
         -- Check for water sampling depth (only if we haven't reached max samples)
-        if ws_next_depth > 0 and depth >= ws_next_depth and ws_sample_count < ws_max_samples then
+        if ws_enable:get() > 0.5 and ws_next_depth > 0 and depth >= ws_next_depth and ws_sample_count < ws_max_samples then
             -- Initialize water sampling
             ws_next_depth = ws_next_depth + ws_interval:get()  -- Set next sampling depth
             ws_hover_start_time = millis()
