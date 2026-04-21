@@ -34,3 +34,87 @@ A BlueOS extension that turns a Raspberry Pi 4 into a standalone, deployable dro
 ## Note
 
 Connected cameras must have their streams **removed** from the BlueOS Video Streams page so `/dev/video2` is available to the extension.
+
+---
+
+# DropCam Setup Guide
+
+*(This guide is also available in the **Setup** tab of the DropCam web interface.)*
+
+## 1. Initial BlueOS Setup
+
+- Flash BlueOS to a microSD card (32 GB+ recommended, high-endurance).
+- Insert the card into your Raspberry Pi 4 and power it on.
+- Connect to the **BlueOS WiFi Hotspot** (SSID: `BlueOS (******)`, default password: `blueosap`).
+- Navigate to `http://blueos-hotspot.local` or `http://192.168.42.1` to access the BlueOS web interface.
+- Install the **DropCam** extension from the Extension Manager.
+
+## 2. Hardware Wiring
+
+| Component | GPIO | Physical Pin | Notes |
+|-----------|------|--------------|-------|
+| RGB Status LED (WS2812) | GPIO 10 (SPI MOSI) | Pin 19 | Single NeoPixel data line |
+| Lumen Light | GPIO 13 (PWM1) | Pin 33 | 1000-2000 µs servo PWM. Modes: always on, pause points only, or snapshot only |
+| Camera Focus | GPIO 20 | Pin 38 | 1000-2000 µs servo-style PWM |
+| Zoom | GPIO 26 | Pin 37 | 1000-2000 µs servo-style PWM |
+| Pan | GPIO 16 | Pin 36 | 1000-2000 µs servo-style PWM |
+| External Servo | GPIO 19 | Pin 35 | 1000-2000 µs servo-style PWM |
+| Camera Tilt Servo | GPIO 21 | Pin 40 | 1000-2000 µs PWM |
+| USB Camera | /dev/video2 | — | H264 USB camera (1080p 30fps) |
+
+All servo/light/PWM signals share a common ground with the Pi. Servos, lights, and motors require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header.
+
+## 3. LED Status Indicators
+
+When retrieving a deployed camera, the LED tells you exactly what state the system is in:
+
+| LED Pattern | State | What It Means |
+|-------------|-------|---------------|
+| **Off** | Boot | Extension is starting up and initializing hardware. Wait a few seconds. |
+| **Breathing blue** | Idle / Waiting | System is ready. If an auto-start recipe is set, this also shows during the pre-recording delay countdown. |
+| **Slow red flash** | Recording | Video or stills capture is in progress. This is the default; recipes can customize the color and blink rate. |
+| **Fast yellow flash** | Warning | A problem occurred: recording file not growing, disk full, USB storage disconnected, or scheduler error. Recording may have stopped. |
+| **Slow green flash** | Processing | Recording has stopped and the system is remuxing TS→MP4, or transferring files between USB and SD card. Do not remove power or USB drive. |
+| **Solid blue** | Complete | A scheduled recording has finished and all processing is done. Safe to power off or retrieve the USB drive. |
+
+**Retrieval lifecycle:** Off → Breathing blue → Slow flash (recording) → Slow green flash (processing) → Solid blue (done — safe to retrieve).
+
+Recipe recordings can customize the recording LED color (red, green, blue, yellow, cyan, magenta, white) and blink rate (solid, slow, fast). The other states (idle, warning, processing, complete) are always the same regardless of recipe settings.
+
+## 4. Time Synchronization
+
+The Raspberry Pi does not have a real-time clock (RTC). Without internet access, the system time resets on each boot. To synchronize the clock:
+
+- Connect a phone or laptop to the BlueOS WiFi AP.
+- Open this DropCam page in a browser — the system clock will be synchronized to your device's time automatically by BlueOS.
+- A yellow banner on the Status tab warns when the clock is not synchronized.
+
+## 5. Recording Plans (Recipes)
+
+- Create recipes in the **Recipes** tab to define recording duration, servo movement, and light settings.
+- Select a recipe in the **Auto-Start Recipe** dropdown on the Status tab — your selection is saved immediately and persists across reboots and power cycles.
+- When the extension starts (on boot), it will wait for the camera, then after the configured delay period, begin recording automatically.
+- If the camera is not immediately available after a cold boot, the system retries up to 10 times (30 seconds) before proceeding.
+- To disable auto-start, set the dropdown to "None (manual only)".
+
+## 6. Recording Details
+
+- Video is recorded as MPEG-TS during capture (resilient to power cuts), then automatically remuxed to **.mp4** when recording stops for maximum player compatibility.
+- Still capture mode saves JPEG frames at the configured interval.
+- Subtitle files (.ass) are generated alongside video recordings with system telemetry data.
+- Recording stops automatically if disk space drops below **1 GB**.
+- Recipe duration is capped at **32 hours** for now (until field battery/runtime limits are confirmed). Storage, power, and SD endurance still apply.
+
+## 7. File Management
+
+- Recorded files are stored at `/usr/blueos/extensions/videorecorder/` on the Pi.
+- Download files from the **Status** tab or use the BlueOS File Manager.
+- The BlueOS file browser is available at `http://blueos.local:7777/files/extensions/videorecorder`.
+
+## 8. Troubleshooting
+
+- **Camera not detected:** Ensure the USB camera is connected and appears as `/dev/video2`. Replug and restart the extension.
+- **Servo not moving:** Verify wiring and that the pigpio daemon is running inside the container. Check extension logs.
+- **LED not lighting:** Ensure the WS2812 data line is on GPIO 10 and shares a ground with the Pi.
+- **Recordings empty or corrupt:** Check disk space. If power was lost during recording, a .ts file may remain (not yet remuxed to .mp4) but is still playable.
+- **Extension logs:** View logs from the BlueOS Extension Manager or run `docker logs blueos-videorecorder`.
