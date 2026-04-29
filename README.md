@@ -33,7 +33,8 @@ A BlueOS extension that turns a Raspberry Pi 4 into a standalone, deployable dro
 
 ## Manual Install
 
-To install DropCam manually from the BlueOS Extension Manager, choose **Install from Docker image** and use:
+To install DropCam manually from the BlueOS Extension Manager, choose **Install from 
+Scratch** from the + icon in the lower right of the Installed Extensions page and use:
 
 ```text
 Image: vshie/blueos-blueos_video_recorder
