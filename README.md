@@ -39,8 +39,6 @@ Scratch** from the + icon in the lower right of the Installed Extensions page an
 ```text
 Image: vshie/blueos-blueos_video_recorder
 Tag: dropcam
-Web page: /dropcam
-Web port: 5423
 ```
 
 Copy and paste this permissions JSON when BlueOS asks for extension permissions:
@@ -69,7 +67,7 @@ Copy and paste this permissions JSON when BlueOS asks for extension permissions:
   }
 }
 ```
-
+The other fields don't matter, make them something logical! 
 ## Note
 
 Connected cameras must have their streams **removed** from the BlueOS Video Streams page so `/dev/video2` is available to the extension.
