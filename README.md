@@ -31,6 +31,44 @@ A BlueOS extension that turns a Raspberry Pi 4 into a standalone, deployable dro
 4. Create a recording recipe or select a default one
 5. The camera will auto-start recording after the configured delay on next boot
 
+## Manual Install
+
+To install DropCam manually from the BlueOS Extension Manager, choose **Install from Docker image** and use:
+
+```text
+Image: vshie/blueos-blueos_video_recorder
+Tag: dropcam
+Web page: /dropcam
+Web port: 5423
+```
+
+Copy and paste this permissions JSON when BlueOS asks for extension permissions:
+
+```json
+{
+  "ExposedPorts": {
+    "5423/tcp": {}
+  },
+  "HostConfig": {
+    "Binds": [
+      "/usr/blueos/extensions/videorecorder:/app/videorecordings",
+      "/dev/video2:/dev/video2",
+      "/dev/snd:/dev/snd"
+    ],
+    "ExtraHosts": ["host.docker.internal:host-gateway"],
+    "PortBindings": {
+      "5423/tcp": [
+        {
+          "HostPort": ""
+        }
+      ]
+    },
+    "NetworkMode": "host",
+    "Privileged": true
+  }
+}
+```
+
 ## Note
 
 Connected cameras must have their streams **removed** from the BlueOS Video Streams page so `/dev/video2` is available to the extension.
