@@ -5,7 +5,9 @@ and auxiliary servo-style PWM outputs.
 GPIO assignments:
   - GPIO 10 (Pin 19, SPI MOSI): WS2812/NeoPixel RGB status LED
   - GPIO 21 (Pin 40): Camera tilt servo (1000-2000 us PWM)
-  - GPIO 13 (Pin 33): Lumen light (1000-2000 us servo-style PWM)
+  - GPIO 13 (Pin 33): Lumen light (1000-2000 us servo-style PWM; 1000 us = off,
+        2000 us = full brightness. Note: a disabled/floating signal turns the
+        light ON at full brightness, so we always hold 1000 us to keep it off.)
   - GPIO 20 (Pin 38): Camera focus (1000-2000 us servo-style PWM)
   - GPIO 26 (Pin 37): Zoom (1000-2000 us servo-style PWM)
   - GPIO 16 (Pin 36): Pan (1000-2000 us servo-style PWM)
@@ -98,6 +100,14 @@ class HardwareController:
             if not self._pi.connected:
                 logger.error("pigpio daemon not running; servo/light will be simulated")
                 self._pi = None
+                return
+            # Drive the Lumen light to its "off" pulse (1000 us) immediately,
+            # because a floating/undriven signal on this pin makes the light
+            # come on at full brightness.
+            try:
+                self._pi.set_servo_pulsewidth(LIGHT_GPIO, SERVO_MIN_US)
+            except Exception as e:
+                logger.warning(f"Could not preset light off: {e}")
         except Exception as e:
             logger.error(f"Failed to connect to pigpio: {e}")
             self._pi = None
@@ -371,10 +381,13 @@ class HardwareController:
     def light_off(self):
         with self._lock:
             self._light_on = False
+            self._light_brightness = 0
         if self._pi:
-            self._pi.set_servo_pulsewidth(LIGHT_GPIO, 0)
+            # The Lumen light treats a disabled/0 us pulse as "full brightness",
+            # so we must actively hold the minimum pulse (1000 us) to keep it off.
+            self._pi.set_servo_pulsewidth(LIGHT_GPIO, SERVO_MIN_US)
         else:
-            logger.debug("Light sim: off")
+            logger.debug(f"Light sim: off ({SERVO_MIN_US} us)")
 
     def is_light_on(self):
         with self._lock:
@@ -424,7 +437,9 @@ class HardwareController:
         if self._pi:
             try:
                 self._pi.set_servo_pulsewidth(SERVO_GPIO, 0)
-                self._pi.set_servo_pulsewidth(LIGHT_GPIO, 0)
+                # Hold the Lumen light at 1000 us (off). A 0 us / disabled
+                # signal drives the light to full brightness.
+                self._pi.set_servo_pulsewidth(LIGHT_GPIO, SERVO_MIN_US)
                 for gpio in AUX_PWM_GPIOS.values():
                     self._pi.set_servo_pulsewidth(gpio, 0)
                 self._pi.stop()
