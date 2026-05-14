@@ -48,6 +48,7 @@ class Scheduler:
         self._lock = threading.Lock()
         self._remaining_s = 0
         self._focus_sweep_thread = None
+        self._release_thread = None
 
     def configure(self, *, start_fn, stop_fn, disk_free_fn, hw, capture_still_fn=None):
         self._start_recording_fn = start_fn
@@ -60,6 +61,14 @@ class Scheduler:
         """Begin the auto-start sequence for the given recipe dict."""
         self.stop()
         self._stop.clear()
+        # Park the release servo at its armed/off position (1000 us) at the
+        # very start of every recipe, so that any prior "test" trigger that
+        # left the servo at 2000 us is reset before the new run begins.
+        if self._hw:
+            try:
+                self._hw.release_off()
+            except Exception as e:
+                logger.warning(f"Could not reset release servo: {e}")
         self._active_recipe = recipe
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -70,6 +79,8 @@ class Scheduler:
         self._stop.set()
         if self._focus_sweep_thread and self._focus_sweep_thread.is_alive():
             self._focus_sweep_thread.join(timeout=5)
+        if self._release_thread and self._release_thread.is_alive():
+            self._release_thread.join(timeout=5)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=10)
         with self._lock:
@@ -138,6 +149,11 @@ class Scheduler:
 
             self._apply_recipe_led(recipe)
 
+            duration_s = recipe.get("duration_minutes", 30) * 60
+            if self._hw and recipe.get("release_enable"):
+                offset_s = int(recipe.get("release_offset_s", 0))
+                self._schedule_release(duration_s, offset_s)
+
             if self._hw:
                 if "radcam_focus_us" in recipe:
                     self._hw.set_aux_pwm("focus", recipe["radcam_focus_us"])
@@ -196,7 +212,6 @@ class Scheduler:
                 elif recipe.get("servo_fixed", True) and light_mode == "off":
                     self._hw.light_off()
 
-            duration_s = recipe.get("duration_minutes", 30) * 60
             self._countdown("recording", duration_s, check_disk=True)
 
             if not self._stop.is_set():
@@ -215,6 +230,36 @@ class Scheduler:
             self._set_state("error")
             if self._hw:
                 self._hw.led_warning()
+
+    def _schedule_release(self, duration_s, offset_s):
+        """Schedule the release servo to fire (1000 us → 2000 us) at
+        ``duration_s + offset_s`` seconds from now.
+
+        - ``offset_s`` < 0  → fires that many seconds *before* the recording
+          duration finishes.
+        - ``offset_s`` == 0 → fires right when the recording duration ends.
+        - ``offset_s`` > 0  → fires that many seconds *after* the recording
+          stops.
+
+        The timer is cancellable via ``self._stop``.
+        """
+        delay_s = max(0.0, float(duration_s) + float(offset_s))
+        logger.info(
+            f"Release scheduled: fire in {delay_s:.0f}s "
+            f"(duration={duration_s:.0f}s, offset={offset_s:+d}s)"
+        )
+        self._release_thread = threading.Thread(
+            target=self._release_loop, args=(delay_s,), daemon=True,
+        )
+        self._release_thread.start()
+
+    def _release_loop(self, delay_s):
+        if self._stop.wait(delay_s):
+            return
+        try:
+            self._hw.release_trigger()
+        except Exception as e:
+            logger.error(f"Release trigger failed: {e}")
 
     def _focus_sweep_loop(self, start_us, end_us, duration_s):
         """Linearly increment focus PWM from start to end over duration."""

@@ -310,6 +310,16 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
             <button class="btn-sm" id="lightToggle" onclick="toggleLight()">Off</button>
           </div>
         </div>
+        <div class="form-group narrow">
+          <label>Release Servo</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span class="mono" id="releaseVal">1000</span><span class="text-muted" style="font-size:.78em">us</span>
+            <button class="btn-sm" id="releaseToggleBtn" onclick="toggleRelease()"
+                    title="Toggle release servo between 1000 us (armed) and 2000 us (fired). Cancels any running recipe.">
+              Test Release
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -386,6 +396,7 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         <div class="telem-item"><div class="telem-label">Status LED</div><div class="telem-value" id="tLed">--</div></div>
         <div class="telem-item"><div class="telem-label">Servo</div><div class="telem-value" id="tServo">--</div></div>
         <div class="telem-item"><div class="telem-label">Lumen Light</div><div class="telem-value" id="tLight">--</div></div>
+        <div class="telem-item"><div class="telem-label">Release Servo</div><div class="telem-value" id="tRelease">--</div></div>
         <div class="telem-item radcam-only"><div class="telem-label">Focus</div><div class="telem-value" id="tFocus">--</div></div>
         <div class="telem-item radcam-only"><div class="telem-label">Zoom</div><div class="telem-value" id="tZoom">--</div></div>
         <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
@@ -590,6 +601,21 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         <label>Brightness: <span id="rLightBrightVal" class="mono">0</span>%</label>
         <input type="range" id="rLightBright" min="0" max="100" step="5" value="0" oninput="document.getElementById('rLightBrightVal').textContent=this.value">
       </div>
+    </div>
+
+    <h3>Release Servo</h3>
+    <div class="form-row">
+      <div class="form-group narrow">
+        <label><input type="checkbox" id="rReleaseEnable" onchange="toggleReleaseFields()"> Enable Release at Finish</label>
+      </div>
+      <div class="form-group" id="releaseOffsetGroup" style="display:none;min-width:24em">
+        <label>Trigger Offset (seconds, &minus; = before finish, + = after, 0 = at finish)</label>
+        <input type="number" id="rReleaseOffset" value="0" min="-3600" max="3600" step="1" style="width:7em">
+      </div>
+    </div>
+    <div id="releaseHint" class="text-muted mt-8" style="font-size:.82em;display:none">
+      When recording finishes, the release servo will fire (1000 us &rarr; 2000 us)
+      at the configured offset.  This sends the camera to the surface on a timer.
     </div>
 
     <hr>
@@ -810,6 +836,9 @@ async function pollTelemetry() {
   document.getElementById('tSync').textContent = d.time_synced === true ? 'Yes' : d.time_synced === false ? 'No' : '--';
   document.getElementById('tServo').textContent = d.servo_position_us != null ? d.servo_position_us + ' us' : '--';
   document.getElementById('tLight').textContent = d.light_on ? d.light_brightness_pct + '%' : 'Off';
+  if (d.release_position_us != null) {
+    updateReleaseUi(d.release_position_us, !!d.release_triggered);
+  }
   document.getElementById('tHealth').textContent = isRecording ? (d.recording_ok ? 'OK' : 'STALL') : '--';
   document.getElementById('sysTime').textContent = d.timestamp || '--';
 
@@ -944,6 +973,41 @@ function toggleLight() {
   lightIsOn = !lightIsOn;
   api('/light', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({on:lightIsOn})});
   document.getElementById('lightToggle').textContent = lightIsOn ? 'On' : 'Off';
+}
+
+/* ── Release servo ───────────────────────── */
+async function toggleRelease() {
+  const btn = document.getElementById('releaseToggleBtn');
+  btn.disabled = true;
+  const d = await api('/release', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'toggle'}),
+  });
+  btn.disabled = false;
+  if (d && d.success) {
+    updateReleaseUi(d.position_us, d.triggered);
+    if (d.schedule_cancelled) {
+      // Surface a brief warning that the running recipe was stopped.
+      const sched = document.getElementById('scheduleStatus');
+      if (sched) {
+        sched.textContent = 'Schedule cancelled by manual release toggle.';
+        setTimeout(() => pollStatus(), 200);
+      }
+    }
+  }
+}
+
+function updateReleaseUi(positionUs, triggered) {
+  const valEl = document.getElementById('releaseVal');
+  const btn = document.getElementById('releaseToggleBtn');
+  const tEl = document.getElementById('tRelease');
+  if (valEl) valEl.textContent = positionUs;
+  if (btn) {
+    btn.textContent = triggered ? 'Reset Release' : 'Test Release';
+    btn.className = 'btn-sm' + (triggered ? ' btn-danger' : '');
+  }
+  if (tEl) tEl.textContent = (triggered ? 'FIRED ' : 'Armed ') + positionUs + ' us';
 }
 
 /* ── Aux PWM (RadCam focus/zoom) ──────────── */
@@ -1484,11 +1548,14 @@ function newRecipe() {
   document.getElementById('rRecZoom').value = curZoom;
   document.getElementById('rRecZoomNum').value = curZoom;
   document.getElementById('rRecZoomVal').textContent = curZoom;
+  document.getElementById('rReleaseEnable').checked = false;
+  document.getElementById('rReleaseOffset').value = 0;
   document.getElementById('editorTitle').textContent = 'New Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
   toggleServoFields();
   toggleFocusFinderFields();
+  toggleReleaseFields();
   updateSweepCalc();
 }
 
@@ -1534,11 +1601,14 @@ async function editRecipe(id) {
   document.getElementById('rRecZoom').value = rZoom;
   document.getElementById('rRecZoomNum').value = rZoom;
   document.getElementById('rRecZoomVal').textContent = rZoom;
+  document.getElementById('rReleaseEnable').checked = !!r.release_enable;
+  document.getElementById('rReleaseOffset').value = (r.release_offset_s != null ? r.release_offset_s : 0);
   document.getElementById('editorTitle').textContent = 'Edit Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
   toggleServoFields();
   toggleFocusFinderFields();
+  toggleReleaseFields();
   updateSweepCalc();
 }
 
@@ -1574,6 +1644,8 @@ async function saveCurrentRecipe() {
     focus_finder_zoom_us: +document.getElementById('rFocusFinderZoom').value,
     radcam_focus_us: +document.getElementById('rRecFocus').value,
     radcam_zoom_us: +document.getElementById('rRecZoom').value,
+    release_enable: document.getElementById('rReleaseEnable').checked,
+    release_offset_s: +document.getElementById('rReleaseOffset').value,
   };
   const id = document.getElementById('rId').value;
   if (id) body.id = id;
@@ -1602,6 +1674,11 @@ function toggleServoFields() {
 function toggleFocusFinderFields() {
   const on = document.getElementById('rFocusFinder').checked;
   document.getElementById('focusFinderFields').style.display = on ? '' : 'none';
+}
+function toggleReleaseFields() {
+  const on = document.getElementById('rReleaseEnable').checked;
+  document.getElementById('releaseOffsetGroup').style.display = on ? '' : 'none';
+  document.getElementById('releaseHint').style.display = on ? '' : 'none';
 }
 function previewServo(val, labelId) {
   document.getElementById(labelId).textContent = val;

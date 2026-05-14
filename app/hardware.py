@@ -1,6 +1,6 @@
 """
 Hardware control for DropCam: RGB LED (WS2812), camera servo, lumen light,
-and auxiliary servo-style PWM outputs.
+release servo, and auxiliary servo-style PWM outputs.
 
 GPIO assignments:
   - GPIO 10 (Pin 19, SPI MOSI): WS2812/NeoPixel RGB status LED
@@ -8,6 +8,9 @@ GPIO assignments:
   - GPIO 13 (Pin 33): Lumen light (1000-2000 us servo-style PWM; 1000 us = off,
         2000 us = full brightness. Note: a disabled/floating signal turns the
         light ON at full brightness, so we always hold 1000 us to keep it off.)
+  - GPIO 12 (Pin 32): Release servo (1000 us = armed/off, 2000 us = triggered).
+        Held at 1000 us from boot. Driven to 2000 us to fire the release
+        mechanism (e.g. to surface the camera at end of recording).
   - GPIO 20 (Pin 38): Camera focus (1000-2000 us servo-style PWM)
   - GPIO 26 (Pin 37): Zoom (1000-2000 us servo-style PWM)
   - GPIO 16 (Pin 36): Pan (1000-2000 us servo-style PWM)
@@ -26,6 +29,7 @@ logger = logging.getLogger(__name__)
 LED_GPIO = 10
 SERVO_GPIO = 21
 LIGHT_GPIO = 13
+RELEASE_GPIO = 12
 FOCUS_GPIO = 20
 ZOOM_GPIO = 26
 PAN_GPIO = 16
@@ -42,6 +46,10 @@ AUX_PWM_GPIOS = {
 SERVO_MIN_US = 1000
 SERVO_MAX_US = 2000
 SERVO_MID_US = 1500
+
+# Release servo positions (microseconds)
+RELEASE_OFF_US = SERVO_MIN_US      # armed/idle position
+RELEASE_TRIGGER_US = SERVO_MAX_US  # fires the release mechanism
 
 # NeoPixel config
 LED_COUNT = 1
@@ -77,6 +85,7 @@ class HardwareController:
         self._servo_position = SERVO_MID_US
         self._light_brightness = 0
         self._light_on = False
+        self._release_position = RELEASE_OFF_US
         self._aux_positions = {name: SERVO_MID_US for name in AUX_PWM_GPIOS}
         self._lock = threading.Lock()
         self._initialized = False
@@ -108,6 +117,12 @@ class HardwareController:
                 self._pi.set_servo_pulsewidth(LIGHT_GPIO, SERVO_MIN_US)
             except Exception as e:
                 logger.warning(f"Could not preset light off: {e}")
+            # Park the release servo at its "armed/off" pulse (1000 us) on
+            # boot so the release mechanism isn't fired by a floating signal.
+            try:
+                self._pi.set_servo_pulsewidth(RELEASE_GPIO, RELEASE_OFF_US)
+            except Exception as e:
+                logger.warning(f"Could not preset release servo off: {e}")
         except Exception as e:
             logger.error(f"Failed to connect to pigpio: {e}")
             self._pi = None
@@ -393,6 +408,49 @@ class HardwareController:
         with self._lock:
             return self._light_on
 
+    # ── Release Servo ────────────────────────────────────────────────────
+    #
+    # A single servo on RELEASE_GPIO used to fire a mechanical release that
+    # surfaces the camera at the end of a recording.  Idle/armed position is
+    # 1000 us; driving the pin to 2000 us pulls the latch.  The pin is held
+    # at 1000 us from boot (see _init_pigpio).
+
+    def set_release(self, position_us):
+        position_us = max(SERVO_MIN_US, min(SERVO_MAX_US, int(position_us)))
+        with self._lock:
+            self._release_position = position_us
+        if self._pi:
+            self._pi.set_servo_pulsewidth(RELEASE_GPIO, position_us)
+        else:
+            logger.debug(f"Release sim: {position_us} us")
+
+    def get_release_position(self):
+        with self._lock:
+            return self._release_position
+
+    def is_release_triggered(self):
+        with self._lock:
+            return self._release_position >= RELEASE_TRIGGER_US
+
+    def release_trigger(self):
+        """Fire the release mechanism (drive servo to 2000 us)."""
+        logger.info("Release servo: TRIGGERED (2000 us)")
+        self.set_release(RELEASE_TRIGGER_US)
+
+    def release_off(self):
+        """Return the release servo to its armed/idle position (1000 us)."""
+        self.set_release(RELEASE_OFF_US)
+
+    def toggle_release(self):
+        """Toggle the release servo between 1000 us and 2000 us.
+
+        Returns the new position in microseconds.
+        """
+        new_pos = (RELEASE_OFF_US if self.is_release_triggered()
+                   else RELEASE_TRIGGER_US)
+        self.set_release(new_pos)
+        return new_pos
+
     # ── Auxiliary Servo PWM Outputs ────────────────────────────────────
 
     def set_aux_pwm(self, channel, position_us):
@@ -440,6 +498,9 @@ class HardwareController:
                 # Hold the Lumen light at 1000 us (off). A 0 us / disabled
                 # signal drives the light to full brightness.
                 self._pi.set_servo_pulsewidth(LIGHT_GPIO, SERVO_MIN_US)
+                # Hold the release servo at 1000 us (armed/off) so the
+                # mechanism doesn't fire as the daemon shuts down.
+                self._pi.set_servo_pulsewidth(RELEASE_GPIO, RELEASE_OFF_US)
                 for gpio in AUX_PWM_GPIOS.values():
                     self._pi.set_servo_pulsewidth(gpio, 0)
                 self._pi.stop()

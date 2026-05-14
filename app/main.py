@@ -1347,6 +1347,8 @@ def route_telemetry():
         data["recording"] = recording
         data["light_on"] = hw.is_light_on()
         data["led_state"] = hw.get_led_state()
+        data["release_position_us"] = hw.get_release_position()
+        data["release_triggered"] = hw.is_release_triggered()
         data["radcam_mode"] = radcam_mode
         if radcam_mode:
             data["aux_pwm"] = hw.get_all_aux_pwm()
@@ -1444,6 +1446,65 @@ def route_light():
         "success": True,
         "light_on": hw.is_light_on(),
         "brightness_pct": hw.get_light_brightness(),
+    })
+
+
+@app.route("/release", methods=["GET"])
+def route_release_get():
+    return jsonify({
+        "success": True,
+        "position_us": hw.get_release_position(),
+        "triggered": hw.is_release_triggered(),
+    })
+
+
+@app.route("/release", methods=["POST"])
+def route_release():
+    """Control the release servo.
+
+    Body: ``{"action": "toggle" | "trigger" | "reset"}`` or
+    ``{"position_us": <int>}``.
+
+    Any call here cancels a running scheduled recipe — a manual release
+    interaction must not be overridden by an in-progress schedule.
+    """
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "").lower()
+
+    scheduler_was_running = scheduler.is_running()
+    if scheduler_was_running:
+        logger.info("Release control invoked while recipe running — cancelling schedule")
+        scheduler.stop()
+        try:
+            _stop_recording_internal()
+        except Exception as e:
+            logger.error(f"Stop recording during release toggle failed: {e}")
+        hw.stop_sweep()
+        hw.light_off()
+        hw.led_idle()
+
+    if action == "toggle":
+        new_pos = hw.toggle_release()
+    elif action == "trigger":
+        hw.release_trigger()
+        new_pos = hw.get_release_position()
+    elif action == "reset" or action == "off":
+        hw.release_off()
+        new_pos = hw.get_release_position()
+    elif "position_us" in data:
+        hw.set_release(int(data["position_us"]))
+        new_pos = hw.get_release_position()
+    else:
+        return jsonify({
+            "success": False,
+            "message": "Provide action=toggle|trigger|reset or position_us",
+        }), 400
+
+    return jsonify({
+        "success": True,
+        "position_us": new_pos,
+        "triggered": hw.is_release_triggered(),
+        "schedule_cancelled": scheduler_was_running,
     })
 
 

@@ -71,7 +71,14 @@ RECIPE_SCHEMA_DEFAULTS = {
     "focus_finder_zoom_us": 900,
     "radcam_focus_us": 900,
     "radcam_zoom_us": 900,
+    "release_enable": False,
+    "release_offset_s": 0,
 }
+
+# Allowed window for release-trigger offset relative to recording finish.
+# Negative = fire before the recording ends, positive = fire after.
+RELEASE_OFFSET_MIN_S = -3600
+RELEASE_OFFSET_MAX_S = 3600
 
 
 def calculate_sweep_time(duration_minutes, pause_points, loiter_time_s, oscillations):
@@ -290,6 +297,23 @@ def validate_recipe(data):
     if "still_prefix" in data:
         pfx = re.sub(r'[^a-zA-Z0-9_-]', '', str(data["still_prefix"]).strip())[:32]
         clean["still_prefix"] = pfx
+
+    if "release_enable" in data:
+        clean["release_enable"] = bool(data["release_enable"])
+
+    if "release_offset_s" in data:
+        try:
+            ros = int(float(data["release_offset_s"]))
+        except (ValueError, TypeError):
+            errors.append("release_offset_s must be a number (seconds)")
+        else:
+            if ros < RELEASE_OFFSET_MIN_S or ros > RELEASE_OFFSET_MAX_S:
+                errors.append(
+                    f"release_offset_s must be between {RELEASE_OFFSET_MIN_S} "
+                    f"and {RELEASE_OFFSET_MAX_S} seconds"
+                )
+            else:
+                clean["release_offset_s"] = ros
 
     if "radcam_focus_finder" in data:
         clean["radcam_focus_finder"] = bool(data["radcam_focus_finder"])
