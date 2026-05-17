@@ -329,7 +329,7 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         <h3>Adjustments</h3>
         <div class="subtabs">
           <button class="subtab active" data-subtab="led" onclick="switchSubtab(this)">LED</button>
-          <button class="subtab" data-subtab="focuszoom" onclick="switchSubtab(this)">Focus / Zoom</button>
+          <button class="subtab radcam-only" data-subtab="focuszoom" onclick="switchSubtab(this)">Focus / Zoom</button>
         </div>
       </div>
       <div class="subtab-content active" id="subtab-led">
@@ -609,8 +609,11 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         <label><input type="checkbox" id="rReleaseEnable" onchange="toggleReleaseFields()"> Enable Release at Finish</label>
       </div>
       <div class="form-group" id="releaseOffsetGroup" style="display:none;min-width:24em">
-        <label>Trigger Offset (seconds, &minus; = before finish, + = after, 0 = at finish)</label>
-        <input type="number" id="rReleaseOffset" value="0" min="-3600" max="3600" step="1" style="width:7em">
+        <label>Trigger Offset (&minus; = before finish, + = after, 0 = at finish)</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="number" id="rReleaseOffset" value="0" min="-3600" max="3600" step="1" style="width:7em">
+          <span class="mono text-muted">seconds</span>
+        </div>
       </div>
     </div>
     <div id="releaseHint" class="text-muted mt-8" style="font-size:.82em;display:none">
