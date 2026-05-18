@@ -312,10 +312,18 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         </div>
         <div class="form-group narrow">
           <label>Release Servo</label>
-          <div style="display:flex;gap:6px;align-items:center">
-            <span class="mono" id="releaseVal">1000</span><span class="text-muted" style="font-size:.78em">us</span>
-            <button class="btn-sm" id="releaseToggleBtn" onclick="toggleRelease()"
-                    title="Toggle release servo between 1000 us (armed) and 2000 us (fired). Cancels any running recipe.">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span class="mono" id="releaseVal">1500</span><span class="text-muted" style="font-size:.78em">us</span>
+            <button class="btn-sm" id="releaseWindBtn"
+                    onmousedown="releaseWindStart()" onmouseup="releaseWindStop()"
+                    onmouseleave="releaseWindStop()"
+                    ontouchstart="releaseWindStart();event.preventDefault()"
+                    ontouchend="releaseWindStop();event.preventDefault()"
+                    title="Press and hold: drives the release servo at 1000 us (wind) until released. Cancels any running recipe.">
+              Wind
+            </button>
+            <button class="btn-sm" id="releaseTestBtn" onclick="testRelease()"
+                    title="Click to fire a 60-second unwind (2000 us), the same behaviour the recipe uses. Click again to cancel. Cancels any running recipe.">
               Test Release
             </button>
           </div>
@@ -617,8 +625,9 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
       </div>
     </div>
     <div id="releaseHint" class="text-muted mt-8" style="font-size:.82em;display:none">
-      When recording finishes, the release servo will fire (1000 us &rarr; 2000 us)
-      at the configured offset.  This sends the camera to the surface on a timer.
+      When recording finishes (plus the configured offset), the release servo
+      will run unwind (2000 us) for 60 seconds, then return to stop (1500 us).
+      The string spools off the post and the unit floats to the surface.
     </div>
 
     <hr>
@@ -840,7 +849,7 @@ async function pollTelemetry() {
   document.getElementById('tServo').textContent = d.servo_position_us != null ? d.servo_position_us + ' us' : '--';
   document.getElementById('tLight').textContent = d.light_on ? d.light_brightness_pct + '%' : 'Off';
   if (d.release_position_us != null) {
-    updateReleaseUi(d.release_position_us, !!d.release_triggered);
+    updateReleaseUi(d.release_position_us, d.release_direction, !!d.release_running);
   }
   document.getElementById('tHealth').textContent = isRecording ? (d.recording_ok ? 'OK' : 'STALL') : '--';
   document.getElementById('sysTime').textContent = d.timestamp || '--';
@@ -979,38 +988,71 @@ function toggleLight() {
 }
 
 /* ── Release servo ───────────────────────── */
-async function toggleRelease() {
-  const btn = document.getElementById('releaseToggleBtn');
-  btn.disabled = true;
+let _releaseTestRunning = false;
+
+async function _postRelease(action) {
   const d = await api('/release', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'toggle'}),
+    body:JSON.stringify({action:action}),
   });
-  btn.disabled = false;
   if (d && d.success) {
-    updateReleaseUi(d.position_us, d.triggered);
+    updateReleaseUi(d.position_us, d.direction, d.running);
     if (d.schedule_cancelled) {
-      // Surface a brief warning that the running recipe was stopped.
       const sched = document.getElementById('scheduleStatus');
       if (sched) {
-        sched.textContent = 'Schedule cancelled by manual release toggle.';
+        sched.textContent = 'Schedule cancelled by manual release control.';
         setTimeout(() => pollStatus(), 200);
       }
     }
   }
+  return d;
 }
 
-function updateReleaseUi(positionUs, triggered) {
-  const valEl = document.getElementById('releaseVal');
-  const btn = document.getElementById('releaseToggleBtn');
-  const tEl = document.getElementById('tRelease');
-  if (valEl) valEl.textContent = positionUs;
-  if (btn) {
-    btn.textContent = triggered ? 'Reset Release' : 'Test Release';
-    btn.className = 'btn-sm' + (triggered ? ' btn-danger' : '');
+function releaseWindStart() {
+  const btn = document.getElementById('releaseWindBtn');
+  if (btn) btn.classList.add('btn-danger');
+  _postRelease('wind');
+}
+
+function releaseWindStop() {
+  const btn = document.getElementById('releaseWindBtn');
+  if (btn) btn.classList.remove('btn-danger');
+  // Always send stop on release/leave even if we never sent wind — cheap idempotent call.
+  _postRelease('stop');
+}
+
+async function testRelease() {
+  // Click toggles the 60s unwind: starts it if idle, cancels if already running.
+  if (_releaseTestRunning) {
+    await _postRelease('stop');
+  } else {
+    await _postRelease('test');
   }
-  if (tEl) tEl.textContent = (triggered ? 'FIRED ' : 'Armed ') + positionUs + ' us';
+}
+
+function updateReleaseUi(positionUs, direction, running) {
+  const valEl = document.getElementById('releaseVal');
+  const testBtn = document.getElementById('releaseTestBtn');
+  const tEl = document.getElementById('tRelease');
+  _releaseTestRunning = !!running;
+  if (valEl) valEl.textContent = positionUs != null ? positionUs : '--';
+  if (testBtn) {
+    if (running) {
+      testBtn.textContent = 'Stop';
+      testBtn.className = 'btn-sm btn-danger';
+    } else {
+      testBtn.textContent = 'Test Release';
+      testBtn.className = 'btn-sm';
+    }
+  }
+  if (tEl) {
+    const dir = direction || 'stopped';
+    const label = dir === 'winding' ? 'Winding'
+                : dir === 'unwinding' ? 'Unwinding'
+                : 'Stopped';
+    tEl.textContent = label + ' ' + (positionUs != null ? positionUs + ' us' : '');
+  }
 }
 
 /* ── Aux PWM (RadCam focus/zoom) ──────────── */

@@ -8,9 +8,12 @@ GPIO assignments:
   - GPIO 13 (Pin 33): Lumen light (1000-2000 us servo-style PWM; 1000 us = off,
         2000 us = full brightness. Note: a disabled/floating signal turns the
         light ON at full brightness, so we always hold 1000 us to keep it off.)
-  - GPIO 12 (Pin 32): Release servo (1000 us = armed/off, 2000 us = triggered).
-        Held at 1000 us from boot. Driven to 2000 us to fire the release
-        mechanism (e.g. to surface the camera at end of recording).
+  - GPIO 12 (Pin 32): Release servo on a continuous-rotation drive.
+        1500 us = stop (idle), 1000 us = wind one direction, 2000 us =
+        unwind the opposite direction.  The release mechanism is a string
+        wound around a post: running unwind for ~60 s lets the string
+        spool off and frees the unit to float to the surface.  Held at
+        1500 us from boot.
   - GPIO 20 (Pin 38): Camera focus (1000-2000 us servo-style PWM)
   - GPIO 26 (Pin 37): Zoom (1000-2000 us servo-style PWM)
   - GPIO 16 (Pin 36): Pan (1000-2000 us servo-style PWM)
@@ -47,9 +50,17 @@ SERVO_MIN_US = 1000
 SERVO_MAX_US = 2000
 SERVO_MID_US = 1500
 
-# Release servo positions (microseconds)
-RELEASE_OFF_US = SERVO_MIN_US      # armed/idle position
-RELEASE_TRIGGER_US = SERVO_MAX_US  # fires the release mechanism
+# Release servo positions (microseconds).  The release uses a continuous-
+# rotation drive: 1500 us holds the shaft still, 1000/2000 us spin it in
+# opposite directions.  Recipe-triggered "release" runs unwind for
+# RELEASE_DEFAULT_RUN_S seconds, then returns to stop.
+RELEASE_STOP_US = SERVO_MID_US      # 1500 us — shaft stationary
+RELEASE_WIND_US = SERVO_MIN_US      # 1000 us — winds string onto the post
+RELEASE_UNWIND_US = SERVO_MAX_US    # 2000 us — releases the unit to surface
+RELEASE_DEFAULT_RUN_S = 60          # how long the recipe holds unwind for
+
+# Backwards-compat alias used by older callers — interpreted as "stop".
+RELEASE_OFF_US = RELEASE_STOP_US
 
 # NeoPixel config
 LED_COUNT = 1
@@ -85,7 +96,10 @@ class HardwareController:
         self._servo_position = SERVO_MID_US
         self._light_brightness = 0
         self._light_on = False
-        self._release_position = RELEASE_OFF_US
+        self._release_position = RELEASE_STOP_US
+        self._release_run_thread = None
+        self._release_run_cancel = threading.Event()
+        self._release_run_active = False
         self._aux_positions = {name: SERVO_MID_US for name in AUX_PWM_GPIOS}
         self._lock = threading.Lock()
         self._initialized = False
@@ -117,12 +131,12 @@ class HardwareController:
                 self._pi.set_servo_pulsewidth(LIGHT_GPIO, SERVO_MIN_US)
             except Exception as e:
                 logger.warning(f"Could not preset light off: {e}")
-            # Park the release servo at its "armed/off" pulse (1000 us) on
-            # boot so the release mechanism isn't fired by a floating signal.
+            # Park the release servo at its stop pulse (1500 us) on boot so
+            # the continuous-rotation drive is stationary while idle.
             try:
-                self._pi.set_servo_pulsewidth(RELEASE_GPIO, RELEASE_OFF_US)
+                self._pi.set_servo_pulsewidth(RELEASE_GPIO, RELEASE_STOP_US)
             except Exception as e:
-                logger.warning(f"Could not preset release servo off: {e}")
+                logger.warning(f"Could not preset release servo stop: {e}")
         except Exception as e:
             logger.error(f"Failed to connect to pigpio: {e}")
             self._pi = None
@@ -417,10 +431,11 @@ class HardwareController:
 
     # ── Release Servo ────────────────────────────────────────────────────
     #
-    # A single servo on RELEASE_GPIO used to fire a mechanical release that
-    # surfaces the camera at the end of a recording.  Idle/armed position is
-    # 1000 us; driving the pin to 2000 us pulls the latch.  The pin is held
-    # at 1000 us from boot (see _init_pigpio).
+    # Continuous-rotation drive on RELEASE_GPIO.  1500 us holds the shaft
+    # still; 1000 us winds string onto the post; 2000 us unwinds, freeing
+    # the unit to float to the surface.  A recipe trigger runs unwind for
+    # RELEASE_DEFAULT_RUN_S (60 s) then returns to stop.  Held at 1500 us
+    # from boot (see _init_pigpio).
 
     def set_release(self, position_us):
         position_us = max(SERVO_MIN_US, min(SERVO_MAX_US, int(position_us)))
@@ -435,28 +450,89 @@ class HardwareController:
         with self._lock:
             return self._release_position
 
-    def is_release_triggered(self):
+    def get_release_direction(self):
+        """Return 'winding' / 'unwinding' / 'stopped' based on the current pulse."""
+        pos = self.get_release_position()
+        if pos <= RELEASE_WIND_US + 50:
+            return "winding"
+        if pos >= RELEASE_UNWIND_US - 50:
+            return "unwinding"
+        return "stopped"
+
+    def is_release_running(self):
+        """Return True if a timed release run is currently in progress."""
         with self._lock:
-            return self._release_position >= RELEASE_TRIGGER_US
+            return self._release_run_active
 
-    def release_trigger(self):
-        """Fire the release mechanism (drive servo to 2000 us)."""
-        logger.info("Release servo: TRIGGERED (2000 us)")
-        self.set_release(RELEASE_TRIGGER_US)
+    def release_stop(self):
+        """Cancel any timed run and hold the shaft stationary (1500 us)."""
+        self._cancel_release_run()
+        self.set_release(RELEASE_STOP_US)
 
-    def release_off(self):
-        """Return the release servo to its armed/idle position (1000 us)."""
-        self.set_release(RELEASE_OFF_US)
+    # Backwards-compatible alias — older code paths still call release_off().
+    release_off = release_stop
 
-    def toggle_release(self):
-        """Toggle the release servo between 1000 us and 2000 us.
+    def release_wind(self):
+        """Sustained 1000 us wind.  Use release_stop() to return to idle.
 
-        Returns the new position in microseconds.
+        Cancels any in-progress timed unwind.
         """
-        new_pos = (RELEASE_OFF_US if self.is_release_triggered()
-                   else RELEASE_TRIGGER_US)
-        self.set_release(new_pos)
-        return new_pos
+        self._cancel_release_run()
+        self.set_release(RELEASE_WIND_US)
+
+    def release_unwind(self):
+        """Sustained 2000 us unwind.  Use release_stop() to return to idle.
+
+        Cancels any in-progress timed unwind.
+        """
+        self._cancel_release_run()
+        self.set_release(RELEASE_UNWIND_US)
+
+    def release_run_for(self, position_us, duration_s):
+        """Hold ``position_us`` for ``duration_s`` seconds, then return to stop.
+
+        Spawns a daemon thread; cancels any prior in-flight timed run.
+        Returns immediately.
+        """
+        self._cancel_release_run()
+        self._release_run_cancel.clear()
+        with self._lock:
+            self._release_run_active = True
+        self._release_run_thread = threading.Thread(
+            target=self._release_run_worker,
+            args=(int(position_us), float(duration_s)),
+            daemon=True,
+            name="release-run",
+        )
+        self._release_run_thread.start()
+
+    def _release_run_worker(self, position_us, duration_s):
+        try:
+            direction = ("winding" if position_us <= RELEASE_WIND_US + 50
+                         else "unwinding" if position_us >= RELEASE_UNWIND_US - 50
+                         else f"{position_us}us")
+            logger.info(f"Release {direction} for {duration_s:.1f}s")
+            self.set_release(position_us)
+            cancelled = self._release_run_cancel.wait(duration_s)
+            if cancelled:
+                logger.info("Release timed run cancelled")
+            else:
+                logger.info("Release timed run finished")
+        finally:
+            try:
+                self.set_release(RELEASE_STOP_US)
+            except Exception:
+                pass
+            with self._lock:
+                self._release_run_active = False
+
+    def _cancel_release_run(self):
+        t = self._release_run_thread
+        if t and t.is_alive():
+            self._release_run_cancel.set()
+            t.join(timeout=2)
+        with self._lock:
+            self._release_run_active = False
 
     # ── Auxiliary Servo PWM Outputs ────────────────────────────────────
 
@@ -505,9 +581,9 @@ class HardwareController:
                 # Hold the Lumen light at 1000 us (off). A 0 us / disabled
                 # signal drives the light to full brightness.
                 self._pi.set_servo_pulsewidth(LIGHT_GPIO, SERVO_MIN_US)
-                # Hold the release servo at 1000 us (armed/off) so the
-                # mechanism doesn't fire as the daemon shuts down.
-                self._pi.set_servo_pulsewidth(RELEASE_GPIO, RELEASE_OFF_US)
+                # Hold the release servo at 1500 us (stop) so the
+                # continuous-rotation drive isn't spinning at shutdown.
+                self._pi.set_servo_pulsewidth(RELEASE_GPIO, RELEASE_STOP_US)
                 for gpio in AUX_PWM_GPIOS.values():
                     self._pi.set_servo_pulsewidth(gpio, 0)
                 self._pi.stop()

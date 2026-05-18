@@ -1388,7 +1388,8 @@ def route_telemetry():
         data["light_on"] = hw.is_light_on()
         data["led_state"] = hw.get_led_state()
         data["release_position_us"] = hw.get_release_position()
-        data["release_triggered"] = hw.is_release_triggered()
+        data["release_direction"] = hw.get_release_direction()
+        data["release_running"] = hw.is_release_running()
         data["radcam_mode"] = radcam_mode
         if radcam_mode:
             data["aux_pwm"] = hw.get_all_aux_pwm()
@@ -1496,7 +1497,8 @@ def route_release_get():
     return jsonify({
         "success": True,
         "position_us": hw.get_release_position(),
-        "triggered": hw.is_release_triggered(),
+        "direction": hw.get_release_direction(),
+        "running": hw.is_release_running(),
     })
 
 
@@ -1504,12 +1506,26 @@ def route_release_get():
 def route_release():
     """Control the release servo.
 
-    Body: ``{"action": "toggle" | "trigger" | "reset"}`` or
+    The release uses a continuous-rotation drive: 1500 us = stop,
+    1000 us = wind one direction, 2000 us = unwind the other direction.
+
+    Body: ``{"action": "stop" | "wind" | "unwind" | "test"}`` or
     ``{"position_us": <int>}``.
 
-    Any call here cancels a running scheduled recipe — a manual release
-    interaction must not be overridden by an in-progress schedule.
+    - ``wind`` / ``unwind`` set a sustained pulse; the caller is responsible
+      for sending ``stop`` (typical pattern: press-and-hold UI button).
+    - ``test`` runs unwind for ``RELEASE_DEFAULT_RUN_S`` seconds (60 s)
+      then auto-returns to stop — same as the recipe trigger behaviour.
+      Calling ``test`` again, or ``stop``, while a test is in flight will
+      cancel it.
+
+    Any call here cancels a running scheduled recipe.
     """
+    from hardware import (
+        RELEASE_WIND_US, RELEASE_UNWIND_US, RELEASE_STOP_US,
+        RELEASE_DEFAULT_RUN_S,
+    )
+
     data = request.get_json(silent=True) or {}
     action = (data.get("action") or "").lower()
 
@@ -1520,32 +1536,40 @@ def route_release():
         try:
             _stop_recording_internal()
         except Exception as e:
-            logger.error(f"Stop recording during release toggle failed: {e}")
+            logger.error(f"Stop recording during release control failed: {e}")
         hw.stop_sweep()
         hw.light_off()
         hw.led_idle()
 
-    if action == "toggle":
-        new_pos = hw.toggle_release()
-    elif action == "trigger":
-        hw.release_trigger()
-        new_pos = hw.get_release_position()
-    elif action == "reset" or action == "off":
-        hw.release_off()
-        new_pos = hw.get_release_position()
+    if action == "stop" or action == "off" or action == "reset":
+        hw.release_stop()
+    elif action == "wind":
+        hw.release_wind()
+    elif action == "unwind":
+        hw.release_unwind()
+    elif action == "test":
+        # If a test is already running, calling /release with action=test
+        # again starts a fresh 60s window (the worker cancels the prior run).
+        # Use action=stop to abort.
+        hw.release_run_for(RELEASE_UNWIND_US, RELEASE_DEFAULT_RUN_S)
     elif "position_us" in data:
+        # Direct low-level set (cancels any timed run).
+        try:
+            hw.release_stop()  # cancel timed run if any, then set explicit value
+        except Exception:
+            pass
         hw.set_release(int(data["position_us"]))
-        new_pos = hw.get_release_position()
     else:
         return jsonify({
             "success": False,
-            "message": "Provide action=toggle|trigger|reset or position_us",
+            "message": "Provide action=stop|wind|unwind|test or position_us",
         }), 400
 
     return jsonify({
         "success": True,
-        "position_us": new_pos,
-        "triggered": hw.is_release_triggered(),
+        "position_us": hw.get_release_position(),
+        "direction": hw.get_release_direction(),
+        "running": hw.is_release_running(),
         "schedule_cancelled": scheduler_was_running,
     })
 

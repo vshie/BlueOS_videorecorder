@@ -61,12 +61,12 @@ class Scheduler:
         """Begin the auto-start sequence for the given recipe dict."""
         self.stop()
         self._stop.clear()
-        # Park the release servo at its armed/off position (1000 us) at the
-        # very start of every recipe, so that any prior "test" trigger that
-        # left the servo at 2000 us is reset before the new run begins.
+        # Park the release servo at its stop position (1500 us) at the very
+        # start of every recipe, cancelling any prior in-flight test or
+        # manual wind/unwind so the new run begins from a known state.
         if self._hw:
             try:
-                self._hw.release_off()
+                self._hw.release_stop()
             except Exception as e:
                 logger.warning(f"Could not reset release servo: {e}")
         self._active_recipe = recipe
@@ -232,20 +232,21 @@ class Scheduler:
                 self._hw.led_warning()
 
     def _schedule_release(self, duration_s, offset_s):
-        """Schedule the release servo to fire (1000 us → 2000 us) at
+        """Schedule the release servo to run unwind (2000 us) for
+        ``hardware.RELEASE_DEFAULT_RUN_S`` seconds, starting at
         ``duration_s + offset_s`` seconds from now.
 
-        - ``offset_s`` < 0  → fires that many seconds *before* the recording
+        - ``offset_s`` < 0  → starts that many seconds *before* the recording
           duration finishes.
-        - ``offset_s`` == 0 → fires right when the recording duration ends.
-        - ``offset_s`` > 0  → fires that many seconds *after* the recording
+        - ``offset_s`` == 0 → starts right when the recording duration ends.
+        - ``offset_s`` > 0  → starts that many seconds *after* the recording
           stops.
 
         The timer is cancellable via ``self._stop``.
         """
         delay_s = max(0.0, float(duration_s) + float(offset_s))
         logger.info(
-            f"Release scheduled: fire in {delay_s:.0f}s "
+            f"Release scheduled: unwind in {delay_s:.0f}s "
             f"(duration={duration_s:.0f}s, offset={offset_s:+d}s)"
         )
         self._release_thread = threading.Thread(
@@ -257,9 +258,10 @@ class Scheduler:
         if self._stop.wait(delay_s):
             return
         try:
-            self._hw.release_trigger()
+            from hardware import RELEASE_UNWIND_US, RELEASE_DEFAULT_RUN_S
+            self._hw.release_run_for(RELEASE_UNWIND_US, RELEASE_DEFAULT_RUN_S)
         except Exception as e:
-            logger.error(f"Release trigger failed: {e}")
+            logger.error(f"Release run failed: {e}")
 
     def _focus_sweep_loop(self, start_us, end_us, duration_s):
         """Linearly increment focus PWM from start to end over duration."""
