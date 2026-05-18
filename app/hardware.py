@@ -389,9 +389,16 @@ class HardwareController:
         with self._lock:
             self._light_on = True
             if brightness_pct is not None:
+                # Honour the explicit value the caller asked for, including 0%
+                # (which is effectively off — the user clearly chose it).
                 self._light_brightness = max(0, min(100, brightness_pct))
-            b = self._light_brightness
-        self.set_light(b if b > 0 else 100)
+            elif self._light_brightness <= 0:
+                # No value passed and we have nothing remembered (e.g. after
+                # light_off): fall back to full brightness so "on" actually
+                # produces light.
+                self._light_brightness = 100
+            target = self._light_brightness
+        self.set_light(target)
 
     def light_off(self):
         with self._lock:
