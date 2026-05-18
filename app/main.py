@@ -40,6 +40,7 @@ from recipes import (
     save_recipe, delete_recipe, calculate_sweep_time,
 )
 import usb_storage
+import preview as preview_mod
 
 # ── Constants ────────────────────────────────────────────────────────────
 VIDEO_DIR = "/app/videorecordings"
@@ -534,6 +535,37 @@ def start_recording_with_recipe(recipe):
 
 def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
                                force_local=False):
+    """Public start hook that brackets the real work with preview lifecycle.
+
+    Pauses the live preview pipeline (so it does not contend with the
+    recorder for the camera), invokes the inner body, and — if the inner
+    body fails before flipping `recording` to True — restarts the preview
+    so the UI does not end up frozen on a stale frame.
+    """
+    if recording:
+        return False
+
+    try:
+        preview_mgr.stop()
+    except Exception as e:
+        logger.warning(f"Could not stop preview before recording: {e}")
+
+    try:
+        return _start_recording_internal_body(
+            mode=mode, still_interval_s=still_interval_s,
+            rotation=rotation, force_local=force_local,
+        )
+    finally:
+        if not recording:
+            try:
+                preview_mgr.start("radcam" if radcam_mode else "usb")
+            except Exception as e:
+                logger.warning(f"Could not restart preview after failed start: {e}")
+
+
+def _start_recording_internal_body(mode="video", still_interval_s=1.0,
+                                    rotation=0, force_local=False):
+    """Inner body of _start_recording_internal — see wrapper above."""
     global gst_process, recording, start_time, current_video_file
     global current_ass_file, current_events_file
     global ass_thread, stop_ass_thread
@@ -541,9 +573,6 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
     global watchdog_thread, stop_watchdog_thread, file_stall_count
     global stills_thread, stop_stills_thread, stills_dir, stills_count
     global usb_recording, recording_base_dir
-
-    if recording:
-        return False
 
     os.makedirs(VIDEO_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1033,6 +1062,11 @@ def _stop_recording_internal():
 
     logger.info("Recording stopped")
 
+    try:
+        preview_mgr.start("radcam" if radcam_mode else "usb")
+    except Exception as e:
+        logger.warning(f"Could not restart preview after recording: {e}")
+
 # ── Flask Routes ─────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -1367,34 +1401,32 @@ def route_telemetry():
 # ── Snapshot ─────────────────────────────────────────────────────────────
 
 SNAPSHOT_PATH = os.path.join(VIDEO_DIR, ".snapshot_tmp.jpg")
-_auto_snap_stop = threading.Event()
 
-
-def _auto_snapshot_loop():
-    """Capture a preview snapshot every 10 s when not recording."""
-    _auto_snap_stop.wait(5)
-    while not _auto_snap_stop.is_set():
-        if not recording:
-            try:
-                _capture_still(SNAPSHOT_PATH, rotation=image_rotation)
-            except Exception:
-                pass
-        _auto_snap_stop.wait(10)
+# Continuous preview manager — owns a single long-running ffmpeg child that
+# writes the latest frame to SNAPSHOT_PATH at ~8 fps.  Paused while a
+# recording is active so it does not contend with the recorder for the
+# camera.  Started in _boot() once a camera source is confirmed.
+preview_mgr = preview_mod.PreviewManager(
+    output_path=SNAPSHOT_PATH,
+    video_device=VIDEO_DEVICE,
+    rtsp_endpoint=RTSP_ENDPOINT,
+)
 
 
 @app.route("/snapshot", methods=["GET"])
 def route_snapshot():
-    """Capture a fresh JPEG snapshot from the camera and return it."""
-    try:
-        ok = _capture_still(SNAPSHOT_PATH, rotation=image_rotation)
-        if ok and os.path.exists(SNAPSHOT_PATH):
-            resp = send_file(SNAPSHOT_PATH, mimetype="image/jpeg")
-            resp.headers["Cache-Control"] = "no-store"
-            return resp
-        return jsonify({"success": False, "message": "Capture failed"}), 500
-    except Exception as e:
-        logger.error(f"Snapshot error: {e}")
-        return jsonify({"success": False, "message": str(e)}), 500
+    """Return the latest preview frame.
+
+    The preview pipeline writes SNAPSHOT_PATH continuously, so this is
+    simply the most recent cached frame.  During an active recording the
+    preview is paused and this will return whatever frame was last
+    captured — clients should display it as a stale-but-best-effort view.
+    """
+    if os.path.exists(SNAPSHOT_PATH):
+        resp = send_file(SNAPSHOT_PATH, mimetype="image/jpeg")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    return jsonify({"success": False, "message": "No snapshot available yet"}), 503
 
 
 @app.route("/snapshot/latest", methods=["GET"])
@@ -1423,6 +1455,10 @@ def route_rotate():
     cfg = load_config()
     cfg["rotation_degrees"] = image_rotation
     save_config(cfg)
+    try:
+        preview_mgr.set_rotation(image_rotation)
+    except Exception as e:
+        logger.warning(f"Could not update preview rotation: {e}")
     return jsonify({"success": True, "rotation_degrees": image_rotation})
 
 
@@ -1577,6 +1613,11 @@ def route_detect_radcam():
     hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
     init_default_recipes(radcam=True)
     register_service()
+    if not recording:
+        try:
+            preview_mgr.start("radcam")
+        except Exception as e:
+            logger.warning(f"Could not switch preview to RadCam source: {e}")
     return jsonify({"success": True, "message": "RadCam detected, mode switched"})
 
 
@@ -1907,7 +1948,6 @@ def _boot():
     hw.led_idle()
 
     threading.Thread(target=_remux_orphaned_ts, daemon=True).start()
-    threading.Thread(target=_auto_snapshot_loop, daemon=True).start()
 
     cfg = load_config()
     global storage_preference
@@ -1927,6 +1967,18 @@ def _boot():
         hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
         init_default_recipes(radcam=True)
 
+    # Start the live preview pipeline once the camera is known.  If a recipe
+    # is configured to auto-start below, the start_fn will stop the preview
+    # before the recorder takes the camera, then restart it on stop.
+    if camera_ok:
+        try:
+            preview_mgr.set_rotation(image_rotation)
+            preview_mgr.start("radcam" if radcam_mode else "usb")
+        except Exception as e:
+            logger.warning(f"Could not start live preview pipeline: {e}")
+    else:
+        logger.info("Skipping preview pipeline — camera not yet available")
+
     if rid:
         recipe = get_recipe(rid)
         if recipe:
@@ -1944,6 +1996,16 @@ def _boot():
 
     mode_label = "RadCam" if radcam_mode else "DropCam"
     logger.info(f"=== {mode_label} boot sequence complete ===")
+
+    import atexit
+    atexit.register(_shutdown_preview_safely)
+
+
+def _shutdown_preview_safely():
+    try:
+        preview_mgr.shutdown()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

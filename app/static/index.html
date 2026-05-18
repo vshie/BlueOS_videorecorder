@@ -1811,7 +1811,7 @@ pollSnapshot();
 setInterval(pollStatus, 2000);
 setInterval(pollTelemetry, 5000);
 setInterval(loadVideoList, 10000);
-setInterval(pollSnapshot, 10000);
+setInterval(pollSnapshot, 200);
 document.getElementById('fileBrowserFrame').src =
   `http://${window.location.hostname}:7777/files/extensions/videorecorder`;
 
