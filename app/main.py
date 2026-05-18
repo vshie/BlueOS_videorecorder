@@ -7,7 +7,7 @@ stills at a configurable interval. Controls a camera tilt servo, lumen light, an
 RGB status LED. Supports auto-start via saved recording recipes.
 """
 
-from flask import Flask, Response, jsonify, request, send_file
+from flask import Flask, Response, jsonify, make_response, request, send_file
 import io
 import json
 import os
@@ -1401,14 +1401,14 @@ def route_telemetry():
 
 # ── Snapshot ─────────────────────────────────────────────────────────────
 
-SNAPSHOT_PATH = os.path.join(VIDEO_DIR, ".snapshot_tmp.jpg")
+SNAPSHOT_PATH = os.path.join(VIDEO_DIR, ".snapshot_tmp.jpg")  # legacy/disused
 
 # Continuous preview manager — owns a single long-running ffmpeg child that
-# writes the latest frame to SNAPSHOT_PATH at ~8 fps.  Paused while a
-# recording is active so it does not contend with the recorder for the
-# camera.  Started in _boot() once a camera source is confirmed.
+# pipes MJPEG to a Python parser; the latest complete frame lives in memory
+# and is served atomically from /snapshot.  Paused while a recording is
+# active so it does not contend with the recorder for the camera.  Started
+# in _boot() once a camera source is confirmed.
 preview_mgr = preview_mod.PreviewManager(
-    output_path=SNAPSHOT_PATH,
     video_device=VIDEO_DEVICE,
     rtsp_endpoint=RTSP_ENDPOINT,
 )
@@ -1418,26 +1418,32 @@ preview_mgr = preview_mod.PreviewManager(
 def route_snapshot():
     """Return the latest preview frame.
 
-    The preview pipeline writes SNAPSHOT_PATH continuously, so this is
-    simply the most recent cached frame.  During an active recording the
-    preview is paused and this will return whatever frame was last
-    captured — clients should display it as a stale-but-best-effort view.
+    The preview pipeline parses ffmpeg's MJPEG output into discrete JPEGs
+    and keeps the most recent complete frame in memory.  Each request
+    returns a whole frame — there is no half-written-file race.
+
+    During an active recording the preview is paused and this returns
+    whatever frame was last received before the pause (or 503 if none).
     """
-    if os.path.exists(SNAPSHOT_PATH):
-        resp = send_file(SNAPSHOT_PATH, mimetype="image/jpeg")
-        resp.headers["Cache-Control"] = "no-store"
-        return resp
-    return jsonify({"success": False, "message": "No snapshot available yet"}), 503
+    frame, age = preview_mgr.get_latest_frame()
+    if not frame:
+        return jsonify({"success": False, "message": "No snapshot available yet"}), 503
+    resp = make_response(frame)
+    resp.headers["Content-Type"] = "image/jpeg"
+    resp.headers["Cache-Control"] = "no-store"
+    if age is not None:
+        resp.headers["X-Snapshot-Age-Ms"] = str(int(age * 1000))
+    return resp
 
 
 @app.route("/snapshot/latest", methods=["GET"])
 def route_snapshot_latest():
-    """Serve the most recent cached snapshot without triggering a new capture."""
-    if os.path.exists(SNAPSHOT_PATH):
-        resp = send_file(SNAPSHOT_PATH, mimetype="image/jpeg")
-        resp.headers["Cache-Control"] = "no-store"
-        return resp
-    return "", 204
+    """Alias for /snapshot — the in-memory frame is always the most recent.
+
+    Kept for backwards compatibility with older clients that still hit
+    /snapshot/latest expecting a no-side-effects fetch.
+    """
+    return route_snapshot()
 
 
 @app.route("/rotate", methods=["POST"])
