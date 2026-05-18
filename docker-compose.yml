@@ -11,6 +11,12 @@ services:
       - /usr/blueos/extensions/videorecorder:/app/videorecordings
       - /dev/video2:/dev/video2
       - /dev/snd:/dev/snd
+      # Expose host /dev so USB block devices (e.g. /dev/sda1) appear in the
+      # container when hot-plugged. Without this, USB storage only works if a
+      # drive was present at container start.
+      - /dev:/dev
+      # rshared lets the container see mounts the host performs (and vice-versa).
+      - /mnt:/mnt:rshared
     devices:
       - /dev/gpiomem:/dev/gpiomem
       - /dev/spidev0.0:/dev/spidev0.0

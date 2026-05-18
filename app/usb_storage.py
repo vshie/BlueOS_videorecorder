@@ -30,9 +30,14 @@ _stop_probe = threading.Event()
 # ── Detection ────────────────────────────────────────────────────────────
 
 def _scan_usb_devices():
-    """Return a list of partition device paths on removable block devices."""
+    """Return a list of partition device paths on removable block devices.
+
+    Only returns actual partitions (e.g. /dev/sda1).  Whole-disk devices
+    without a partition table are skipped on purpose: mounting them blocks
+    the kernel filesystem probe and can hang `mount` indefinitely.
+    """
     partitions = []
-    for block in glob.glob("/sys/block/sd*"):
+    for block in sorted(glob.glob("/sys/block/sd*")):
         try:
             with open(os.path.join(block, "removable"), "r") as f:
                 if f.read().strip() != "1":
@@ -40,15 +45,18 @@ def _scan_usb_devices():
         except Exception:
             continue
         dev_name = os.path.basename(block)
-        for part in sorted(glob.glob(os.path.join(block, dev_name + "*"))):
+        found_any = False
+        for part in sorted(glob.glob(os.path.join(block, dev_name + "[0-9]*"))):
             part_name = os.path.basename(part)
             dev_path = f"/dev/{part_name}"
             if os.path.exists(dev_path):
                 partitions.append(dev_path)
-        if not partitions:
-            dev_path = f"/dev/{dev_name}"
-            if os.path.exists(dev_path):
-                partitions.append(dev_path)
+                found_any = True
+        if not found_any:
+            logger.debug(
+                f"USB block {dev_name} has no partitions; skipping whole-disk mount "
+                "(raw device without a partition table cannot be mounted safely)"
+            )
     return partitions
 
 
@@ -88,10 +96,20 @@ def try_mount():
             return True
 
         for dev in partitions:
-            result = subprocess.run(
-                ["mount", "-o", "rw", dev, USB_MOUNT_POINT],
-                capture_output=True, timeout=10,
-            )
+            try:
+                result = subprocess.run(
+                    ["mount", "-o", "rw", dev, USB_MOUNT_POINT],
+                    capture_output=True, timeout=10,
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    f"mount {dev} timed out after 10s; device may be unresponsive "
+                    "or have a corrupt/unrecognized filesystem. Skipping."
+                )
+                continue
+            except Exception as e:
+                logger.warning(f"mount {dev} raised: {e}; skipping")
+                continue
             if result.returncode == 0:
                 _mounted = True
                 _device = dev
@@ -109,8 +127,15 @@ def unmount():
     global _mounted, _device
     with _lock:
         if is_mounted():
-            subprocess.run(["umount", USB_MOUNT_POINT], capture_output=True, timeout=10)
-            logger.info("USB unmounted")
+            try:
+                subprocess.run(
+                    ["umount", USB_MOUNT_POINT], capture_output=True, timeout=10,
+                )
+                logger.info("USB unmounted")
+            except subprocess.TimeoutExpired:
+                logger.warning("umount timed out after 10s; leaving state stale")
+            except Exception as e:
+                logger.warning(f"umount raised: {e}")
         _mounted = False
         _device = None
 

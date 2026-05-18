@@ -562,6 +562,12 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
     else:
         rec_dir = VIDEO_DIR
         usb_recording = False
+        if storage_preference == "usb" and not force_local:
+            logger.warning(
+                f"USB preferred but not usable (mounted={usb_storage.is_mounted()}, "
+                f"free_mb={usb_storage.get_free_mb()}); falling back to local "
+                f"storage at {VIDEO_DIR}"
+            )
 
     recording_base_dir = rec_dir
 
@@ -1864,15 +1870,25 @@ def _boot():
     hw.init()
     init_default_recipes()
 
-    usb_storage.try_mount()
-    usb_status = usb_storage.get_status()
+    try:
+        usb_storage.try_mount()
+        usb_status = usb_storage.get_status()
+    except Exception as e:
+        logger.warning(f"USB mount probe failed at boot: {e}; continuing without USB")
+        usb_status = {"mounted": False, "device": None, "free_mb": None, "usable": False}
     if usb_status["mounted"]:
         logger.info(f"USB storage detected: {usb_status['device']}, "
                     f"{usb_status['free_mb']:.0f} MB free, "
                     f"usable={usb_status['usable']}")
     else:
-        logger.info("No USB storage detected at boot")
-    usb_storage.start_probe()
+        logger.info(
+            f"No USB storage detected at boot; recordings will fall back to "
+            f"local storage at {VIDEO_DIR}"
+        )
+    try:
+        usb_storage.start_probe()
+    except Exception as e:
+        logger.warning(f"Could not start USB probe thread: {e}")
 
     def _sweep_snapshot():
         """Capture a still during a sweep (for snapshot_only light mode)."""
