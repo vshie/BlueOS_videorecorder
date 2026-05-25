@@ -137,6 +137,14 @@ class HardwareController:
                 self._pi.set_servo_pulsewidth(RELEASE_GPIO, RELEASE_STOP_US)
             except Exception as e:
                 logger.warning(f"Could not preset release servo stop: {e}")
+            # Center the camera tilt servo on boot. Without this, the GPIO
+            # produces no pulses until something calls set_servo(), so the
+            # shaft is uncommanded and may sit at an arbitrary angle even
+            # though telemetry reports the cached default of 1500 us.
+            try:
+                self._pi.set_servo_pulsewidth(SERVO_GPIO, SERVO_MID_US)
+            except Exception as e:
+                logger.warning(f"Could not preset tilt servo center: {e}")
         except Exception as e:
             logger.error(f"Failed to connect to pigpio: {e}")
             self._pi = None
