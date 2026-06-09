@@ -41,6 +41,7 @@ from recipes import (
 )
 import usb_storage
 import preview as preview_mod
+from battery import BatteryMonitor
 
 # ── Constants ────────────────────────────────────────────────────────────
 VIDEO_DIR = "/app/videorecordings"
@@ -100,6 +101,19 @@ def load_config():
         "radcam_zoom_us": 900,
         "radcam_pan_us": 1500,
         "radcam_ext_servo_us": 1500,
+        "battery": {
+            "enabled": True,
+            "serial_port": "/dev/ttyUSB0",
+            "board_number": 1,
+            "baud_rate": 9600,
+            "poll_interval_s": 5.0,
+            "low_voltage": 13.0,
+            "clear_voltage": 13.2,
+            "csv_logging_enabled": True,
+            "full_charge_soc_percent": 98.0,
+            "log_dir": "/app/videorecordings/battery_logs",
+            "charge_state_path": "/app/videorecordings/battery_logs/charge_state.json",
+        },
     }
 
     # One-time migration: move config from old location to recipes/ subfolder
@@ -217,6 +231,20 @@ def update_ass_file():
                 if radcam_mode:
                     parts.append(f"Focus:{hw.get_aux_pwm('focus')}us")
                     parts.append(f"Zoom:{hw.get_aux_pwm('zoom')}us")
+                try:
+                    batt = battery_monitor.get_data_summary()
+                except Exception:
+                    batt = None
+                if batt and batt.get("connected"):
+                    v = batt.get("voltage_v")
+                    if v is not None:
+                        tag = f"Batt:{float(v):.1f}V"
+                        soc = batt.get("soc_percent")
+                        if soc is not None:
+                            tag += f" SOC:{float(soc):.0f}%"
+                        if batt.get("low_voltage_alarm"):
+                            tag += " LOW"
+                        parts.append(tag)
                 parts.append(f"Recipe:{rname}")
                 parts.append(f"Rec:{ok}")
                 if cpu_t is not None:
@@ -1393,9 +1421,27 @@ def route_telemetry():
         data["radcam_mode"] = radcam_mode
         if radcam_mode:
             data["aux_pwm"] = hw.get_all_aux_pwm()
+        try:
+            data["battery"] = battery_monitor.get_data_summary()
+        except Exception as e:
+            logger.debug(f"Battery summary unavailable: {e}")
+            data["battery"] = {"connected": False, "last_error": str(e)}
         return jsonify(data)
     except Exception as e:
         logger.error(f"Telemetry error: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ── Battery ──────────────────────────────────────────────────────────────
+
+@app.route("/battery", methods=["GET"])
+def route_battery():
+    """Full Daly BMS snapshot (voltage, current, SOC, per-cell, errors, etc.)
+    plus connection state and the rolling CSV log path."""
+    try:
+        return jsonify({"success": True, **battery_monitor.get_data()})
+    except Exception as e:
+        logger.error(f"Battery telemetry error: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 
@@ -1411,6 +1457,23 @@ SNAPSHOT_PATH = os.path.join(VIDEO_DIR, ".snapshot_tmp.jpg")  # legacy/disused
 preview_mgr = preview_mod.PreviewManager(
     video_device=VIDEO_DEVICE,
     rtsp_endpoint=RTSP_ENDPOINT,
+)
+
+
+def _battery_config_getter():
+    """Read the latest battery section from disk so config edits take effect
+    on the next poll without an extension restart."""
+    try:
+        return load_config().get("battery") or {}
+    except Exception as e:
+        logger.warning(f"Could not load battery config: {e}")
+        return {}
+
+
+battery_monitor = BatteryMonitor(
+    hw=hw,
+    config_getter=_battery_config_getter,
+    time_synced_fn=is_time_synced,
 )
 
 
@@ -1939,6 +2002,10 @@ def _boot():
     """Initialize hardware, default recipes, USB storage, and auto-start if configured."""
     logger.info("=== DropCam boot sequence starting ===")
     hw.init()
+    try:
+        battery_monitor.start()
+    except Exception as e:
+        logger.warning(f"Battery monitor failed to start: {e}")
     init_default_recipes()
 
     try:
@@ -2034,6 +2101,10 @@ def _boot():
 def _shutdown_preview_safely():
     try:
         preview_mgr.shutdown()
+    except Exception:
+        pass
+    try:
+        battery_monitor.stop()
     except Exception:
         pass
 

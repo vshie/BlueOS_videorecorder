@@ -51,7 +51,7 @@ RUN cd /tmp && tar xf pigpio.tar.gz \
 WORKDIR /app
 
 # Python dependencies (before COPY so app-only edits don't rebuild this layer)
-RUN pip3 install flask requests pigpio rpi_ws281x Pillow
+RUN pip3 install flask requests pigpio rpi_ws281x Pillow dalybms pyserial
 
 RUN mkdir -p /app/videorecordings
 
@@ -74,7 +74,8 @@ LABEL permissions='\
     "Binds": [\
       "/usr/blueos/extensions/videorecorder:/app/videorecordings",\
       "/dev/video2:/dev/video2",\
-      "/dev/snd:/dev/snd"\
+      "/dev/snd:/dev/snd",\
+      "/dev:/dev"\
     ],\
     "ExtraHosts": ["host.docker.internal:host-gateway"],\
     "PortBindings": {\

@@ -105,6 +105,14 @@ class HardwareController:
         self._initialized = False
         self._led_color = (0, 0, 0)
         self._led_mode = "off"
+        # Battery-low alarm overrides every other LED state. Public LED
+        # setters (led_idle, led_recording, ...) still record their desired
+        # state in self._desired_led, but only drive the pixel when
+        # self._battery_alarm is False. set_battery_alarm() flips the flag
+        # and either takes over the LED or replays the deferred desired
+        # state when cleared.
+        self._battery_alarm = False
+        self._desired_led = None  # tuple: (kind, r, g, b, mode, rate_hz, cycle_s)
 
     def init(self):
         if self._initialized:
@@ -164,15 +172,6 @@ class HardwareController:
 
     # ── RGB LED ──────────────────────────────────────────────────────────
 
-    def set_led_color(self, r, g, b):
-        self._led_stop.set()
-        if self._led_thread and self._led_thread.is_alive():
-            self._led_thread.join(timeout=2)
-        with self._lock:
-            self._led_color = (r, g, b)
-            self._led_mode = "solid"
-        self._set_pixel(r, g, b)
-
     def _set_pixel(self, r, g, b):
         if self._strip:
             # Work around SPI bit-boundary bleed on GPIO 10: the LSB of each
@@ -185,18 +184,49 @@ class HardwareController:
         else:
             logger.debug(f"LED sim: ({r},{g},{b})")
 
-    def flash_led(self, r, g, b, rate_hz=1.0):
+    def _stop_led_thread(self):
         self._led_stop.set()
         if self._led_thread and self._led_thread.is_alive():
             self._led_thread.join(timeout=2)
+
+    def _drive_led(self, kind, r, g, b, mode, rate_hz=None, cycle_s=None):
+        """Actually drive the pixel.  Bypasses the alarm guard."""
+        self._stop_led_thread()
         with self._lock:
             self._led_color = (r, g, b)
-            self._led_mode = "flash_slow" if rate_hz <= 1.0 else "flash_fast"
-        self._led_stop.clear()
-        self._led_thread = threading.Thread(
-            target=self._flash_loop, args=(r, g, b, rate_hz), daemon=True
-        )
-        self._led_thread.start()
+            self._led_mode = mode
+        if kind == "solid":
+            self._set_pixel(r, g, b)
+        elif kind == "off":
+            self._set_pixel(0, 0, 0)
+        elif kind == "flash":
+            self._led_stop.clear()
+            self._led_thread = threading.Thread(
+                target=self._flash_loop, args=(r, g, b, rate_hz or 1.0), daemon=True
+            )
+            self._led_thread.start()
+        elif kind == "breathe":
+            self._led_stop.clear()
+            self._led_thread = threading.Thread(
+                target=self._breathe_loop, args=(r, g, b, cycle_s or 4.0), daemon=True
+            )
+            self._led_thread.start()
+
+    def _request_led(self, kind, r, g, b, mode, rate_hz=None, cycle_s=None):
+        """Record desired LED state, then drive it only if the battery alarm
+        is not currently overriding the LED."""
+        with self._lock:
+            self._desired_led = (kind, r, g, b, mode, rate_hz, cycle_s)
+            alarmed = self._battery_alarm
+        if not alarmed:
+            self._drive_led(kind, r, g, b, mode, rate_hz=rate_hz, cycle_s=cycle_s)
+
+    def set_led_color(self, r, g, b):
+        self._request_led("solid", r, g, b, "solid")
+
+    def flash_led(self, r, g, b, rate_hz=1.0):
+        mode = "flash_slow" if rate_hz <= 1.0 else "flash_fast"
+        self._request_led("flash", r, g, b, mode, rate_hz=rate_hz)
 
     def _flash_loop(self, r, g, b, rate_hz):
         period = 1.0 / max(rate_hz, 0.1)
@@ -211,17 +241,7 @@ class HardwareController:
 
     def breathe_led(self, r, g, b, cycle_s=4.0):
         """Smooth breathing effect: fades from off to the given color and back."""
-        self._led_stop.set()
-        if self._led_thread and self._led_thread.is_alive():
-            self._led_thread.join(timeout=2)
-        with self._lock:
-            self._led_color = (r, g, b)
-            self._led_mode = "breathe"
-        self._led_stop.clear()
-        self._led_thread = threading.Thread(
-            target=self._breathe_loop, args=(r, g, b, cycle_s), daemon=True
-        )
-        self._led_thread.start()
+        self._request_led("breathe", r, g, b, "breathe", cycle_s=cycle_s)
 
     def _breathe_loop(self, r, g, b, cycle_s):
         step_s = 0.03
@@ -239,13 +259,7 @@ class HardwareController:
                 break
 
     def led_off(self):
-        self._led_stop.set()
-        if self._led_thread and self._led_thread.is_alive():
-            self._led_thread.join(timeout=2)
-        with self._lock:
-            self._led_color = (0, 0, 0)
-            self._led_mode = "off"
-        self._set_pixel(0, 0, 0)
+        self._request_led("off", 0, 0, 0, "off")
 
     def led_idle(self):
         """Breathing blue when idle — fades 0 to 50% over ~4 s cycle."""
@@ -260,12 +274,42 @@ class HardwareController:
     def led_complete(self):
         self.set_led_color(0, 0, 127)
 
+    def led_battery_low(self):
+        """6 Hz red flash for a low-battery alarm (full brightness)."""
+        self._drive_led("flash", 255, 0, 0, "battery_low", rate_hz=6.0)
+
+    def set_battery_alarm(self, active):
+        """Highest-priority LED state. When True the LED flashes rapid red
+        regardless of what other code requests (those requests are stored
+        and replayed when the alarm clears)."""
+        active = bool(active)
+        with self._lock:
+            if active == self._battery_alarm:
+                return
+            self._battery_alarm = active
+            desired = self._desired_led
+        if active:
+            self.led_battery_low()
+        else:
+            if desired is None:
+                # No prior request: fall back to idle so we don't leave the
+                # LED on the red flash after clearing.
+                self.led_idle()
+            else:
+                kind, r, g, b, mode, rate_hz, cycle_s = desired
+                self._drive_led(kind, r, g, b, mode, rate_hz=rate_hz, cycle_s=cycle_s)
+
+    def is_battery_alarm_active(self):
+        with self._lock:
+            return self._battery_alarm
+
     def get_led_state(self):
         """Return current LED state for telemetry."""
         with self._lock:
             return {
                 "color": list(self._led_color),
                 "mode": self._led_mode,
+                "battery_alarm": self._battery_alarm,
             }
 
     # ── Camera Servo ─────────────────────────────────────────────────────

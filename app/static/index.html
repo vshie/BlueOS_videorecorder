@@ -407,6 +407,10 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         <div class="telem-item"><div class="telem-label">Release Servo</div><div class="telem-value" id="tRelease">--</div></div>
         <div class="telem-item radcam-only"><div class="telem-label">Focus</div><div class="telem-value" id="tFocus">--</div></div>
         <div class="telem-item radcam-only"><div class="telem-label">Zoom</div><div class="telem-value" id="tZoom">--</div></div>
+        <div class="telem-item"><div class="telem-label">Battery V</div><div class="telem-value" id="tBattV">--</div></div>
+        <div class="telem-item"><div class="telem-label">Battery SOC</div><div class="telem-value" id="tBattSoc">--</div></div>
+        <div class="telem-item"><div class="telem-label">Battery Current</div><div class="telem-value" id="tBattI">--</div></div>
+        <div class="telem-item"><div class="telem-label">Since Full Charge</div><div class="telem-value" id="tBattAge" style="font-size:.85em">--</div></div>
         <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
       </div>
     </div>
@@ -860,10 +864,50 @@ async function pollTelemetry() {
     const c = d.led_state.color || [0,0,0];
     const mode = d.led_state.mode || 'off';
     const colorStr = 'rgb('+c[0]+','+c[1]+','+c[2]+')';
-    const modeLabel = mode === 'off' ? 'Off' : mode === 'solid' ? 'Solid' : mode === 'breathe' ? 'Breathe' : mode === 'flash_slow' ? 'Slow Blink' : 'Fast Blink';
+    let modeLabel;
+    if (mode === 'battery_low') modeLabel = 'LOW BATTERY';
+    else if (mode === 'off') modeLabel = 'Off';
+    else if (mode === 'solid') modeLabel = 'Solid';
+    else if (mode === 'breathe') modeLabel = 'Breathe';
+    else if (mode === 'flash_slow') modeLabel = 'Slow Blink';
+    else if (mode === 'flash_fast') modeLabel = 'Fast Blink';
+    else modeLabel = mode;
     ledEl.innerHTML = '<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:'+colorStr+';vertical-align:middle;margin-right:4px;border:1px solid #ccc"></span>' + modeLabel;
+    if (d.led_state.battery_alarm) {
+      ledEl.style.color = '#d32f2f';
+      ledEl.style.fontWeight = 'bold';
+    } else {
+      ledEl.style.color = '';
+      ledEl.style.fontWeight = '';
+    }
   } else {
     ledEl.textContent = '--';
+  }
+
+  // Battery telemetry
+  const battVEl = document.getElementById('tBattV');
+  const battSocEl = document.getElementById('tBattSoc');
+  const battIEl = document.getElementById('tBattI');
+  const battAgeEl = document.getElementById('tBattAge');
+  const b = d.battery;
+  if (b && b.connected) {
+    if (b.voltage_v != null) {
+      battVEl.textContent = b.voltage_v.toFixed(2) + ' V' + (b.low_voltage_alarm ? ' LOW' : '');
+      battVEl.style.color = b.low_voltage_alarm ? '#d32f2f' : '';
+      battVEl.style.fontWeight = b.low_voltage_alarm ? 'bold' : '';
+    } else {
+      battVEl.textContent = '--';
+    }
+    battSocEl.textContent = b.soc_percent != null ? b.soc_percent.toFixed(0) + '%' : '--';
+    battIEl.textContent = b.current_a != null ? b.current_a.toFixed(2) + ' A' : '--';
+    battAgeEl.textContent = b.since_full_charge || '--';
+  } else {
+    battVEl.textContent = b && b.last_error ? 'N/C' : '--';
+    battVEl.style.color = '';
+    battVEl.style.fontWeight = '';
+    battSocEl.textContent = '--';
+    battIEl.textContent = '--';
+    battAgeEl.textContent = '--';
   }
 
   if (d.time_synced === false) {

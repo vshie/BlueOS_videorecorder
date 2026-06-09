@@ -13,4 +13,6 @@ dependencies = [
     "pigpio",
     "rpi_ws281x",
     "Pillow",
+    "dalybms",
+    "pyserial",
 ]
