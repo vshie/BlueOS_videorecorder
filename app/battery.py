@@ -29,7 +29,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
-    "serial_port": "/dev/ttyUSB0",
+    # "auto" (or empty) auto-scans every /dev/ttyUSB*/ttyACM*/list_ports
+    # candidate, probes each for a Daly BMS response, and uses the first
+    # one that answers. Set to an explicit path (e.g. "/dev/ttyUSB0") to
+    # skip scanning.
+    "serial_port": "auto",
     "board_number": 1,
     "baud_rate": 9600,
     "serial_timeout_s": 0.5,
@@ -43,6 +47,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "log_dir": "/app/videorecordings/battery_logs",
     "charge_state_path": "/app/videorecordings/battery_logs/charge_state.json",
 }
+
+# Serial paths we deliberately skip when auto-scanning. The Pi's onboard
+# UART /dev/ttyAMA0 / /dev/ttyS0 sit next to the GPIO pins and are not
+# normally wired to a BMS; probing them at 9600 baud would still be safe
+# but it slows down auto-detection of the real RS485 adapter.
+_AUTO_SCAN_SKIP_PREFIXES = ("/dev/ttyAMA", "/dev/ttyS", "/dev/ttyprintk")
 
 _SEQUENCE_RE = re.compile(r"^battery_(\d+)(?:_.*)?\.csv$", re.IGNORECASE)
 
@@ -81,10 +91,14 @@ class BatteryMonitor:
         self._thread: threading.Thread | None = None
 
         self._reader: Any = None
+        self._reader_device: str | None = None
         self._connected = False
         self._last_snapshot: dict[str, Any] | None = None
         self._last_error: str | None = None
         self._alarm_active = False
+        # Ports that responded to a probe but with bad data, so we deprioritize
+        # them on the next scan instead of churning them every cycle.
+        self._port_failures: dict[str, int] = {}
 
         # CSV state — assigned on first successful poll once we know log_dir
         self._csv_path: Path | None = None
@@ -122,6 +136,7 @@ class BatteryMonitor:
             snap = self._last_snapshot
             return {
                 "connected": self._connected,
+                "serial_port": self._reader_device,
                 "last_error": self._last_error,
                 "low_voltage_alarm": self._alarm_active,
                 "csv_path": str(self._csv_path) if self._csv_path else None,
@@ -193,34 +208,164 @@ class BatteryMonitor:
             self._stop.wait(max(interval, 0.5))
 
     def _connect(self, cfg: dict[str, Any]) -> None:
-        from doris_battery.bms_reader import DorisBMSReader
+        """Find a serial port that answers as a Daly BMS and adopt it.
 
-        device = cfg["serial_port"]
+        If `serial_port` config is "auto" (default) or empty, enumerate all
+        currently-visible serial devices, probe each one in turn, and use
+        the first that responds. Otherwise the configured path is the only
+        candidate. Ports that fail the probe are released (closed) so they
+        stay available to other consumers.
+        """
+        self._disconnect()
+
+        explicit = cfg.get("serial_port") or "auto"
+        if explicit and explicit not in ("auto", "AUTO", "scan"):
+            candidates = [explicit]
+        else:
+            candidates = self._iter_candidate_ports()
+            if not candidates:
+                raise RuntimeError("No serial devices found to probe")
+
         board = int(cfg.get("board_number", 1))
         baud = int(cfg.get("baud_rate", 9600))
         timeout = float(cfg.get("serial_timeout_s", 0.5))
         retries = int(cfg.get("request_retries", 3))
 
-        self._disconnect()
+        errors: list[str] = []
+        for device in candidates:
+            reader = self._probe_device(device, board, baud, timeout, retries)
+            if reader is None:
+                errors.append(f"{device}: no Daly response")
+                continue
+            self._reader = reader
+            self._reader_device = device
+            self._port_failures.pop(device, None)
+            with self._lock:
+                self._connected = True
+                self._last_error = None
+            logger.info(
+                "Battery monitor connected to %s board=%d @ %d baud (auto-detected from %d candidate(s))",
+                device, board, baud, len(candidates),
+            )
+            return
+
+        # None responded — record the failure pattern so we don't spam the
+        # log with the same useless port at the top of the list forever.
+        for device in candidates:
+            self._port_failures[device] = self._port_failures.get(device, 0) + 1
+
+        msg = "; ".join(errors) if errors else "no candidates probed"
+        raise RuntimeError(f"No Daly BMS found ({msg})")
+
+    def _probe_device(
+        self,
+        device: str,
+        board: int,
+        baud: int,
+        timeout: float,
+        retries: int,
+    ) -> Any | None:
+        """Open `device`, send one quick BMS read, return the reader if it
+        responds with plausible Daly data, else close and return None."""
+        from doris_battery.bms_reader import DorisBMSReader
 
         reader = DorisBMSReader(
             device,
             board_number=board,
-            request_retries=retries,
+            # Tight retry count for the probe — a real BMS answers on the
+            # first try; non-BMS adapters just waste time on retries.
+            request_retries=1,
             baudrate=baud,
-            serial_timeout=timeout,
+            # Short read timeout for the probe so we move on quickly when
+            # a port has no responder.
+            serial_timeout=min(timeout, 0.4),
             pack_name="dropcam",
         )
-        reader.connect()
-        self._reader = reader
-        with self._lock:
-            self._connected = True
-            self._last_error = None
-        logger.info("Battery monitor connected to %s board=%d @ %d baud", device, board, baud)
+        try:
+            reader.connect()
+        except Exception as exc:
+            logger.debug("Probe %s: open failed: %s", device, exc)
+            return None
+
+        try:
+            soc = reader._bms.get_soc()
+        except Exception as exc:
+            logger.debug("Probe %s: read raised: %s", device, exc)
+            reader.disconnect()
+            return None
+
+        voltage = None
+        if isinstance(soc, dict):
+            voltage = soc.get("total_voltage")
+
+        if voltage is None:
+            logger.debug("Probe %s: no SOC response (likely not a BMS)", device)
+            reader.disconnect()
+            return None
+
+        try:
+            v_num = float(voltage)
+        except (TypeError, ValueError):
+            logger.debug("Probe %s: voltage=%r is not numeric", device, voltage)
+            reader.disconnect()
+            return None
+
+        # Sanity-check the response. A 4S LiFePO4 pack sits ~10-15 V; allow a
+        # wide window so we don't reject odd states, but reject 0 V which
+        # often comes back from misframed reads.
+        if v_num <= 1.0 or v_num > 80.0:
+            logger.debug("Probe %s: voltage %.2f V outside plausible range", device, v_num)
+            reader.disconnect()
+            return None
+
+        # Bump up to the configured retry count for the real polling.
+        try:
+            reader._bms.request_retries = retries
+            reader._bms.serial_timeout = timeout
+            if reader._bms.serial is not None:
+                reader._bms.serial.timeout = timeout
+        except Exception:
+            pass
+
+        logger.info("Probe %s: Daly BMS responded (V=%.2f)", device, v_num)
+        return reader
+
+    @staticmethod
+    def _iter_candidate_ports() -> list[str]:
+        """Enumerate serial device paths to probe, USB-style first.
+
+        Combines pyserial's `list_ports.comports()` with a direct glob over
+        /dev so we don't miss devices that pyserial's enumeration drops
+        (some adapters lack udev info inside containers)."""
+        import glob
+
+        seen: list[str] = []
+
+        def _add(path: str) -> None:
+            if not path or path in seen:
+                return
+            if any(path.startswith(prefix) for prefix in _AUTO_SCAN_SKIP_PREFIXES):
+                return
+            seen.append(path)
+
+        try:
+            from serial.tools import list_ports
+
+            for info in list_ports.comports():
+                _add(info.device)
+        except Exception as exc:
+            logger.debug("list_ports.comports() failed: %s", exc)
+
+        for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*"):
+            for path in sorted(glob.glob(pattern)):
+                _add(path)
+
+        return seen
 
     def _disconnect(self) -> None:
         reader = self._reader
         self._reader = None
+        self._reader_device = None
         if reader is None:
             return
         try:
