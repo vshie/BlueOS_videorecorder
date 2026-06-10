@@ -51,13 +51,23 @@ RUN cd /tmp && tar xf pigpio.tar.gz \
     && ldconfig \
     && rm -rf /tmp/pigpio*
 
+# Build the lg archive (liblgpio + Python lgpio) from source. lgpio is the
+# Pi 5 servo/PWM backend; the lgpio pip wrapper only links against liblgpio
+# (absent on Ubuntu), so we build the full library here. `make install` also
+# installs the Python lgpio module (via swig, installed above).
+ADD https://github.com/joan2937/lg/archive/master.tar.gz /tmp/lg.tar.gz
+RUN cd /tmp && tar xf lg.tar.gz \
+    && cd lg-master && make -j"$(nproc)" && make install \
+    && ldconfig \
+    && rm -rf /tmp/lg*
+
 WORKDIR /app
 
-# Python dependencies (before COPY so app-only edits don't rebuild this layer)
-# Servo/PWM: pigpio (Pi 4, DMA) + lgpio (Pi 5 / RP1, software-timed).
-# WS2812 LED: rpi_ws281x (Pi 4) + a self-contained SPI driver (Pi 5) that only
-# needs spidev (see app/gpio_backend.py).
-RUN pip3 install flask requests pigpio lgpio rpi_ws281x spidev Pillow dalybms pyserial
+# Python dependencies (before COPY so app-only edits don't rebuild this layer).
+# Servo/PWM: pigpio (Pi 4, DMA) + lgpio (Pi 5 / RP1) -- lgpio is installed by
+# the lg source build above, not pip. WS2812 LED: rpi_ws281x (Pi 4) + a
+# self-contained SPI driver (Pi 5) that only needs spidev (gpio_backend.py).
+RUN pip3 install flask requests pigpio rpi_ws281x spidev Pillow dalybms pyserial
 
 RUN mkdir -p /app/videorecordings
 

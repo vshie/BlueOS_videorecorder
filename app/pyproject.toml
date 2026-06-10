@@ -10,10 +10,11 @@ classifiers = [
 dependencies = [
     "flask",
     "requests",
-    # Servo/PWM: pigpio is the Pi 4 path (DMA-timed); lgpio is the Pi 5 path
-    # (RP1, software-timed) and is also the universal fallback.
+    # Servo/PWM: pigpio is the Pi 4 path (DMA-timed). The Pi 5 path uses lgpio
+    # (RP1, software-timed); lgpio is built from the lg source archive in the
+    # Dockerfile (its pip wrapper can't link liblgpio on this base image), so
+    # it is intentionally not listed as a pip dependency here.
     "pigpio",
-    "lgpio",
     # WS2812 RGB LED: rpi_ws281x is the Pi 4 path; the Pi 5 path is a
     # self-contained SPI driver in gpio_backend.py that only needs spidev.
     "rpi_ws281x",
