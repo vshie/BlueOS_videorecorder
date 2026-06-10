@@ -1417,6 +1417,10 @@ def route_telemetry():
         data["recording"] = recording
         data["light_on"] = hw.is_light_on()
         data["led_state"] = hw.get_led_state()
+        try:
+            data["gpio_backends"] = hw.get_backend_info()
+        except Exception:
+            pass
         data["release_position_us"] = hw.get_release_position()
         data["release_direction"] = hw.get_release_direction()
         data["release_running"] = hw.is_release_running()

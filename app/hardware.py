@@ -26,6 +26,8 @@ import time
 import logging
 import atexit
 
+from gpio_backend import make_servo_backend, make_led_backend
+
 logger = logging.getLogger(__name__)
 
 # GPIO pin assignments
@@ -66,29 +68,14 @@ RELEASE_OFF_US = RELEASE_STOP_US
 LED_COUNT = 1
 LED_BRIGHTNESS = 255
 
-# Try importing hardware libraries; provide stubs if unavailable (dev machine)
-_pigpio_available = False
-_neopixel_available = False
-_pi = None
-_strip = None
-
-try:
-    import pigpio
-    _pigpio_available = True
-except ImportError:
-    logger.warning("pigpio not available; servo/light control will be simulated")
-
-try:
-    from rpi_ws281x import PixelStrip, Color, ws
-    _neopixel_available = True
-except ImportError:
-    logger.warning("rpi_ws281x not available; LED control will be simulated")
-
 
 class HardwareController:
     def __init__(self):
-        self._pi = None
-        self._strip = None
+        # Hardware backends are selected at init() time based on the board:
+        #   _servo -> lgpio (Pi 5) or pigpio (Pi 4); _led -> rpi5-ws2812 (Pi 5)
+        #   or rpi_ws281x (Pi 4). Both degrade to no-op sim backends off-Pi.
+        self._servo = None
+        self._led = None
         self._led_thread = None
         self._led_stop = threading.Event()
         self._sweep_thread = None
@@ -117,70 +104,46 @@ class HardwareController:
     def init(self):
         if self._initialized:
             return
-        self._init_pigpio()
-        self._init_neopixel()
+        self._init_servo()
+        self._init_led()
         self._initialized = True
         atexit.register(self.cleanup)
         logger.info("Hardware controller initialized")
 
-    def _init_pigpio(self):
-        if not _pigpio_available:
+    def _init_servo(self):
+        self._servo = make_servo_backend()
+        if not self._servo.available:
             return
+        # Drive the Lumen light to its "off" pulse (1000 us) immediately,
+        # because a floating/undriven signal on this pin makes the light
+        # come on at full brightness.
         try:
-            self._pi = pigpio.pi()
-            if not self._pi.connected:
-                logger.error("pigpio daemon not running; servo/light will be simulated")
-                self._pi = None
-                return
-            # Drive the Lumen light to its "off" pulse (1000 us) immediately,
-            # because a floating/undriven signal on this pin makes the light
-            # come on at full brightness.
-            try:
-                self._pi.set_servo_pulsewidth(LIGHT_GPIO, SERVO_MIN_US)
-            except Exception as e:
-                logger.warning(f"Could not preset light off: {e}")
-            # Park the release servo at its stop pulse (1500 us) on boot so
-            # the continuous-rotation drive is stationary while idle.
-            try:
-                self._pi.set_servo_pulsewidth(RELEASE_GPIO, RELEASE_STOP_US)
-            except Exception as e:
-                logger.warning(f"Could not preset release servo stop: {e}")
-            # Center the camera tilt servo on boot. Without this, the GPIO
-            # produces no pulses until something calls set_servo(), so the
-            # shaft is uncommanded and may sit at an arbitrary angle even
-            # though telemetry reports the cached default of 1500 us.
-            try:
-                self._pi.set_servo_pulsewidth(SERVO_GPIO, SERVO_MID_US)
-            except Exception as e:
-                logger.warning(f"Could not preset tilt servo center: {e}")
+            self._servo.set_pulse(LIGHT_GPIO, SERVO_MIN_US)
         except Exception as e:
-            logger.error(f"Failed to connect to pigpio: {e}")
-            self._pi = None
+            logger.warning(f"Could not preset light off: {e}")
+        # Park the release servo at its stop pulse (1500 us) on boot so
+        # the continuous-rotation drive is stationary while idle.
+        try:
+            self._servo.set_pulse(RELEASE_GPIO, RELEASE_STOP_US)
+        except Exception as e:
+            logger.warning(f"Could not preset release servo stop: {e}")
+        # Center the camera tilt servo on boot. Without this, the GPIO
+        # produces no pulses until something calls set_servo(), so the
+        # shaft is uncommanded and may sit at an arbitrary angle even
+        # though telemetry reports the cached default of 1500 us.
+        try:
+            self._servo.set_pulse(SERVO_GPIO, SERVO_MID_US)
+        except Exception as e:
+            logger.warning(f"Could not preset tilt servo center: {e}")
 
-    def _init_neopixel(self):
-        if not _neopixel_available:
-            return
-        try:
-            self._strip = PixelStrip(
-                LED_COUNT, LED_GPIO, 800000, 10, False, LED_BRIGHTNESS, 0,
-                strip_type=ws.WS2811_STRIP_RGB,
-            )
-            self._strip.begin()
-        except Exception as e:
-            logger.error(f"Failed to initialize NeoPixel: {e}")
-            self._strip = None
+    def _init_led(self):
+        self._led = make_led_backend(LED_GPIO, LED_COUNT, LED_BRIGHTNESS)
 
     # ── RGB LED ──────────────────────────────────────────────────────────
 
     def _set_pixel(self, r, g, b):
-        if self._strip:
-            # Work around SPI bit-boundary bleed on GPIO 10: the LSB of each
-            # transmitted byte can leak into the MSB of the next byte.  Since
-            # bytes are sent R, G, B, an odd R value injects ~128 into Green
-            # and an odd G value injects ~128 into Blue.  Clearing the LSB of
-            # R and G prevents this with imperceptible color loss (max 1/255).
-            self._strip.setPixelColor(0, Color(r & 0xFE, g & 0xFE, b))
-            self._strip.show()
+        if self._led and self._led.available:
+            self._led.set_color(r, g, b)
         else:
             logger.debug(f"LED sim: ({r},{g},{b})")
 
@@ -312,14 +275,25 @@ class HardwareController:
                 "battery_alarm": self._battery_alarm,
             }
 
+    def get_backend_info(self):
+        """Return the active servo/LED backend names (for diagnostics)."""
+        servo = getattr(self._servo, "name", None) if self._servo else None
+        led = getattr(self._led, "name", None) if self._led else None
+        return {
+            "servo": servo,
+            "servo_available": bool(self._servo and self._servo.available),
+            "led": led,
+            "led_available": bool(self._led and self._led.available),
+        }
+
     # ── Camera Servo ─────────────────────────────────────────────────────
 
     def set_servo(self, position_us):
         position_us = max(SERVO_MIN_US, min(SERVO_MAX_US, int(position_us)))
         with self._lock:
             self._servo_position = position_us
-        if self._pi:
-            self._pi.set_servo_pulsewidth(SERVO_GPIO, position_us)
+        if self._servo and self._servo.available:
+            self._servo.set_pulse(SERVO_GPIO, position_us)
         else:
             logger.debug(f"Servo sim: {position_us} us")
 
@@ -442,8 +416,8 @@ class HardwareController:
         with self._lock:
             self._light_brightness = brightness_pct
         pwm_us = SERVO_MIN_US + int((SERVO_MAX_US - SERVO_MIN_US) * brightness_pct / 100)
-        if self._pi:
-            self._pi.set_servo_pulsewidth(LIGHT_GPIO, pwm_us)
+        if self._servo and self._servo.available:
+            self._servo.set_pulse(LIGHT_GPIO, pwm_us)
         else:
             logger.debug(f"Light sim: {brightness_pct}% = {pwm_us} us")
 
@@ -470,10 +444,10 @@ class HardwareController:
         with self._lock:
             self._light_on = False
             self._light_brightness = 0
-        if self._pi:
+        if self._servo and self._servo.available:
             # The Lumen light treats a disabled/0 us pulse as "full brightness",
             # so we must actively hold the minimum pulse (1000 us) to keep it off.
-            self._pi.set_servo_pulsewidth(LIGHT_GPIO, SERVO_MIN_US)
+            self._servo.set_pulse(LIGHT_GPIO, SERVO_MIN_US)
         else:
             logger.debug(f"Light sim: off ({SERVO_MIN_US} us)")
 
@@ -493,8 +467,8 @@ class HardwareController:
         position_us = max(SERVO_MIN_US, min(SERVO_MAX_US, int(position_us)))
         with self._lock:
             self._release_position = position_us
-        if self._pi:
-            self._pi.set_servo_pulsewidth(RELEASE_GPIO, position_us)
+        if self._servo and self._servo.available:
+            self._servo.set_pulse(RELEASE_GPIO, position_us)
         else:
             logger.debug(f"Release sim: {position_us} us")
 
@@ -596,8 +570,8 @@ class HardwareController:
         gpio = AUX_PWM_GPIOS[channel]
         with self._lock:
             self._aux_positions[channel] = position_us
-        if self._pi:
-            self._pi.set_servo_pulsewidth(gpio, position_us)
+        if self._servo and self._servo.available:
+            self._servo.set_pulse(gpio, position_us)
         else:
             logger.debug(f"Aux PWM sim [{channel}]: {position_us} us")
 
@@ -616,8 +590,8 @@ class HardwareController:
         if channel not in AUX_PWM_GPIOS:
             raise ValueError(f"Unknown aux PWM channel: {channel}")
         gpio = AUX_PWM_GPIOS[channel]
-        if self._pi:
-            self._pi.set_servo_pulsewidth(gpio, 0)
+        if self._servo and self._servo.available:
+            self._servo.set_pulse(gpio, 0)
         else:
             logger.debug(f"Aux PWM sim [{channel}]: off")
 
@@ -627,18 +601,26 @@ class HardwareController:
         logger.info("Cleaning up hardware...")
         self._sweep_stop.set()
         self.led_off()
-        if self._pi:
+        if self._led:
             try:
-                self._pi.set_servo_pulsewidth(SERVO_GPIO, 0)
+                self._led.cleanup()
+            except Exception:
+                pass
+        if self._servo and self._servo.available:
+            try:
+                self._servo.set_pulse(SERVO_GPIO, 0)
                 # Hold the Lumen light at 1000 us (off). A 0 us / disabled
                 # signal drives the light to full brightness.
-                self._pi.set_servo_pulsewidth(LIGHT_GPIO, SERVO_MIN_US)
+                self._servo.set_pulse(LIGHT_GPIO, SERVO_MIN_US)
                 # Hold the release servo at 1500 us (stop) so the
                 # continuous-rotation drive isn't spinning at shutdown.
-                self._pi.set_servo_pulsewidth(RELEASE_GPIO, RELEASE_STOP_US)
+                self._servo.set_pulse(RELEASE_GPIO, RELEASE_STOP_US)
                 for gpio in AUX_PWM_GPIOS.values():
-                    self._pi.set_servo_pulsewidth(gpio, 0)
-                self._pi.stop()
+                    self._servo.set_pulse(gpio, 0)
+            except Exception:
+                pass
+            try:
+                self._servo.cleanup()
             except Exception:
                 pass
         self._initialized = False

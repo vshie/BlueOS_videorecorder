@@ -10,8 +10,16 @@ classifiers = [
 dependencies = [
     "flask",
     "requests",
+    # Servo/PWM: pigpio is the Pi 4 path (DMA-timed); lgpio is the Pi 5 path
+    # (RP1, software-timed) and is also the universal fallback.
     "pigpio",
+    "lgpio",
+    # WS2812 RGB LED: rpi_ws281x is the Pi 4 path; rpi5-ws2812 drives it over
+    # SPI on the Pi 5 (and works on Pi 4 too). numpy/spidev back rpi5-ws2812.
     "rpi_ws281x",
+    "rpi5-ws2812",
+    "numpy",
+    "spidev",
     "Pillow",
     "dalybms",
     "pyserial",
