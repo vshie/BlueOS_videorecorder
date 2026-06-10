@@ -9,6 +9,8 @@ A BlueOS extension that turns a Raspberry Pi 4 into a standalone, deployable dro
 - **Still capture mode** at configurable intervals (0.1s resolution)
 - **Camera tilt servo** control (1000-2000 us PWM on GPIO 21)
 - **Lumen light** control via servo PWM (GPIO 13)
+- **Release servo** continuous-rotation drive for surface recovery (GPIO 12)
+- **Focus / zoom / pan / external** auxiliary servo PWM channels (GPIO 20 / 26 / 16 / 19)
 - **RGB LED** status indicator (WS2812 NeoPixel on GPIO 10)
 - **System telemetry** subtitle overlay (CPU temp, voltage, clock, servo position, light level)
 - **Disk space guard** — stops recording when < 1 GB free
@@ -21,6 +23,11 @@ A BlueOS extension that turns a Raspberry Pi 4 into a standalone, deployable dro
 | RGB Status LED (WS2812) | GPIO 10 (SPI MOSI) | Pin 19 |
 | Camera Tilt Servo | GPIO 21 | Pin 40 |
 | Lumen Light | GPIO 13 (PWM1) | Pin 33 |
+| Release Servo | GPIO 12 | Pin 32 |
+| Camera Focus | GPIO 20 | Pin 38 |
+| Zoom | GPIO 26 | Pin 37 |
+| Pan | GPIO 16 | Pin 36 |
+| External Servo | GPIO 19 | Pin 35 |
 | USB Camera | — | /dev/video2 |
 
 ## Quick Start
@@ -52,7 +59,8 @@ Copy and paste this permissions JSON when BlueOS asks for extension permissions:
     "Binds": [
       "/usr/blueos/extensions/videorecorder:/app/videorecordings",
       "/dev/video2:/dev/video2",
-      "/dev/snd:/dev/snd"
+      "/dev/snd:/dev/snd",
+      "/dev:/dev"
     ],
     "ExtraHosts": ["host.docker.internal:host-gateway"],
     "PortBindings": {
@@ -92,11 +100,12 @@ Connected cameras must have their streams **removed** from the BlueOS Video Stre
 |-----------|------|--------------|-------|
 | RGB Status LED (WS2812) | GPIO 10 (SPI MOSI) | Pin 19 | Single NeoPixel data line |
 | Lumen Light | GPIO 13 (PWM1) | Pin 33 | 1000-2000 µs servo PWM. Modes: always on, pause points only, or snapshot only |
+| Camera Tilt Servo | GPIO 21 | Pin 40 | 1000-2000 µs PWM. Centered at 1500 µs on boot |
+| Release Servo | GPIO 12 | Pin 32 | Continuous-rotation drive: 1500 µs = stop, 1000 µs = wind, 2000 µs = unwind (frees unit to surface). Held at 1500 µs from boot |
 | Camera Focus | GPIO 20 | Pin 38 | 1000-2000 µs servo-style PWM |
 | Zoom | GPIO 26 | Pin 37 | 1000-2000 µs servo-style PWM |
 | Pan | GPIO 16 | Pin 36 | 1000-2000 µs servo-style PWM |
 | External Servo | GPIO 19 | Pin 35 | 1000-2000 µs servo-style PWM |
-| Camera Tilt Servo | GPIO 21 | Pin 40 | 1000-2000 µs PWM |
 | USB Camera | /dev/video2 | — | H264 USB camera (1080p 30fps) |
 
 All servo/light/PWM signals share a common ground with the Pi. Servos, lights, and motors require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header.
