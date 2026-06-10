@@ -30,6 +30,8 @@ camera/release/light servos here that is acceptable.
 from __future__ import annotations
 
 import logging
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -179,21 +181,189 @@ class LgpioServoBackend(ServoBackend):
             pass
 
 
-def make_servo_backend() -> ServoBackend:
-    """Pick the best available servo backend for this board."""
-    order = ["lgpio"] if is_pi5() else ["pigpio", "lgpio"]
-    for name in order:
+# GPIOs routed to the RP1 hardware-PWM peripheral when `dtoverlay=pwm-2chan`
+# is loaded on a Pi 5. These give jitter-free 50 Hz servo pulses, unlike the
+# software-timed lgpio path. GPIO 18 -> PWM channel 2, GPIO 19 -> channel 3.
+HW_PWM_PINS = (18, 19)
+
+
+class HardwarePwmServoBackend(ServoBackend):
+    """Jitter-free servo pulses via the kernel hardware-PWM (/sys/class/pwm).
+
+    On a Pi 5 the RP1 PWM0 peripheral exposes 4 channels; with
+    ``dtoverlay=pwm-2chan`` loaded, GPIO 12/13/18/19 map to channels 0/1/2/3.
+    This drives a fixed 50 Hz (20 ms) period and varies the duty cycle to set
+    the pulse width, which the RP1 clocks in hardware (no scheduling jitter).
+    Requires a privileged container so /sys/class/pwm is writable.
+    """
+
+    name = "rp1-hw-pwm"
+    PERIOD_NS = 20_000_000  # 50 Hz
+
+    def __init__(self, pins=HW_PWM_PINS) -> None:
+        self._chip_path, gpio_to_channel = self._find_chip()
+        self._map = {g: gpio_to_channel[g] for g in pins if g in gpio_to_channel}
+        if not self._map:
+            raise RuntimeError("no hardware-PWM channels available for requested pins")
+        self._exported: dict[int, int] = {}  # gpio -> channel
+        self.available = True
+        logger.info(
+            "rp1-hw-pwm: %s, pins->channels %s", self._chip_path, self._map
+        )
+
+    @staticmethod
+    def _find_chip() -> tuple[str, dict[int, int]]:
+        import glob
+
+        chips = sorted(glob.glob("/sys/class/pwm/pwmchip*"))
+        # RP1 PWM0 on the Pi 5 exposes 4 channels (npwm == 4); prefer it.
+        best = None
+        for path in chips:
+            try:
+                with open(os.path.join(path, "npwm")) as handle:
+                    n = int(handle.read().strip())
+            except (OSError, ValueError):
+                continue
+            if n >= 4:
+                return path, {12: 0, 13: 1, 18: 2, 19: 3}
+            if n >= 2 and best is None:
+                best = path
+        if best is not None:
+            # 2-channel chip (older overlay): pwm-2chan default maps 18->0, 19->1.
+            return best, {18: 0, 19: 1}
+        raise RuntimeError(
+            "no hardware-PWM chip found (is 'dtoverlay=pwm-2chan' in config.txt + reboot?)"
+        )
+
+    def _channel_dir(self, channel: int) -> str:
+        return os.path.join(self._chip_path, f"pwm{channel}")
+
+    @staticmethod
+    def _write(path: str, value) -> None:
+        with open(path, "w") as handle:
+            handle.write(f"{value}\n")
+
+    def _ensure_exported(self, gpio: int, channel: int) -> None:
+        if gpio in self._exported:
+            return
+        ch_dir = self._channel_dir(channel)
+        if not os.path.isdir(ch_dir):
+            self._write(os.path.join(self._chip_path, "export"), channel)
+            # The pwmN control files can appear a moment after export.
+            for _ in range(100):
+                if os.path.isdir(ch_dir) and os.access(
+                    os.path.join(ch_dir, "period"), os.W_OK
+                ):
+                    break
+                time.sleep(0.01)
+        # Duty must be <= period; set duty 0 first, then the fixed servo period.
         try:
-            if name == "pigpio":
-                backend = PigpioServoBackend()
-            else:
-                backend = LgpioServoBackend()
-            logger.info("Servo backend: %s", backend.name)
-            return backend
-        except Exception as exc:
-            logger.warning("Servo backend %s unavailable: %s", name, exc)
-    logger.warning("No servo backend available; servo/PWM will be simulated")
-    return ServoBackend()
+            self._write(os.path.join(ch_dir, "duty_cycle"), 0)
+        except OSError:
+            pass
+        self._write(os.path.join(ch_dir, "period"), self.PERIOD_NS)
+        self._exported[gpio] = channel
+
+    def set_pulse(self, gpio: int, pulse_us: int) -> None:
+        channel = self._map.get(gpio)
+        if channel is None:
+            raise KeyError(f"gpio {gpio} has no hardware-PWM channel")
+        ch_dir = self._channel_dir(channel)
+        pulse_us = int(pulse_us)
+        if pulse_us <= 0:
+            if gpio in self._exported:
+                try:
+                    self._write(os.path.join(ch_dir, "enable"), 0)
+                except OSError:
+                    pass
+            return
+        self._ensure_exported(gpio, channel)
+        duty_ns = max(0, min(int(pulse_us) * 1000, self.PERIOD_NS))
+        self._write(os.path.join(ch_dir, "duty_cycle"), duty_ns)
+        self._write(os.path.join(ch_dir, "enable"), 1)
+
+    def cleanup(self) -> None:
+        for gpio, channel in list(self._exported.items()):
+            ch_dir = self._channel_dir(channel)
+            try:
+                self._write(os.path.join(ch_dir, "enable"), 0)
+            except OSError:
+                pass
+
+
+class CompositeServoBackend(ServoBackend):
+    """Route hardware-PWM pins to one backend and the rest to another."""
+
+    def __init__(self, hw: ServoBackend, fallback: ServoBackend, hw_pins) -> None:
+        self._hw = hw
+        self._fallback = fallback
+        self._hw_pins = set(hw_pins) if (hw and hw.available) else set()
+        parts = []
+        if self._hw_pins:
+            parts.append(hw.name)
+        if fallback and fallback.available:
+            parts.append(fallback.name)
+        self.name = "+".join(parts) if parts else "sim"
+        self.available = bool(self._hw_pins) or bool(fallback and fallback.available)
+
+    def set_pulse(self, gpio: int, pulse_us: int) -> None:
+        if gpio in self._hw_pins:
+            try:
+                self._hw.set_pulse(gpio, pulse_us)
+                return
+            except Exception as exc:
+                logger.warning("hw-pwm set_pulse(%d) failed, using fallback: %s", gpio, exc)
+        if self._fallback and self._fallback.available:
+            self._fallback.set_pulse(gpio, pulse_us)
+
+    def cleanup(self) -> None:
+        for backend in (self._hw, self._fallback):
+            if backend:
+                try:
+                    backend.cleanup()
+                except Exception:
+                    pass
+
+
+def make_servo_backend() -> ServoBackend:
+    """Pick the best available servo backend for this board.
+
+    Pi 4: pigpio (DMA, jitter-free) for everything; lgpio fallback.
+    Pi 5: hardware PWM (RP1, jitter-free) for the PWM-capable pins (GPIO
+          18/19), lgpio (software) for the remaining pins. If the PWM overlay
+          isn't loaded, everything falls back to lgpio.
+    """
+    if not is_pi5():
+        for name in ("pigpio", "lgpio"):
+            try:
+                backend = PigpioServoBackend() if name == "pigpio" else LgpioServoBackend()
+                logger.info("Servo backend: %s", backend.name)
+                return backend
+            except Exception as exc:
+                logger.warning("Servo backend %s unavailable: %s", name, exc)
+        logger.warning("No servo backend available; servo/PWM will be simulated")
+        return ServoBackend()
+
+    # Pi 5: software lgpio for general pins ...
+    try:
+        lg_backend: ServoBackend = LgpioServoBackend()
+    except Exception as exc:
+        logger.warning("lgpio unavailable on Pi 5: %s", exc)
+        lg_backend = ServoBackend()
+    # ... plus hardware PWM for the jitter-sensitive PWM pins.
+    try:
+        hw_backend: ServoBackend = HardwarePwmServoBackend()
+    except Exception as exc:
+        logger.warning(
+            "Hardware PWM unavailable (servos on PWM pins will use lgpio): %s", exc
+        )
+        backend = lg_backend
+        logger.info("Servo backend: %s", backend.name)
+        return backend
+
+    composite = CompositeServoBackend(hw_backend, lg_backend, HW_PWM_PINS)
+    logger.info("Servo backend: %s", composite.name)
+    return composite
 
 
 # ── WS2812 RGB LED backends ──────────────────────────────────────────────

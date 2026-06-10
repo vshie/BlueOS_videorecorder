@@ -4,7 +4,10 @@ release servo, and auxiliary servo-style PWM outputs.
 
 GPIO assignments:
   - GPIO 10 (Pin 19, SPI MOSI): WS2812/NeoPixel RGB status LED
-  - GPIO 21 (Pin 40): Camera tilt servo (1000-2000 us PWM)
+  - GPIO 18 (Pin 12): Camera tilt servo (1000-2000 us PWM). On the Pi 5 this is
+        driven by the RP1 hardware-PWM peripheral (jitter-free); requires
+        `dtoverlay=pwm-2chan` in config.txt. (Was GPIO 21 on the Pi 4 build;
+        moved to a hardware-PWM-capable pin to eliminate servo jitter.)
   - GPIO 13 (Pin 33): Lumen light (1000-2000 us servo-style PWM; 1000 us = off,
         2000 us = full brightness. Note: a disabled/floating signal turns the
         light ON at full brightness, so we always hold 1000 us to keep it off.)
@@ -32,7 +35,10 @@ logger = logging.getLogger(__name__)
 
 # GPIO pin assignments
 LED_GPIO = 10
-SERVO_GPIO = 21
+# Camera tilt servo. GPIO 18 is hardware-PWM capable on both Pi 4 and Pi 5
+# (RP1), so the Pi 5 can drive it jitter-free via /sys/class/pwm. Moved here
+# from GPIO 21 (which has no PWM peripheral on the RP1).
+SERVO_GPIO = 18
 LIGHT_GPIO = 13
 RELEASE_GPIO = 12
 FOCUS_GPIO = 20
