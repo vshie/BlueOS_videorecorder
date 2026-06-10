@@ -103,9 +103,11 @@ def load_config():
         "radcam_ext_servo_us": 1500,
         "battery": {
             "enabled": True,
-            "serial_port": "/dev/ttyUSB0",
+            "serial_port": "auto",
             "board_number": 1,
             "baud_rate": 9600,
+            "read_mode": "auto",
+            "broadcast_window_s": 3.0,
             "poll_interval_s": 5.0,
             "low_voltage": 13.0,
             "clear_voltage": 13.2,

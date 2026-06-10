@@ -8,6 +8,7 @@ multi-pack setup needs it.
 from __future__ import annotations
 
 import logging
+import struct
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +23,64 @@ from dalybms import DalyBMS
 from doris_battery.bms_errors import parse_stage2_errors
 
 logger = logging.getLogger(__name__)
+
+
+def extract_broadcast_frames(buffer: bytearray) -> list[tuple[int, int, bytes]]:
+    """Pull complete, checksum-valid A5 frames out of a raw byte buffer.
+
+    Daly packs in auto-report mode emit unsolicited frames; this resynchronises
+    on each frame start and returns ``(source, command, payload)`` tuples.
+    Handles both UART-style frames (leading ``0xA5``, 13 bytes) and RS485-style
+    frames (leading ``0x00 0xA5``, 14 bytes). Consumed bytes are removed from
+    ``buffer``; a trailing partial frame is kept for the next read.
+    """
+    frames: list[tuple[int, int, bytes]] = []
+    i = 0
+    consumed = 0
+    n = len(buffer)
+    while i < n:
+        b = buffer[i]
+        if b == 0x00 and i + 1 < n and buffer[i + 1] == 0xA5:
+            if i + 14 > n:
+                break
+            frame = buffer[i : i + 14]
+            if frame[4] == 0x08 and (sum(frame[:13]) & 0xFF) == frame[13]:
+                frames.append((frame[2], frame[3], bytes(frame[5:13])))
+                i += 14
+                consumed = i
+                continue
+            i += 1
+            continue
+        if b == 0xA5:
+            if i + 13 > n:
+                break
+            frame = buffer[i : i + 13]
+            if frame[3] == 0x08 and (sum(frame[:12]) & 0xFF) == frame[12]:
+                frames.append((frame[1], frame[2], bytes(frame[4:12])))
+                i += 13
+                consumed = i
+                continue
+            i += 1
+            continue
+        i += 1
+    if consumed:
+        del buffer[:consumed]
+    return frames
+
+
+def parse_soc_payload(payload: bytes) -> dict[str, float] | None:
+    """Decode an 0x90 (SOC/voltage/current) data payload."""
+    if len(payload) != 8:
+        return None
+    try:
+        total_voltage, _x, current, soc = struct.unpack(">hhhh", payload)
+    except struct.error:
+        return None
+    return {
+        "total_voltage": total_voltage / 10,
+        "current": (current - 30000) / 10,  # negative = charging
+        "soc_percent": soc / 10,
+    }
 
 
 def board_to_host(board_number: int) -> int:
@@ -180,3 +239,65 @@ class BoardDalyBMS(DalyBMS):
         if not response_data:
             return []
         return parse_stage2_errors(response_data)
+
+    def read_soc_broadcast(
+        self,
+        duration: float = 3.0,
+        solicit: bool = True,
+    ) -> dict[str, float] | None:
+        """Capture a Daly SOC frame (command 0x90) over a short listen window.
+
+        Works in both BMS regimes for packs that don't reliably answer full
+        polled snapshots:
+
+        * Auto-report: the pack streams unsolicited 0x90 frames, which we read.
+        * Polled: when ``solicit`` is True we periodically send a 0x90 request
+          for this board and read the reply.
+
+        Returns the latest SOC dict (``total_voltage``/``current``/
+        ``soc_percent``) seen during the window, or ``None`` if nothing valid
+        arrived. Our own outgoing request frames (host addresses 0x40-0x8f)
+        are ignored so they can't be mistaken for data.
+        """
+        if self.serial is None:
+            raise RuntimeError("serial not connected")
+        if not self.serial.is_open:
+            self.serial.open()
+        try:
+            self.serial.reset_input_buffer()
+        except Exception:
+            pass
+
+        latest: dict[str, float] | None = None
+        buffer = bytearray()
+        deadline = time.time() + max(duration, 0.2)
+        next_solicit = 0.0
+        while time.time() < deadline:
+            now = time.time()
+            if solicit and now >= next_solicit:
+                try:
+                    self.serial.write(self._format_message("90"))
+                except Exception as exc:
+                    self.logger.debug("solicit 0x90 failed: %s", exc)
+                next_solicit = now + 0.7
+            try:
+                chunk = self.serial.read(64)
+            except serial.SerialException as exc:
+                # FTDI adapters can spuriously report readiness with no data.
+                self.logger.debug("serial read hiccup, retrying: %s", exc)
+                try:
+                    self.serial.reset_input_buffer()
+                except Exception:
+                    pass
+                time.sleep(0.05)
+                continue
+            if not chunk:
+                continue
+            buffer.extend(chunk)
+            for src, command, payload in extract_broadcast_frames(buffer):
+                if command != 0x90 or 0x40 <= src <= 0x8F:
+                    continue
+                soc = parse_soc_payload(payload)
+                if soc:
+                    latest = soc
+        return latest

@@ -38,6 +38,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "baud_rate": 9600,
     "serial_timeout_s": 0.5,
     "request_retries": 3,
+    # How to read the BMS:
+    #   "poll"      - actively query a full snapshot (status/cells/temps/SOC).
+    #                 Richest data, but some Daly packs time out on these reads.
+    #   "broadcast" - passively listen for / solicit the pack's 0x90 SOC frame
+    #                 (total voltage, current, SOC only). Works with packs that
+    #                 auto-report or only answer 0x90.
+    #   "auto"      - try a full poll snapshot; if it fails, fall back to a
+    #                 broadcast SOC read for that cycle (default).
+    "read_mode": "auto",
+    "broadcast_window_s": 3.0,
     "poll_interval_s": 5.0,
     "low_voltage": 13.0,
     "clear_voltage": 13.2,
@@ -96,6 +106,8 @@ class BatteryMonitor:
         self._last_snapshot: dict[str, Any] | None = None
         self._last_error: str | None = None
         self._alarm_active = False
+        # Which read path produced the last snapshot ("poll" | "broadcast").
+        self._last_read_mode: str | None = None
         # Ports that responded to a probe but with bad data, so we deprioritize
         # them on the next scan instead of churning them every cycle.
         self._port_failures: dict[str, int] = {}
@@ -137,6 +149,7 @@ class BatteryMonitor:
             return {
                 "connected": self._connected,
                 "serial_port": self._reader_device,
+                "read_mode": self._last_read_mode,
                 "last_error": self._last_error,
                 "low_voltage_alarm": self._alarm_active,
                 "csv_path": str(self._csv_path) if self._csv_path else None,
@@ -178,6 +191,44 @@ class BatteryMonitor:
             user = {}
         return _merged_config(user)
 
+    @staticmethod
+    def _read_mode(cfg: dict[str, Any]) -> str:
+        mode = str(cfg.get("read_mode", DEFAULT_CONFIG["read_mode"])).strip().lower()
+        return mode if mode in ("poll", "broadcast", "auto") else "auto"
+
+    def _read_snapshot(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        """Read one snapshot honouring read_mode. May raise on failure."""
+        assert self._reader is not None
+        mode = self._read_mode(cfg)
+        window = float(cfg.get("broadcast_window_s", DEFAULT_CONFIG["broadcast_window_s"]))
+
+        if mode == "poll":
+            snap = self._reader.read_snapshot()
+            self._last_read_mode = "poll"
+            return snap
+
+        if mode == "broadcast":
+            soc = self._reader.read_soc_broadcast(duration=window, solicit=True)
+            if not soc:
+                raise RuntimeError("No broadcast SOC frames received")
+            self._last_read_mode = "broadcast"
+            return self._reader.snapshot_from_soc(soc)
+
+        # auto: prefer a full poll snapshot, fall back to broadcast SOC.
+        try:
+            snap = self._reader.read_snapshot()
+            self._last_read_mode = "poll"
+            return snap
+        except Exception as poll_exc:
+            logger.debug("Poll snapshot failed, trying broadcast: %s", poll_exc)
+            soc = self._reader.read_soc_broadcast(duration=window, solicit=True)
+            if not soc:
+                raise RuntimeError(
+                    f"Poll read failed ({poll_exc}); no broadcast SOC frames either"
+                ) from poll_exc
+            self._last_read_mode = "broadcast"
+            return self._reader.snapshot_from_soc(soc)
+
     def _run(self) -> None:
         backoff_s = 2.0
         while not self._stop.is_set():
@@ -189,7 +240,7 @@ class BatteryMonitor:
             try:
                 if self._reader is None:
                     self._connect(cfg)
-                snapshot = self._reader.read_snapshot()
+                snapshot = self._read_snapshot(cfg)
             except Exception as exc:
                 self._handle_error(exc)
                 wait = min(backoff_s, 30.0)
@@ -230,10 +281,12 @@ class BatteryMonitor:
         baud = int(cfg.get("baud_rate", 9600))
         timeout = float(cfg.get("serial_timeout_s", 0.5))
         retries = int(cfg.get("request_retries", 3))
+        mode = self._read_mode(cfg)
+        window = float(cfg.get("broadcast_window_s", DEFAULT_CONFIG["broadcast_window_s"]))
 
         errors: list[str] = []
         for device in candidates:
-            reader = self._probe_device(device, board, baud, timeout, retries)
+            reader = self._probe_device(device, board, baud, timeout, retries, mode, window)
             if reader is None:
                 errors.append(f"{device}: no Daly response")
                 continue
@@ -244,8 +297,8 @@ class BatteryMonitor:
                 self._connected = True
                 self._last_error = None
             logger.info(
-                "Battery monitor connected to %s board=%d @ %d baud (auto-detected from %d candidate(s))",
-                device, board, baud, len(candidates),
+                "Battery monitor connected to %s board=%d @ %d baud (mode=%s, auto-detected from %d candidate(s))",
+                device, board, baud, mode, len(candidates),
             )
             return
 
@@ -264,9 +317,15 @@ class BatteryMonitor:
         baud: int,
         timeout: float,
         retries: int,
+        mode: str = "auto",
+        window: float = 3.0,
     ) -> Any | None:
         """Open `device`, send one quick BMS read, return the reader if it
-        responds with plausible Daly data, else close and return None."""
+        responds with plausible Daly data, else close and return None.
+
+        The probe method matches read_mode: a polled get_soc() for "poll",
+        a broadcast SOC listen for "broadcast", and poll-then-broadcast for
+        "auto" (so packs that only auto-report still get detected)."""
         from doris_battery.bms_reader import DorisBMSReader
 
         reader = DorisBMSReader(
@@ -287,19 +346,12 @@ class BatteryMonitor:
             logger.debug("Probe %s: open failed: %s", device, exc)
             return None
 
-        try:
-            soc = reader._bms.get_soc()
-        except Exception as exc:
-            logger.debug("Probe %s: read raised: %s", device, exc)
-            reader.disconnect()
-            return None
-
-        voltage = None
-        if isinstance(soc, dict):
-            voltage = soc.get("total_voltage")
-
+        # Keep the broadcast probe window short so scanning stays responsive;
+        # solicited 0x90 frames normally arrive within a few hundred ms.
+        probe_window = min(window, 2.0)
+        voltage = self._probe_voltage(reader, device, mode, probe_window)
         if voltage is None:
-            logger.debug("Probe %s: no SOC response (likely not a BMS)", device)
+            logger.debug("Probe %s: no Daly response (likely not a BMS)", device)
             reader.disconnect()
             return None
 
@@ -327,8 +379,42 @@ class BatteryMonitor:
         except Exception:
             pass
 
-        logger.info("Probe %s: Daly BMS responded (V=%.2f)", device, v_num)
+        logger.info("Probe %s: Daly BMS responded (V=%.2f, mode=%s)", device, v_num, mode)
         return reader
+
+    @staticmethod
+    def _probe_voltage(reader: Any, device: str, mode: str, window: float) -> Any:
+        """Return a total_voltage reading from a probe, or None.
+
+        poll      -> single polled get_soc()
+        broadcast -> short broadcast/solicit listen
+        auto      -> polled first, broadcast fallback
+        """
+        def _poll() -> Any:
+            try:
+                soc = reader._bms.get_soc()
+            except Exception as exc:
+                logger.debug("Probe %s: polled read raised: %s", device, exc)
+                return None
+            return soc.get("total_voltage") if isinstance(soc, dict) else None
+
+        def _broadcast() -> Any:
+            try:
+                soc = reader.read_soc_broadcast(duration=window, solicit=True)
+            except Exception as exc:
+                logger.debug("Probe %s: broadcast read raised: %s", device, exc)
+                return None
+            return soc.get("total_voltage") if isinstance(soc, dict) else None
+
+        if mode == "poll":
+            return _poll()
+        if mode == "broadcast":
+            return _broadcast()
+        # auto
+        voltage = _poll()
+        if voltage is None:
+            voltage = _broadcast()
+        return voltage
 
     @staticmethod
     def _iter_candidate_ports() -> list[str]:

@@ -199,6 +199,46 @@ class DorisBMSReader:
             return self._read_sinowealth_snapshot()
         return snapshot_from_bms(self._bms, self.board_number, self.pack_name)
 
+    def read_soc_broadcast(self, duration: float = 3.0, solicit: bool = True) -> dict[str, Any] | None:
+        """Listen for an auto-reported / solicited 0x90 SOC frame.
+
+        Returns a raw SOC dict (total_voltage/current/soc_percent) or None.
+        Only valid on the A5 (non-Sinowealth) path.
+        """
+        if self._sinowealth:
+            return None
+        reader = getattr(self._bms, "read_soc_broadcast", None)
+        if not callable(reader):
+            return None
+        return reader(duration=duration, solicit=solicit)
+
+    def snapshot_from_soc(self, soc: dict[str, Any]) -> dict[str, Any]:
+        """Build a minimal snapshot from a broadcast SOC reading.
+
+        Detail fields (cells, temps, mosfet, errors) are left empty because
+        the pack only surfaced its SOC frame; voltage/current/SOC populate the
+        summary the rest of the extension consumes."""
+        snapshot: dict[str, Any] = {
+            "soc": soc,
+            "cell_voltage_range": {},
+            "temperature_range": {},
+            "mosfet_status": {},
+            "status": {},
+            "cell_voltages": {},
+            "temperatures": {},
+            "balancing_status": {},
+            "errors": [],
+            "summary": {
+                "total_voltage_v": soc.get("total_voltage"),
+                "current_a": soc.get("current"),
+                "soc_percent": soc.get("soc_percent"),
+            },
+            "board_number": self.board_number,
+        }
+        if self.pack_name:
+            snapshot["pack_name"] = self.pack_name
+        return snapshot
+
     def _read_sinowealth_snapshot(self) -> dict[str, Any]:
         soc = self._bms.get_soc() or {}
         cell_voltages = self._bms.get_cell_voltages() or {}
