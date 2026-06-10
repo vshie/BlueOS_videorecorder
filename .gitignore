@@ -3,3 +3,5 @@
 *.egg-info
 **/build
 **/__pycache__
+# Local image build artifacts
+*.tar
