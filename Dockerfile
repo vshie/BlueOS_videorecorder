@@ -52,9 +52,9 @@ WORKDIR /app
 
 # Python dependencies (before COPY so app-only edits don't rebuild this layer)
 # Servo/PWM: pigpio (Pi 4, DMA) + lgpio (Pi 5 / RP1, software-timed).
-# WS2812 LED: rpi_ws281x (Pi 4) + rpi5-ws2812 over SPI (Pi 5); numpy/spidev
-# back rpi5-ws2812.
-RUN pip3 install flask requests pigpio lgpio rpi_ws281x rpi5-ws2812 numpy spidev Pillow dalybms pyserial
+# WS2812 LED: rpi_ws281x (Pi 4) + a self-contained SPI driver (Pi 5) that only
+# needs spidev (see app/gpio_backend.py).
+RUN pip3 install flask requests pigpio lgpio rpi_ws281x spidev Pillow dalybms pyserial
 
 RUN mkdir -p /app/videorecordings
 

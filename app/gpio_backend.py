@@ -241,48 +241,71 @@ class Ws281xLedBackend(LedBackend):
             pass
 
 
-class Rpi5Ws2812LedBackend(LedBackend):
-    """Pi 5 (and universal) path: WS2812 over SPI via rpi5-ws2812.
+class Ws2812SpiLedBackend(LedBackend):
+    """Pi 5 (and universal) path: WS2812 over SPI (MOSI / GPIO 10).
 
-    rpi5-ws2812 transmits in GRB order (it emits ``[g, r, b]``).  The Pi 4
-    code drove this same physical LED as ``WS2811_STRIP_RGB`` (R,G,B on the
-    wire), so to keep colours identical we feed the namedtuple swapped
-    (``Color(g, r, b)``) which makes the library emit R,G,B on the wire.
+    Self-contained SPI bit-banging driver (no external NeoPixel library, so it
+    works on the image's Python 3.8). Each WS2812 data bit is encoded as one
+    SPI byte clocked at 6.5 MHz: 0 -> 0b11000000, 1 -> 0b11111100. A run of
+    zero bytes up front provides the >50 us reset/latch.
+
+    Bytes are sent in R,G,B order, which matches the Pi 4 (WS2811_STRIP_RGB)
+    behaviour for this physical LED. (The reset is the same encoding used by
+    the rpi5-ws2812 project, validated against the hardware.)
     """
 
-    name = "rpi5-ws2812"
+    name = "ws2812-spi"
+    LED_ZERO = 0b11000000
+    LED_ONE = 0b11111100
+    PREAMBLE = 42  # zero bytes -> ~52 us reset at 6.5 MHz
+    SPEED_HZ = 6_500_000
 
     def __init__(self, count: int, spi_bus: int = 0, spi_device: int = 0) -> None:
-        from rpi5_ws2812.ws2812 import Color, WS2812SpiDriver
+        import spidev
 
-        self._Color = Color
-        self._strip = WS2812SpiDriver(
-            spi_bus=spi_bus, spi_device=spi_device, led_count=count
-        ).get_strip()
+        self._count = max(1, int(count))
+        self._spi = spidev.SpiDev()
+        self._spi.open(spi_bus, spi_device)
+        self._spi.max_speed_hz = self.SPEED_HZ
+        self._spi.mode = 0
+        self._spi.lsbfirst = False
+        # Precompute the per-bit -> SPI-byte lookup for speed.
+        self._bit = (self.LED_ZERO, self.LED_ONE)
         self.available = True
 
+    def _encode_byte(self, value: int) -> list[int]:
+        bit = self._bit
+        return [bit[(value >> i) & 1] for i in range(7, -1, -1)]
+
     def set_color(self, r: int, g: int, b: int) -> None:
-        # Swap R/G so the GRB-emitting library puts R,G,B on the wire to match
-        # the Pi 4 (WS2811_STRIP_RGB) behaviour for this physical LED.
-        self._strip.set_all_pixels(self._Color(g, r, b))
-        self._strip.show()
+        out = [0] * self.PREAMBLE
+        for _ in range(self._count):
+            out += self._encode_byte(r & 0xFF)
+            out += self._encode_byte(g & 0xFF)
+            out += self._encode_byte(b & 0xFF)
+        writer = getattr(self._spi, "writebytes2", self._spi.writebytes)
+        writer(out)
 
     def cleanup(self) -> None:
         try:
             self.set_color(0, 0, 0)
         except Exception:
             pass
+        try:
+            self._spi.close()
+        except Exception:
+            pass
 
 
 def make_led_backend(gpio: int, count: int, brightness: int) -> LedBackend:
     """Pick the best available WS2812 LED backend for this board."""
-    order = ["rpi5-ws2812"] if is_pi5() else ["rpi_ws281x", "rpi5-ws2812"]
+    order = ["ws2812-spi"] if is_pi5() else ["rpi_ws281x", "ws2812-spi"]
     for name in order:
         try:
             if name == "rpi_ws281x":
                 backend = Ws281xLedBackend(gpio, count, brightness)
             else:
-                backend = Rpi5Ws2812LedBackend(count)
+                backend = Ws2812SpiLedBackend(count)
             logger.info("LED backend: %s", backend.name)
             return backend
         except Exception as exc:
