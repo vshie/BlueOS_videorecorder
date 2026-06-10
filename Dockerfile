@@ -2,12 +2,15 @@ FROM ubuntu:20.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Python, build tools, and Pillow native dependencies
+# Python, build tools, and Pillow native dependencies.
+# swig is required to build the lgpio C extension from source (no prebuilt
+# wheel exists for this base image's Python 3.8 on arm).
 RUN apt-get update && apt-get install -y --no-install-recommends --no-install-suggests \
     python3 \
     python3-pip \
     python3-dev \
     build-essential \
+    swig \
     libjpeg-dev \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
