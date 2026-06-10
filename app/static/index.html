@@ -1297,10 +1297,10 @@ function _makeUsbSession(folder, files, deleteData, locationBadge, videoFile) {
     lbl.style.cssText = 'font-size:.88em;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
     lbl.textContent = folder;
     row.appendChild(lbl);
-    const pending = document.createElement('span');
-    pending.style.cssText = 'font-size:.72em;color:#999;flex-shrink:0;font-style:italic';
-    pending.textContent = 'zip pending';
-    row.appendChild(pending);
+    const count = document.createElement('span');
+    count.style.cssText = 'font-size:.72em;color:#999;flex-shrink:0;font-style:italic';
+    count.textContent = otherFiles.length + (otherFiles.length === 1 ? ' file' : ' files');
+    row.appendChild(count);
   }
 
   if (isTs) {

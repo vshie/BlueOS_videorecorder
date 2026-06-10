@@ -84,6 +84,10 @@ remux_stage = ""
 
 active_recipe_for_recording = None
 image_rotation = 0
+# Rotation (degrees) captured at the moment recording started, applied to the
+# finished video file as lossless display metadata so players/editors render
+# it in the same orientation as the live preview.
+recording_rotation = 0
 
 usb_recording = False
 usb_failover_count = 0
@@ -602,8 +606,9 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     global gst_stderr_thread, stop_gst_stderr_thread, gst_error_count, gst_warning_count
     global watchdog_thread, stop_watchdog_thread, file_stall_count
     global stills_thread, stop_stills_thread, stills_dir, stills_count
-    global usb_recording, recording_base_dir
+    global usb_recording, recording_base_dir, recording_rotation
 
+    recording_rotation = int(rotation) % 360
     os.makedirs(VIDEO_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -746,13 +751,37 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     return True
 
 
-def _run_ffmpeg_remux(ts_path, mp4_path, ts_size):
+def _rotation_metadata_args(rotation):
+    """ffmpeg args that stamp display-rotation metadata onto the video stream.
+
+    This is lossless (used alongside ``-c copy``): no pixels are touched, only
+    the MP4 display matrix is set so players/editors auto-rotate on playback,
+    matching the live preview orientation.  The container's ffmpeg (4.x) writes
+    the rotation via the legacy ``rotate`` stream tag, which all common players
+    honour.  Returns ``[]`` for a zero rotation so nothing is written.
+
+    The ``rotate`` tag's direction is the inverse of the preview's ffmpeg
+    ``transpose`` filter: a player auto-rotating a ``rotate=90`` clip turns it
+    counter-clockwise, whereas the preview's 90° uses ``transpose=1``
+    (clockwise).  So we store ``(360 - deg)`` to make the recording match the
+    preview.  Verified on ffmpeg 4.2 via PSNR: preview transpose=1 == rotate=270,
+    hflip+vflip == rotate=180, transpose=2 == rotate=90.
+    """
+    deg = int(rotation) % 360
+    if deg == 0:
+        return []
+    meta_deg = (360 - deg) % 360
+    return ["-metadata:s:v:0", f"rotate={meta_deg}"]
+
+
+def _run_ffmpeg_remux(ts_path, mp4_path, ts_size, rotation=0):
     """Run the ffmpeg copy-remux, tracking progress.  Returns True on success."""
     global remux_progress
     size_gib = ts_size / (1024 ** 3)
     timeout_s = int(180 + size_gib * 180)
 
     cmd = ["ffmpeg", "-y", "-i", ts_path, "-c", "copy"]
+    cmd += _rotation_metadata_args(rotation)
     if size_gib <= 4:
         cmd += ["-movflags", "+faststart"]
     else:
@@ -787,6 +816,78 @@ def _run_ffmpeg_remux(ts_path, mp4_path, ts_size):
     return False
 
 
+def _apply_rotation_metadata_mp4(mp4_path, rotation):
+    """Stamp display-rotation metadata onto a finished .mp4 in place (lossless).
+
+    Used for the RadCam path, where GStreamer writes the .mp4 directly and it
+    never passes through the TS→MP4 remux.  Rewrites the container with
+    ``-c copy`` (no re-encode) into a temp file, then atomically replaces the
+    original.  Returns the path on success, or the original path on failure /
+    when no rotation is needed.
+    """
+    global remux_active, remux_filename, remux_progress, remux_stage
+    deg = int(rotation) % 360
+    if deg == 0 or not mp4_path or not os.path.exists(mp4_path):
+        return mp4_path
+
+    tmp_path = os.path.splitext(mp4_path)[0] + ".rot.mp4"
+    cmd = ["ffmpeg", "-y", "-i", mp4_path, "-map", "0", "-c", "copy"]
+    cmd += _rotation_metadata_args(deg)
+    cmd.append(tmp_path)
+
+    try:
+        src_size = os.path.getsize(mp4_path)
+    except OSError:
+        src_size = 0
+    size_gib = src_size / (1024 ** 3)
+    timeout_s = int(180 + size_gib * 180)
+
+    show_led = not recording
+    if show_led:
+        hw.flash_led(0, 20, 0, rate_hz=0.5)
+    remux_filename = os.path.basename(mp4_path)
+    remux_stage = f"Applying {deg}° rotation metadata"
+    remux_progress = 0
+    remux_active = True
+
+    logger.info(f"Stamping {deg}° rotation metadata onto {os.path.basename(mp4_path)}")
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + timeout_s
+        while proc.poll() is None:
+            if time.monotonic() > deadline:
+                proc.kill()
+                proc.wait()
+                raise subprocess.TimeoutExpired(cmd, timeout_s)
+            if src_size > 0:
+                try:
+                    remux_progress = min(99, int(os.path.getsize(tmp_path) * 100 / src_size))
+                except OSError:
+                    pass
+            time.sleep(2)
+        if proc.returncode == 0 and os.path.exists(tmp_path):
+            os.replace(tmp_path, mp4_path)
+            remux_progress = 100
+            logger.info(f"Rotation metadata applied: {os.path.basename(mp4_path)}")
+            return mp4_path
+        logger.error(f"Rotation metadata pass failed (rc={proc.returncode})")
+    except Exception as e:
+        logger.error(f"Rotation metadata pass error: {e}")
+    finally:
+        remux_active = False
+        remux_filename = ""
+        remux_progress = 0
+        remux_stage = ""
+        if show_led:
+            hw.led_idle()
+    if os.path.exists(tmp_path):
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    return mp4_path
+
+
 def _copy_file_with_progress(src, dst, label, total_bytes):
     """Copy src to dst, updating remux_progress 0-100 and remux_stage."""
     global remux_progress, remux_stage
@@ -806,7 +907,7 @@ def _copy_file_with_progress(src, dst, label, total_bytes):
     remux_progress = 100
 
 
-def _remux_to_mp4(ts_path, was_usb=False, usb_rec_dir=None):
+def _remux_to_mp4(ts_path, was_usb=False, usb_rec_dir=None, rotation=0):
     """Remux a .ts file to .mp4 with ffmpeg (copy, no re-encode).
 
     For USB recordings, picks the fastest strategy that fits:
@@ -835,9 +936,9 @@ def _remux_to_mp4(ts_path, was_usb=False, usb_rec_dir=None):
 
     try:
         if was_usb and usb_rec_dir:
-            return _remux_usb(ts_path, ts_size, usb_rec_dir, show_led)
+            return _remux_usb(ts_path, ts_size, usb_rec_dir, show_led, rotation)
         else:
-            return _remux_local(ts_path, ts_size, show_led)
+            return _remux_local(ts_path, ts_size, show_led, rotation)
     except Exception as e:
         logger.error(f"Remux exception: {e}")
     finally:
@@ -850,19 +951,19 @@ def _remux_to_mp4(ts_path, was_usb=False, usb_rec_dir=None):
     return ts_path
 
 
-def _remux_local(ts_path, ts_size, show_led):
+def _remux_local(ts_path, ts_size, show_led, rotation=0):
     """Standard in-place remux for local SD recordings."""
     global remux_progress, remux_stage
     mp4_path = os.path.splitext(ts_path)[0] + ".mp4"
     remux_stage = "Remuxing TS→MP4"
-    if _run_ffmpeg_remux(ts_path, mp4_path, ts_size):
+    if _run_ffmpeg_remux(ts_path, mp4_path, ts_size, rotation):
         os.remove(ts_path)
         logger.info(f"Remuxed to MP4: {os.path.basename(mp4_path)}")
         return mp4_path
     return ts_path
 
 
-def _remux_usb(ts_path, ts_size, usb_rec_dir, show_led):
+def _remux_usb(ts_path, ts_size, usb_rec_dir, show_led, rotation=0):
     """Smart remux for USB recordings.  Picks the best strategy based on space."""
     global remux_progress, remux_stage
 
@@ -880,7 +981,7 @@ def _remux_usb(ts_path, ts_size, usb_rec_dir, show_led):
         logger.info(f"USB remux strategy: in-place ({size_gib:.1f} GiB, "
                     f"{usb_free:.0f} MB free)")
         remux_stage = "Remuxing TS→MP4 on USB"
-        if _run_ffmpeg_remux(ts_path, mp4_on_usb, ts_size):
+        if _run_ffmpeg_remux(ts_path, mp4_on_usb, ts_size, rotation):
             os.remove(ts_path)
             logger.info(f"Remuxed in-place on USB: {os.path.basename(mp4_on_usb)}")
             return mp4_on_usb
@@ -895,7 +996,7 @@ def _remux_usb(ts_path, ts_size, usb_rec_dir, show_led):
 
         # Step 1: remux .ts (USB) → .mp4 (local SD)
         remux_stage = "Remuxing TS→MP4 via local SD"
-        if not _run_ffmpeg_remux(ts_path, local_tmp_mp4, ts_size):
+        if not _run_ffmpeg_remux(ts_path, local_tmp_mp4, ts_size, rotation):
             return ts_path
 
         # Step 2: delete .ts from USB to free space
@@ -935,74 +1036,6 @@ def _remux_usb(ts_path, ts_size, usb_rec_dir, show_led):
     return ts_path
 
 
-def _build_session_zip(folder_path):
-    """Create a .zip of all files in *folder_path* (in-place, next to the files).
-
-    Uses the remux_* globals for progress feedback so the UI shows a progress bar.
-    Skips any pre-existing .zip to avoid re-zipping.  Returns the zip path or None.
-    """
-    global remux_active, remux_filename, remux_progress, remux_stage
-
-    folder_name = os.path.basename(folder_path)
-    zip_path = os.path.join(folder_path, folder_name + ".zip")
-
-    if os.path.exists(zip_path):
-        logger.info(f"Session zip already exists: {zip_path}")
-        return zip_path
-
-    files = []
-    for f in sorted(os.listdir(folder_path)):
-        fp = os.path.join(folder_path, f)
-        if os.path.isfile(fp) and not f.endswith(".zip"):
-            files.append((f, fp, os.path.getsize(fp)))
-    if not files:
-        return None
-
-    total_bytes = sum(sz for _, _, sz in files)
-    logger.info(f"Building session zip: {zip_path}  ({len(files)} files, {total_bytes / 1048576:.1f} MB)")
-
-    remux_filename = folder_name + ".zip"
-    remux_progress = 0
-    remux_stage = "Building session zip"
-    remux_active = True
-    show_led = not recording
-    if show_led:
-        hw.flash_led(0, 16, 20, rate_hz=0.5)
-
-    STORED_EXTS = {".ts", ".mp4", ".jpg", ".jpeg", ".png"}
-    written = 0
-    try:
-        tmp_path = zip_path + ".tmp"
-        with zipfile.ZipFile(tmp_path, "w") as zf:
-            for fname, fpath, fsize in files:
-                ext = os.path.splitext(fname)[1].lower()
-                method = zipfile.ZIP_STORED if ext in STORED_EXTS else zipfile.ZIP_DEFLATED
-                zf.write(fpath, fname, compress_type=method)
-                written += fsize
-                if total_bytes > 0:
-                    remux_progress = min(99, int(written * 100 / total_bytes))
-        os.rename(tmp_path, zip_path)
-        remux_progress = 100
-        logger.info(f"Session zip complete: {zip_path}")
-        return zip_path
-    except Exception as e:
-        logger.error(f"Session zip failed: {e}")
-        for p in (zip_path, zip_path + ".tmp"):
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-        return None
-    finally:
-        remux_active = False
-        remux_filename = ""
-        remux_progress = 0
-        remux_stage = ""
-        if show_led:
-            hw.led_idle()
-
-
 def _stop_recording_internal():
     global gst_process, recording, start_time, current_video_file
     global current_ass_file, current_events_file
@@ -1021,6 +1054,7 @@ def _stop_recording_internal():
     video_path = current_video_file
     ass_path = current_ass_file
     events_path = current_events_file
+    saved_rotation = recording_rotation
 
     stop_ass_thread = True
     if ass_thread and ass_thread.is_alive():
@@ -1068,7 +1102,12 @@ def _stop_recording_internal():
     if video_path and os.path.exists(video_path):
         time.sleep(2)
         if video_path.endswith(".ts"):
-            video_path = _remux_to_mp4(video_path, was_usb=was_usb, usb_rec_dir=usb_rec_dir)
+            # USB/DropCam: rotation is stamped during the lossless TS→MP4 remux.
+            video_path = _remux_to_mp4(video_path, was_usb=was_usb,
+                                       usb_rec_dir=usb_rec_dir, rotation=saved_rotation)
+        elif video_path.endswith(".mp4") and saved_rotation:
+            # RadCam: GStreamer wrote the .mp4 directly, so stamp rotation now.
+            video_path = _apply_rotation_metadata_mp4(video_path, saved_rotation)
         dur, st = get_video_duration(video_path)
         if dur and ass_path and os.path.exists(ass_path):
             adjust_ass_timing(ass_path, dur)
@@ -1084,11 +1123,6 @@ def _stop_recording_internal():
                     f.write(json.dumps(evt) + "\n")
             except Exception:
                 pass
-
-    if was_usb and usb_rec_dir and os.path.isdir(usb_rec_dir):
-        _build_session_zip(usb_rec_dir)
-    elif was_usb and saved_stills_dir and os.path.isdir(saved_stills_dir):
-        _build_session_zip(saved_stills_dir)
 
     logger.info("Recording stopped")
 
@@ -1871,8 +1905,6 @@ def route_process_selected():
                 dur, _ = get_video_duration(mp4_path)
                 if dur:
                     adjust_ass_timing(ass_path, dur)
-            if job["was_usb"] and job["usb_rec_dir"]:
-                _build_session_zip(job["usb_rec_dir"])
 
     threading.Thread(target=_process_batch, daemon=True).start()
     return jsonify({"success": True, "count": len(ts_jobs)})
