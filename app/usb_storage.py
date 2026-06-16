@@ -62,6 +62,42 @@ def _scan_usb_devices():
 
 # ── Mount / unmount ──────────────────────────────────────────────────────
 
+def _detect_fstype(dev):
+    """Return the filesystem type of a block device, or '' if unknown."""
+    try:
+        r = subprocess.run(
+            ["blkid", "-o", "value", "-s", "TYPE", dev],
+            capture_output=True, timeout=5, text=True,
+        )
+        if r.returncode == 0:
+            return r.stdout.strip().lower()
+    except Exception as e:
+        logger.debug(f"blkid {dev} failed: {e}")
+    return ""
+
+
+def _mount_commands(dev, fstype):
+    """Build an ordered list of mount argv attempts for a device.
+
+    Prefer the in-kernel drivers and bypass userspace ``/sbin/mount.<type>``
+    helpers (``-i``).  The bundled FUSE exfat helper (exfat-fuse) hangs
+    uninterruptibly on some drives/controllers, wedging the mount in D state;
+    the kernel exfat driver (auto-loaded on demand) is fast and reliable.
+    """
+    attempts = []
+    if fstype in ("exfat", "vfat", "msdos", "fat"):
+        attempts.append(["mount", "-i", "-t", fstype, "-o", "rw", dev, USB_MOUNT_POINT])
+    elif fstype == "ntfs":
+        # Kernel ntfs3 (read/write since 5.15) avoids the ntfs-3g FUSE helper.
+        attempts.append(["mount", "-i", "-t", "ntfs3", "-o", "rw", dev, USB_MOUNT_POINT])
+        attempts.append(["mount", "-i", "-t", "ntfs", "-o", "rw", dev, USB_MOUNT_POINT])
+    elif fstype:
+        attempts.append(["mount", "-i", "-t", fstype, "-o", "rw", dev, USB_MOUNT_POINT])
+    # Final fallback: let mount auto-detect (covers ext4 and anything missed).
+    attempts.append(["mount", "-o", "rw", dev, USB_MOUNT_POINT])
+    return attempts
+
+
 def is_mounted():
     """Check whether USB_MOUNT_POINT is an active mount."""
     try:
@@ -96,26 +132,33 @@ def try_mount():
             return True
 
         for dev in partitions:
-            try:
-                result = subprocess.run(
-                    ["mount", "-o", "rw", dev, USB_MOUNT_POINT],
-                    capture_output=True, timeout=10,
+            fstype = _detect_fstype(dev)
+            mounted_ok = False
+            for cmd in _mount_commands(dev, fstype):
+                try:
+                    result = subprocess.run(cmd, capture_output=True, timeout=10)
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        f"mount {dev} ({fstype or 'auto'}) via {' '.join(cmd)} timed out "
+                        "after 10s; device may be unresponsive or the filesystem "
+                        "driver hung. Skipping this attempt."
+                    )
+                    continue
+                except Exception as e:
+                    logger.warning(f"mount {dev} raised: {e}; trying next method")
+                    continue
+                if result.returncode == 0:
+                    _mounted = True
+                    _device = dev
+                    logger.info(f"USB mounted: {dev} ({fstype or 'auto'}) -> {USB_MOUNT_POINT}")
+                    mounted_ok = True
+                    break
+                logger.debug(
+                    f"mount {dev} via {' '.join(cmd)} failed: "
+                    f"{result.stderr.decode(errors='replace').strip()}"
                 )
-            except subprocess.TimeoutExpired:
-                logger.warning(
-                    f"mount {dev} timed out after 10s; device may be unresponsive "
-                    "or have a corrupt/unrecognized filesystem. Skipping."
-                )
-                continue
-            except Exception as e:
-                logger.warning(f"mount {dev} raised: {e}; skipping")
-                continue
-            if result.returncode == 0:
-                _mounted = True
-                _device = dev
-                logger.info(f"USB mounted: {dev} -> {USB_MOUNT_POINT}")
+            if mounted_ok:
                 return True
-            logger.debug(f"mount {dev} failed: {result.stderr.decode(errors='replace').strip()}")
 
         _mounted = False
         _device = None
