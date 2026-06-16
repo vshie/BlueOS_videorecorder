@@ -71,6 +71,11 @@ class PreviewManager:
         self.fps = fps
         self.jpeg_quality = jpeg_quality
 
+        # DropCam now previews the BlueOS camera-manager RTSP stream rather
+        # than the raw v4l2 device.  Set via set_blueos_endpoint(); when present
+        # the "usb" mode builds an RTSP pipeline instead of a v4l2 one.
+        self.blueos_endpoint = None
+
         self._lock = threading.RLock()
         self._proc = None
         self._mode = None            # "usb" | "radcam" | None
@@ -117,6 +122,15 @@ class PreviewManager:
                 "-i", self.rtsp_endpoint,
                 *common_out,
             ]
+        # DropCam ("usb"): prefer the BlueOS camera-manager RTSP stream.
+        if self.blueos_endpoint:
+            return [
+                "ffmpeg", "-nostdin", "-loglevel", "error",
+                "-rtsp_transport", "tcp",
+                "-i", self.blueos_endpoint,
+                *common_out,
+            ]
+        # Legacy fallback: direct v4l2 capture (pre-BlueOS-managed camera).
         return [
             "ffmpeg", "-nostdin", "-loglevel", "error",
             "-f", "v4l2", "-input_format", "h264",
@@ -147,6 +161,20 @@ class PreviewManager:
                 return
             self._rotation = deg
             if self._enabled and self._mode is not None:
+                self._kill_proc_locked()
+                self._spawn_locked()
+
+    def set_blueos_endpoint(self, url):
+        """Set the BlueOS camera-manager RTSP URL used by the 'usb' mode.
+
+        Restarts the preview if it is currently running the 'usb' source so the
+        new endpoint takes effect immediately.
+        """
+        with self._lock:
+            if url == self.blueos_endpoint:
+                return
+            self.blueos_endpoint = url
+            if self._enabled and self._mode == "usb":
                 self._kill_proc_locked()
                 self._spawn_locked()
 

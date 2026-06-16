@@ -1,10 +1,12 @@
 """
 DropCam - Standalone BlueOS Video Recording Extension
 
-Records H264 video from /dev/video2 into .mp4 files (recorded as power-cut-safe
-MPEG-TS, then remuxed to MP4 on stop for VLC/subtitle compatibility), or captures
-stills at a configurable interval. Controls a camera tilt servo, lumen light, and
-RGB status LED. Supports auto-start via saved recording recipes.
+Records H264 video from the BlueOS mavlink-camera-manager RTSP stream into .mp4
+files (recorded as power-cut-safe MPEG-TS, then remuxed to MP4 on stop for
+VLC/subtitle compatibility), or captures stills at a configurable interval.
+BlueOS owns the USB camera; the extension consumes its published RTSP stream
+rather than reading /dev/video* directly. Controls a camera tilt servo, lumen
+light, and RGB status LED. Supports auto-start via saved recording recipes.
 """
 
 from flask import Flask, Response, jsonify, make_response, request, send_file
@@ -51,6 +53,13 @@ VIDEO_DEVICE = "/dev/video2"
 AUDIO_DEVICE = "hw:Camera,0"
 RTSP_ENDPOINT = "rtsp://admin:blue@192.168.2.10:554/stream_0"
 RADCAM_IP = "192.168.2.10"
+
+# BlueOS mavlink-camera-manager.  The DropCam no longer reads the USB camera
+# directly (BlueOS owns it); instead we consume the H264 RTSP stream that the
+# camera manager publishes.  The extension runs with host networking, so the
+# manager's REST API and RTSP server are reachable on localhost.
+CAMERA_MANAGER_URL = "http://127.0.0.1:6020"
+RTSP_HOST = "127.0.0.1"
 
 # ── Recording state ──────────────────────────────────────────────────────
 gst_process = None
@@ -102,6 +111,86 @@ usb_recording = False
 usb_failover_count = 0
 recording_base_dir = None
 radcam_mode = False
+
+# Last RTSP endpoint + codec discovered from the BlueOS camera manager, e.g.
+# ("rtsp://127.0.0.1:8554/video_stream__dev_video3", "H264").  Refreshed on
+# demand; cached so a transient API hiccup does not break an in-flight start.
+blueos_rtsp_url = None
+blueos_rtsp_encode = "H264"
+
+
+def _rewrite_rtsp_host(url):
+    """Force an RTSP endpoint to localhost.
+
+    The camera manager advertises its LAN IP (e.g. 192.168.1.111), but the
+    extension shares the host network namespace, so localhost is the most
+    reliable address regardless of the unit's current IP.
+    """
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(url)
+        netloc = RTSP_HOST + (f":{parts.port}" if parts.port else "")
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    except Exception:
+        return url
+
+
+def discover_blueos_stream(refresh=True):
+    """Return (rtsp_url, encode) for a running BlueOS camera-manager video stream.
+
+    Prefers an H264 stream (best for low-CPU remux), then any video stream.
+    Caches the last good result in the module globals so a transient API
+    hiccup mid-recording does not wipe out a known-good endpoint.  Returns
+    ``(None, None)`` only when nothing has ever been discovered.
+    """
+    global blueos_rtsp_url, blueos_rtsp_encode
+    if not refresh and blueos_rtsp_url:
+        return blueos_rtsp_url, blueos_rtsp_encode
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"{CAMERA_MANAGER_URL}/streams", timeout=5) as r:
+            streams = json.loads(r.read().decode())
+    except Exception as e:
+        logger.warning(f"Could not query BlueOS camera manager: {e}")
+        return blueos_rtsp_url, blueos_rtsp_encode
+
+    candidates = []  # (priority, url, encode)
+    for s in streams or []:
+        vas = s.get("video_and_stream") or {}
+        info = vas.get("stream_information") or {}
+        cfg = info.get("configuration") or {}
+        if cfg.get("type") != "video":
+            continue
+        encode = (cfg.get("encode") or "").upper()
+        for ep in info.get("endpoints") or []:
+            if not ep.startswith("rtsp://"):
+                continue
+            prio = 0 if encode == "H264" else (1 if encode == "H265" else 2)
+            candidates.append((prio, _rewrite_rtsp_host(ep), encode or "H264"))
+
+    if not candidates:
+        logger.warning("BlueOS camera manager has no RTSP video stream available")
+        return blueos_rtsp_url, blueos_rtsp_encode
+
+    candidates.sort(key=lambda c: c[0])
+    _, url, encode = candidates[0]
+    blueos_rtsp_url, blueos_rtsp_encode = url, encode
+    logger.info(f"BlueOS camera stream: {url} ({encode})")
+    return url, encode
+
+
+def _start_active_preview():
+    """(Re)start the live preview from the current camera source.
+
+    For DropCam, re-discovers the BlueOS RTSP endpoint first (the camera's
+    device node can change across USB re-enumeration), so the preview always
+    points at the live stream.
+    """
+    if not radcam_mode:
+        url, _ = discover_blueos_stream(refresh=True)
+        preview_mgr.set_blueos_endpoint(url)
+    preview_mgr.start("radcam" if radcam_mode else "usb")
+
 
 # ── Config ───────────────────────────────────────────────────────────────
 
@@ -546,34 +635,49 @@ def recording_health_watchdog():
 # ── Stills capture ───────────────────────────────────────────────────────
 
 def _capture_still(output_path, rotation=0):
-    """Capture a single JPEG frame from the USB camera or RTSP stream."""
-    try:
-        tmp = output_path + ".tmp.jpg"
-        if radcam_mode:
-            cmd = [
-                "ffmpeg", "-y", "-rtsp_transport", "tcp",
-                "-i", RTSP_ENDPOINT,
-                "-frames:v", "1", "-q:v", "2", tmp,
-            ]
-            subprocess.run(cmd, timeout=15, capture_output=True)
-        else:
-            cmd = [
-                "ffmpeg", "-y", "-f", "v4l2", "-input_format", "h264",
-                "-video_size", "1920x1080", "-i", VIDEO_DEVICE,
-                "-frames:v", "1", "-q:v", "2", tmp,
-            ]
-            subprocess.run(cmd, timeout=10, capture_output=True)
-        if rotation and rotation != 0:
-            _rotate_image(tmp, rotation)
-        os.rename(tmp, output_path)
-        return True
-    except Exception as e:
-        logger.error(f"Still capture failed: {e}")
-        if os.path.exists(output_path + ".tmp.jpg"):
-            try:
-                os.remove(output_path + ".tmp.jpg")
-            except Exception:
-                pass
+    """Capture a single JPEG frame from the active RTSP stream.
+
+    Both RadCam and DropCam now pull from an RTSP source (DropCam via the
+    BlueOS camera manager).  The manager's pipeline is lazy, so the first
+    DESCRIBE after an idle period can return 503 while it warms up — we retry
+    a few times before giving up.
+    """
+    tmp = output_path + ".tmp.jpg"
+    if radcam_mode:
+        url = RTSP_ENDPOINT
+    else:
+        url, _ = discover_blueos_stream(refresh=False)
+        if not url:
+            url, _ = discover_blueos_stream(refresh=True)
+        if not url:
+            logger.error("Still capture failed: no BlueOS camera stream available")
+            return False
+
+    cmd = [
+        "ffmpeg", "-y", "-rtsp_transport", "tcp",
+        "-i", url, "-frames:v", "1", "-q:v", "2", tmp,
+    ]
+    for attempt in range(3):
+        try:
+            r = subprocess.run(cmd, timeout=15, capture_output=True)
+            if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+                if rotation and rotation != 0:
+                    _rotate_image(tmp, rotation)
+                os.rename(tmp, output_path)
+                return True
+            logger.warning(
+                f"Still capture attempt {attempt + 1} failed: "
+                f"{r.stderr.decode(errors='replace').strip()[-200:]}"
+            )
+        except Exception as e:
+            logger.error(f"Still capture attempt {attempt + 1} error: {e}")
+        time.sleep(1)
+
+    if os.path.exists(tmp):
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
     return False
 
 
@@ -663,7 +767,7 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
     finally:
         if not recording:
             try:
-                preview_mgr.start("radcam" if radcam_mode else "usb")
+                _start_active_preview()
             except Exception as e:
                 logger.warning(f"Could not restart preview after failed start: {e}")
 
@@ -725,17 +829,23 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
                 f"mp4mux fragment-duration=5000 ! filesink location={filepath}"
             )
         else:
+            # DropCam: record the BlueOS camera-manager RTSP stream (BlueOS
+            # owns the USB camera, so we no longer touch /dev/video* directly).
+            url, encode = discover_blueos_stream(refresh=True)
+            if not url:
+                recording_error = ("No BlueOS camera stream available. Check that "
+                                   "the camera is connected and streaming in BlueOS.")
+                logger.error(recording_error)
+                return False
+            depay = "rtph265depay ! h265parse" if encode == "H265" else "rtph264depay ! h264parse"
             filename = basename + ".ts"
             filepath = os.path.join(rec_dir, filename)
             current_video_file = filepath
             pipeline = (
-                f"v4l2src do-timestamp=true device={VIDEO_DEVICE} ! "
-                "video/x-h264,width=1920,height=1080,framerate=30/1 ! "
-                "h264parse ! queue ! mux. "
-                f"alsasrc device={AUDIO_DEVICE} ! "
-                "audio/x-raw,format=S16LE,rate=44100,channels=1 ! "
-                "audioconvert ! audioresample ! avenc_aac ! queue ! mux. "
-                f"mpegtsmux name=mux ! filesink location={filepath}"
+                f"rtspsrc location={url} protocols=tcp latency=200 "
+                "retry=10 timeout=5000000 ! "
+                f"{depay} ! queue ! mpegtsmux name=mux ! "
+                f"filesink location={filepath}"
             )
         command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
 
@@ -1205,7 +1315,7 @@ def _stop_recording_internal():
     logger.info("Recording stopped")
 
     try:
-        preview_mgr.start("radcam" if radcam_mode else "usb")
+        _start_active_preview()
     except Exception as e:
         logger.warning(f"Could not restart preview after recording: {e}")
 
@@ -2078,7 +2188,11 @@ def _ping_radcam():
 
 
 def _wait_for_camera():
-    """Block until a camera source is available. Pings RadCam first (fast), then USB retries."""
+    """Block until a camera source is available.
+
+    Pings the RadCam first (fast); otherwise waits for the BlueOS camera
+    manager to publish an RTSP video stream for the USB camera.
+    """
     global radcam_mode
 
     logger.info(f"Checking for RadCam at {RADCAM_IP}...")
@@ -2087,15 +2201,16 @@ def _wait_for_camera():
         logger.info(f"RadCam detected at {RADCAM_IP} — entering RadCam mode (H265 4K RTSP)")
         return True
 
+    radcam_mode = False
     for attempt in range(1, CAMERA_BOOT_RETRIES + 1):
-        if os.path.exists(VIDEO_DEVICE):
-            logger.info(f"Camera {VIDEO_DEVICE} available (attempt {attempt})")
-            radcam_mode = False
+        url, encode = discover_blueos_stream(refresh=True)
+        if url:
+            logger.info(f"BlueOS camera stream available: {url} ({encode}) (attempt {attempt})")
             return True
-        logger.info(f"Waiting for camera {VIDEO_DEVICE} (attempt {attempt}/{CAMERA_BOOT_RETRIES})...")
+        logger.info(f"Waiting for BlueOS camera stream (attempt {attempt}/{CAMERA_BOOT_RETRIES})...")
         time.sleep(CAMERA_RETRY_INTERVAL_S)
 
-    logger.warning("No camera source found (USB or RadCam)")
+    logger.warning("No camera source found (BlueOS RTSP or RadCam)")
     return False
 
 
@@ -2125,23 +2240,15 @@ def _boot():
         logger.warning(f"Battery monitor failed to start: {e}")
     init_default_recipes()
 
-    try:
-        usb_storage.try_mount()
-        usb_status = usb_storage.get_status()
-    except Exception as e:
-        logger.warning(f"USB mount probe failed at boot: {e}; continuing without USB")
-        usb_status = {"mounted": False, "device": None, "free_mb": None, "usable": False}
-    if usb_status["mounted"]:
-        logger.info(f"USB storage detected: {usb_status['device']}, "
-                    f"{usb_status['free_mb']:.0f} MB free, "
-                    f"usable={usb_status['usable']}")
-    else:
-        logger.info(
-            f"No USB storage detected at boot; recordings will fall back to "
-            f"local storage at {VIDEO_DIR}"
-        )
+    # Mount USB in the background only.  A failing/unresponsive USB stick can
+    # leave mount.ntfs wedged in uninterruptible (D) sleep, which would hang a
+    # synchronous mount here forever and prevent the web server from ever
+    # starting.  The probe thread owns the (re)mount; until it succeeds,
+    # recordings transparently fall back to local storage.
     try:
         usb_storage.start_probe()
+        logger.info("USB mount deferred to background probe thread; "
+                    "recordings fall back to local storage until USB is ready")
     except Exception as e:
         logger.warning(f"Could not start USB probe thread: {e}")
 
@@ -2187,7 +2294,7 @@ def _boot():
     if camera_ok:
         try:
             preview_mgr.set_rotation(image_rotation)
-            preview_mgr.start("radcam" if radcam_mode else "usb")
+            _start_active_preview()
         except Exception as e:
             logger.warning(f"Could not start live preview pipeline: {e}")
     else:
