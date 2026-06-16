@@ -95,7 +95,6 @@ LABEL permissions='\
   "HostConfig": {\
     "Binds": [\
       "/usr/blueos/extensions/videorecorder:/app/videorecordings",\
-      "/dev/video2:/dev/video2",\
       "/dev/snd:/dev/snd",\
       "/dev:/dev"\
     ],\
@@ -139,8 +138,6 @@ LABEL links='\
         "source": "https://github.com/vshie/BlueOS_videorecorder"\
     }'
 LABEL requirements="core >= 1.1"
-
-VOLUME ["/dev/video2"]
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
