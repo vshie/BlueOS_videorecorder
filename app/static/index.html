@@ -229,6 +229,7 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         </div>
       </div>
       <div class="mt-8 text-muted" id="fileSizeText"></div>
+      <div id="recErrorText" class="hidden" style="margin-top:8px;padding:8px 10px;border-radius:6px;background:#fdecea;border:1px solid #f5c6cb;color:#b71c1c;font-size:.85em;line-height:1.35"></div>
       <div id="remuxBar" class="hidden" style="margin-top:6px">
         <div style="display:flex;align-items:center;gap:8px">
           <span id="remuxStage" style="font-size:.82em;color:#43a047;font-weight:500">Remuxing TS→MP4</span>
@@ -723,6 +724,15 @@ async function pollStatus() {
   if (d.disk_free_mb != null) fsTxt.push('Disk free: ' + (d.disk_free_mb/1024).toFixed(1) + ' GB');
   if (d.stills_count > 0) fsTxt.push(d.stills_count + ' stills');
   document.getElementById('fileSizeText').textContent = fsTxt.join(' | ');
+
+  // Recording error banner (shown even after an auto-abort, when not recording)
+  const errEl = document.getElementById('recErrorText');
+  if (d.recording_error) {
+    errEl.textContent = '\u26A0 ' + d.recording_error;
+    errEl.classList.remove('hidden');
+  } else {
+    errEl.classList.add('hidden');
+  }
 
   // Remux progress
   const remuxEl = document.getElementById('remuxBar');

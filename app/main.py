@@ -71,6 +71,15 @@ gst_warning_count = 0
 watchdog_thread = None
 stop_watchdog_thread = False
 file_stall_count = 0
+# Human-readable reason the most recent recording failed/aborted, surfaced to
+# the UI.  Cleared when a new recording starts successfully.
+recording_error = ""
+
+# Watchdog cadence and how long the video file may go without growing (incl.
+# stuck at 0 bytes from the start, e.g. camera never delivered a frame) before
+# the recording is auto-aborted.
+WATCHDOG_INTERVAL_S = 5
+STALL_ABORT_INTERVALS = 6  # ~30s of no data written
 
 stills_thread = None
 stop_stills_thread = False
@@ -345,8 +354,36 @@ def log_event(event_type, detail=""):
 
 # ── GStreamer stderr monitor ─────────────────────────────────────────────
 
+def _gst_startup_error(stderr_text):
+    """Pick the most descriptive line from a failed gst-launch stderr blob."""
+    lines = [ln.strip() for ln in (stderr_text or "").splitlines() if ln.strip()]
+    for ln in lines:
+        if "from element" in ln.lower() or "erroneous pipeline" in ln.lower():
+            return _humanize_gst_error(ln)
+    for ln in lines:
+        if "error" in ln.lower():
+            return _humanize_gst_error(ln)
+    return "Recording failed to start (camera/encoder error)."
+
+
+def _humanize_gst_error(msg):
+    """Map a raw GStreamer error line to a short, operator-friendly hint."""
+    low = msg.lower()
+    if ("could not read from resource" in low
+            or "failed to allocate a buffer" in low
+            or "internal data stream error" in low):
+        return ("Camera stopped delivering video. Check the USB camera "
+                "connection/power (it may have disconnected).")
+    if "device has been disconnected" in low or "no such device" in low:
+        return ("Camera/audio device disconnected. Check the USB camera "
+                "connection/power.")
+    if "could not open device" in low or "no such file or directory" in low:
+        return ("Camera device not found. Check the USB camera connection.")
+    return msg
+
+
 def gst_stderr_monitor(process):
-    global gst_error_count, gst_warning_count
+    global gst_error_count, gst_warning_count, recording_error
     for line in iter(process.stderr.readline, b""):
         if stop_gst_stderr_thread:
             break
@@ -358,6 +395,10 @@ def gst_stderr_monitor(process):
             gst_error_count += 1
             logger.error(f"GST_ERROR: {decoded}")
             log_event("gst_error", decoded)
+            # Surface the first descriptive error to the UI; later lines are
+            # usually generic ("streaming stopped") and less useful.
+            if not recording_error and "from element" in decoded.lower():
+                recording_error = _humanize_gst_error(decoded)
         elif "WARNING" in upper:
             gst_warning_count += 1
             logger.warning(f"GST_WARN: {decoded}")
@@ -428,6 +469,23 @@ def _usb_failover():
         hw.led_warning()
 
 
+def _abort_recording(msg):
+    """Abort an unhealthy recording from a background/watchdog thread.
+
+    Records the reason (for the UI), flags the LED, and runs the stop in a
+    *separate* thread.  ``_stop_recording_internal`` joins the watchdog thread,
+    which would raise "cannot join current thread" if called inline from the
+    watchdog itself, so it must run elsewhere.
+    """
+    global recording_error
+    if not recording_error:
+        recording_error = msg
+    logger.error(msg)
+    log_event("recording_aborted", msg)
+    hw.led_warning()
+    threading.Thread(target=_stop_recording_internal, daemon=True).start()
+
+
 def recording_health_watchdog():
     global file_stall_count
     last_size = 0
@@ -439,17 +497,26 @@ def recording_health_watchdog():
                 _usb_failover()
                 return
 
-            if current_video_file and os.path.exists(current_video_file):
-                sz = os.path.getsize(current_video_file)
-                growth = sz - last_size
-                if last_size > 0 and growth == 0:
-                    file_stall_count += 1
-                    log_event("file_stall", f"No growth for {file_stall_count} intervals ({sz} bytes)")
-                    hw.led_warning()
-                else:
+            # Video file growth check.  A file that never grows — including one
+            # stuck at 0 bytes from the start (camera never delivered a frame) —
+            # is treated as a stall and auto-aborted after STALL_ABORT_INTERVALS.
+            if current_video_file:
+                sz = os.path.getsize(current_video_file) if os.path.exists(current_video_file) else 0
+                if sz > last_size:
                     if file_stall_count > 0 and recording:
                         hw.led_recording()
                     file_stall_count = 0
+                else:
+                    file_stall_count += 1
+                    log_event("file_stall", f"No growth for {file_stall_count} intervals ({sz} bytes)")
+                    hw.led_warning()
+                    if file_stall_count >= STALL_ABORT_INTERVALS:
+                        secs = file_stall_count * WATCHDOG_INTERVAL_S
+                        _abort_recording(
+                            f"Recording aborted: no video data written for ~{secs}s "
+                            f"({sz} bytes). Check the camera/USB connection."
+                        )
+                        return
                 last_size = sz
 
             if stills_dir and os.path.isdir(stills_dir):
@@ -457,20 +524,24 @@ def recording_health_watchdog():
 
             if gst_process and gst_process.poll() is not None:
                 log_event("process_died", f"GStreamer exit code {gst_process.returncode}")
+                _abort_recording(
+                    f"Recording aborted: encoder process exited (code "
+                    f"{gst_process.returncode}). Check the camera/USB connection."
+                )
+                return
 
             check_path = recording_base_dir or VIDEO_DIR
             disk_free = get_disk_free_mb(check_path)
             if disk_free is not None and disk_free < 1024:
                 logger.warning(f"Disk space low: {disk_free} MB, stopping")
                 log_event("disk_full", f"{disk_free} MB remaining")
-                _stop_recording_internal()
-                hw.led_warning()
+                _abort_recording(f"Recording stopped: disk almost full ({disk_free} MB free).")
                 return
 
-            time.sleep(5)
+            time.sleep(WATCHDOG_INTERVAL_S)
         except Exception as e:
             logger.error(f"Watchdog error: {e}")
-            time.sleep(5)
+            time.sleep(WATCHDOG_INTERVAL_S)
 
 # ── Stills capture ───────────────────────────────────────────────────────
 
@@ -607,7 +678,9 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     global watchdog_thread, stop_watchdog_thread, file_stall_count
     global stills_thread, stop_stills_thread, stills_dir, stills_count
     global usb_recording, recording_base_dir, recording_rotation
+    global recording_error
 
+    recording_error = ""
     recording_rotation = int(rotation) % 360
     os.makedirs(VIDEO_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -674,19 +747,24 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
             logger.info(f"GStreamer command: {' '.join(command)}")
             if gst_process.poll() is not None:
                 out, err = gst_process.communicate()
-                logger.error(f"GStreamer failed: {err.decode()}")
+                err_text = err.decode(errors="replace")
+                logger.error(f"GStreamer failed: {err_text}")
+                recording_error = _gst_startup_error(err_text)
                 gst_process = None
                 start_time = None
                 return False
             time.sleep(2)
             if gst_process.poll() is not None:
                 out, err = gst_process.communicate()
-                logger.error(f"GStreamer died during startup: {err.decode()}")
+                err_text = err.decode(errors="replace")
+                logger.error(f"GStreamer died during startup: {err_text}")
+                recording_error = _gst_startup_error(err_text)
                 gst_process = None
                 start_time = None
                 return False
         except Exception as e:
             logger.error(f"Failed to start GStreamer: {e}")
+            recording_error = f"Failed to start recording: {e}"
             gst_process = None
             start_time = None
             return False
@@ -1219,6 +1297,7 @@ def route_status():
             "gst_warnings": gst_warning_count,
             "file_stalls": file_stall_count,
             "health": health,
+            "recording_error": recording_error or None,
             "stills_count": stills_count if stills_dir else 0,
             "mode": (active_recipe_for_recording or {}).get("mode", "video"),
             "scheduler": sched,
