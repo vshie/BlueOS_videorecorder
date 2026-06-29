@@ -74,10 +74,22 @@ label{font-size:.84em;color:#555;display:block;margin-bottom:2px}
 /* Slider */
 input[type=range]{width:100%;margin:3px 0;accent-color:#1a73e8}
 
-/* Snapshot — height fills remaining card space; min-height guards against tiny column */
-.snapshot-area{text-align:center;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:6px;background:#e8e8e8}
+/* Live preview — height fills remaining card space; min-height guards against tiny column */
+.snapshot-area{position:relative;text-align:center;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:6px;background:#e8e8e8}
 .snapshot-area img{max-width:100%;max-height:100%;border-radius:6px;border:1px solid #ddd;display:block;object-fit:contain}
+/* Rotation is applied via CSS transform on the live video element so the preview
+   matches the orientation the recorded file will be played back at (the recorder
+   stamps the same rotation as lossless metadata on the .mp4). */
+.snapshot-area .live-video{max-width:100%;max-height:100%;width:auto;height:auto;border-radius:6px;border:1px solid #ddd;display:block;object-fit:contain;background:#000;transform-origin:center center;transition:transform .15s ease}
+.snapshot-area .live-video.rot-90{transform:rotate(90deg)}
+.snapshot-area .live-video.rot-180{transform:rotate(180deg)}
+.snapshot-area .live-video.rot-270{transform:rotate(270deg)}
+/* For 90/270 the rotated video is wider than tall after rotation; cap the
+   pre-rotation dimension so the rotated box still fits the card area. */
+.snapshot-area.rot-quarter .live-video{max-width:none;max-height:none;width:auto;height:100%}
 .snapshot-placeholder{color:#999;font-size:.88em;padding:12px}
+.snapshot-status{position:absolute;left:6px;bottom:6px;font-size:.72em;color:rgba(255,255,255,.85);background:rgba(0,0,0,.45);padding:2px 6px;border-radius:4px;pointer-events:none;max-width:80%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.snapshot-status.hidden{display:none}
 
 /* Recipe list */
 .recipe-item{display:flex;align-items:center;padding:7px 10px;border:1px solid #e0e0e0;border-radius:6px;margin-bottom:5px;background:#fafafa}
@@ -280,13 +292,13 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
       <div class="flex-between mb-8">
         <h3>Camera Preview</h3>
         <div style="display:flex;gap:5px">
-          <button class="btn-sm" onclick="takeSnapshot()">Snapshot</button>
           <button class="btn-sm" onclick="cycleRotation()">Rotate <span id="rotLabel">0</span>&deg;</button>
         </div>
       </div>
-      <div class="snapshot-area">
+      <div class="snapshot-area" id="snapArea">
         <div class="snapshot-placeholder" id="snapPlaceholder">Waiting for camera...</div>
-        <img id="snapImg" class="hidden" alt="Camera snapshot">
+        <video id="liveVideo" class="live-video hidden" playsinline autoplay muted></video>
+        <div class="snapshot-status hidden" id="liveStatus"></div>
       </div>
     </div>
 
@@ -657,6 +669,7 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
   <iframe id="fileBrowserFrame" src="" style="width:100%;height:600px;border:none;border-radius:8px"></iframe>
 </div>
 
+<script src="/static/mcm_webrtc_live.js"></script>
 <script>
 /* ── State ─────────────────────────────────── */
 let isRecording = false;
@@ -724,6 +737,10 @@ async function pollStatus() {
   if (d.disk_free_mb != null) fsTxt.push('Disk free: ' + (d.disk_free_mb/1024).toFixed(1) + ' GB');
   if (d.stills_count > 0) fsTxt.push(d.stills_count + ' stills');
   document.getElementById('fileSizeText').textContent = fsTxt.join(' | ');
+
+  // Keep the live preview rotated to match what the recorder will stamp on
+  // the .mp4 (server-side rotation_degrees is the source of truth).
+  if (d.rotation_degrees != null) applyPreviewRotation(d.rotation_degrees);
 
   // Recording error banner (shown even after an auto-abort, when not recording)
   const errEl = document.getElementById('recErrorText');
@@ -983,35 +1000,124 @@ async function stopSchedule() {
   pollStatus();
 }
 
-/* ── Snapshot ──────────────────────────────── */
-function _showSnap(blob) {
-  const img = document.getElementById('snapImg');
+/* ── Live preview (WebRTC consumer of BlueOS camera-manager) ─────────────
+   Replaces the old JPEG snapshot polling.  The browser hardware-decodes the
+   H264 stream MCM already publishes, so the Pi does ~0 preview work.  The
+   helper at /static/mcm_webrtc_live.js is a framework-agnostic port of the
+   same client used by BR_exploreHD_DVR (signalling on ws://<host>:6021).
+*/
+let _live = null;
+let _liveStarting = false;
+let _liveRetryT = null;
+let _liveLastRotation = -1;
+
+function _setLiveStatus(msg, isError) {
+  const el = document.getElementById('liveStatus');
+  if (!el) return;
+  if (!msg) { el.classList.add('hidden'); el.textContent = ''; return; }
+  el.classList.remove('hidden');
+  el.textContent = msg;
+  el.style.background = isError ? 'rgba(180,30,30,.7)' : 'rgba(0,0,0,.45)';
+}
+
+function _showLiveVideo() {
+  document.getElementById('liveVideo').classList.remove('hidden');
+  document.getElementById('snapPlaceholder').classList.add('hidden');
+}
+
+function _hideLiveVideo(placeholderText) {
+  document.getElementById('liveVideo').classList.add('hidden');
   const ph = document.getElementById('snapPlaceholder');
-  if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
-  img.src = URL.createObjectURL(blob);
-  img.classList.remove('hidden');
-  ph.classList.add('hidden');
+  if (placeholderText) ph.textContent = placeholderText;
+  ph.classList.remove('hidden');
 }
-async function takeSnapshot() {
-  const ph = document.getElementById('snapPlaceholder');
-  ph.textContent = 'Capturing...';
+
+function applyPreviewRotation(deg) {
+  const d = ((Number(deg) || 0) % 360 + 360) % 360;
+  if (d === _liveLastRotation) return;
+  _liveLastRotation = d;
+  const v = document.getElementById('liveVideo');
+  const area = document.getElementById('snapArea');
+  if (!v || !area) return;
+  v.classList.remove('rot-90', 'rot-180', 'rot-270');
+  area.classList.remove('rot-quarter');
+  if (d === 90) { v.classList.add('rot-90'); area.classList.add('rot-quarter'); }
+  else if (d === 180) { v.classList.add('rot-180'); }
+  else if (d === 270) { v.classList.add('rot-270'); area.classList.add('rot-quarter'); }
+  const lbl = document.getElementById('rotLabel');
+  if (lbl) lbl.textContent = d;
+}
+
+async function _pickStream() {
+  const r = await fetch('/streams');
+  if (!r.ok) throw new Error('stream list HTTP ' + r.status);
+  const d = await r.json();
+  const list = (d && d.streams) || [];
+  if (!list.length) return null;
+  // Prefer H264 (the only encoding the browser WebRTC stack reliably plays).
+  const h264 = list.find(s => (s.encode || '').toUpperCase() === 'H264');
+  return h264 || list[0];
+}
+
+function _scheduleLiveRetry(delayMs) {
+  if (_liveRetryT) return;
+  _liveRetryT = setTimeout(() => { _liveRetryT = null; ensureLivePreview(); }, delayMs);
+}
+
+async function ensureLivePreview() {
+  if (_liveStarting) return;
+  if (!window.McmWebRtcLive) {
+    _setLiveStatus('Live helper failed to load', true);
+    return;
+  }
+  _liveStarting = true;
   try {
-    const r = await fetch('/snapshot');
-    if (r.ok) { _showSnap(await r.blob()); }
-    else { ph.textContent = 'Capture failed'; }
-  } catch(e) { ph.textContent = 'Error: ' + e; }
+    const stream = await _pickStream();
+    if (!stream) {
+      _hideLiveVideo('Waiting for camera...');
+      _setLiveStatus('No camera stream published yet — will retry');
+      _scheduleLiveRetry(3000);
+      return;
+    }
+    const videoEl = document.getElementById('liveVideo');
+    if (!_live) {
+      _live = window.McmWebRtcLive.create(videoEl, {
+        onStatus: s => _setLiveStatus(s, false),
+        onError:  e => {
+          _setLiveStatus(String(e), true);
+          // Hard failure (peer died, signalling lost) — tear down and retry.
+          try { _live && _live.close(); } catch (_) {}
+          _live = null;
+          _hideLiveVideo('Reconnecting...');
+          _scheduleLiveRetry(2000);
+        },
+      });
+      await _live.connect();
+    }
+    try {
+      await _live.playStream(stream.stream_id, stream.name, stream.rtsp_url);
+      _showLiveVideo();
+      // Hide the status overlay once frames are flowing.
+      videoEl.onplaying = () => _setLiveStatus('', false);
+    } catch (e) {
+      // Producer not registered with the WebRTC side yet — MCM RTSP can be up
+      // while the WebRTC producer list is still empty for a few seconds at
+      // boot.  Retry on a short timer.
+      _setLiveStatus('Stream not ready yet — retrying', false);
+      _scheduleLiveRetry(2500);
+    }
+  } catch (e) {
+    _setLiveStatus('Live preview error: ' + (e && e.message ? e.message : e), true);
+    _scheduleLiveRetry(3000);
+  } finally {
+    _liveStarting = false;
+  }
 }
-async function pollSnapshot() {
-  try {
-    const r = await fetch('/snapshot/latest');
-    if (r.ok) _showSnap(await r.blob());
-  } catch(e) { /* ignore */ }
-}
+
 async function cycleRotation() {
   const d = await api('/rotate', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
-  if (d.success) {
-    document.getElementById('rotLabel').textContent = d.rotation_degrees;
-    takeSnapshot();
+  if (d && d.success) {
+    applyPreviewRotation(d.rotation_degrees);
   }
 }
 
@@ -1022,7 +1128,6 @@ function setServo(val) {
   clearTimeout(servoDebounce);
   servoDebounce = setTimeout(async () => {
     await api('/servo', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({position_us:+val})});
-    setTimeout(() => takeSnapshot(), 500);
   }, 80);
 }
 let lightDebounce = null;
@@ -1118,7 +1223,6 @@ function setAuxPwm(channel, val) {
   auxDebounce[channel] = setTimeout(async () => {
     await api('/aux_pwm', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({channel, position_us:+val})});
     slider._userSet = false;
-    setTimeout(() => takeSnapshot(), 500);
   }, 120);
 }
 function syncAuxInput(channel, val) {
@@ -1903,16 +2007,16 @@ loadRecipes();
 loadVideoList();
 pollStatus();
 pollTelemetry();
-pollSnapshot();
+ensureLivePreview();
 setInterval(pollStatus, 2000);
 setInterval(pollTelemetry, 5000);
 setInterval(loadVideoList, 10000);
-setInterval(pollSnapshot, 200);
 document.getElementById('fileBrowserFrame').src =
   `http://${window.location.hostname}:7777/files/extensions/videorecorder`;
 
 window.addEventListener('unload', () => {
   clearInterval(durationTimer);
+  try { if (_live) _live.close(); } catch (_) {}
 });
 </script>
 </body>

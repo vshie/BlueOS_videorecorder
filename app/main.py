@@ -9,7 +9,7 @@ rather than reading /dev/video* directly. Controls a camera tilt servo, lumen
 light, and RGB status LED. Supports auto-start via saved recording recipes.
 """
 
-from flask import Flask, Response, jsonify, make_response, request, send_file
+from flask import Flask, Response, jsonify, request, send_file
 import io
 import json
 import os
@@ -42,7 +42,6 @@ from recipes import (
     save_recipe, delete_recipe, calculate_sweep_time,
 )
 import usb_storage
-import preview as preview_mod
 from battery import BatteryMonitor
 
 # ── Constants ────────────────────────────────────────────────────────────
@@ -177,19 +176,6 @@ def discover_blueos_stream(refresh=True):
     blueos_rtsp_url, blueos_rtsp_encode = url, encode
     logger.info(f"BlueOS camera stream: {url} ({encode})")
     return url, encode
-
-
-def _start_active_preview():
-    """(Re)start the live preview from the current camera source.
-
-    For DropCam, re-discovers the BlueOS RTSP endpoint first (the camera's
-    device node can change across USB re-enumeration), so the preview always
-    points at the live stream.
-    """
-    if not radcam_mode:
-        url, _ = discover_blueos_stream(refresh=True)
-        preview_mgr.set_blueos_endpoint(url)
-    preview_mgr.start("radcam" if radcam_mode else "usb")
 
 
 # ── Config ───────────────────────────────────────────────────────────────
@@ -744,32 +730,20 @@ def start_recording_with_recipe(recipe):
 
 def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
                                force_local=False):
-    """Public start hook that brackets the real work with preview lifecycle.
+    """Public start hook for the recorder.
 
-    Pauses the live preview pipeline (so it does not contend with the
-    recorder for the camera), invokes the inner body, and — if the inner
-    body fails before flipping `recording` to True — restarts the preview
-    so the UI does not end up frozen on a stale frame.
+    Previously bracketed the inner body with preview-pipeline stop/restart so
+    the server-side ffmpeg preview did not contend with the recorder for the
+    camera.  The live preview is now a browser-side WebRTC consumer of the
+    BlueOS camera manager (which supports multiple simultaneous consumers),
+    so no server-side preview lifecycle has to be managed here.
     """
     if recording:
         return False
-
-    try:
-        preview_mgr.stop()
-    except Exception as e:
-        logger.warning(f"Could not stop preview before recording: {e}")
-
-    try:
-        return _start_recording_internal_body(
-            mode=mode, still_interval_s=still_interval_s,
-            rotation=rotation, force_local=force_local,
-        )
-    finally:
-        if not recording:
-            try:
-                _start_active_preview()
-            except Exception as e:
-                logger.warning(f"Could not restart preview after failed start: {e}")
+    return _start_recording_internal_body(
+        mode=mode, still_interval_s=still_interval_s,
+        rotation=rotation, force_local=force_local,
+    )
 
 
 def _start_recording_internal_body(mode="video", still_interval_s=1.0,
@@ -1314,11 +1288,6 @@ def _stop_recording_internal():
 
     logger.info("Recording stopped")
 
-    try:
-        _start_active_preview()
-    except Exception as e:
-        logger.warning(f"Could not restart preview after recording: {e}")
-
 # ── Flask Routes ─────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -1674,19 +1643,7 @@ def route_battery():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ── Snapshot ─────────────────────────────────────────────────────────────
-
-SNAPSHOT_PATH = os.path.join(VIDEO_DIR, ".snapshot_tmp.jpg")  # legacy/disused
-
-# Continuous preview manager — owns a single long-running ffmpeg child that
-# pipes MJPEG to a Python parser; the latest complete frame lives in memory
-# and is served atomically from /snapshot.  Paused while a recording is
-# active so it does not contend with the recorder for the camera.  Started
-# in _boot() once a camera source is confirmed.
-preview_mgr = preview_mod.PreviewManager(
-    video_device=VIDEO_DEVICE,
-    rtsp_endpoint=RTSP_ENDPOINT,
-)
+# ── Camera streams (for browser WebRTC preview) ──────────────────────────
 
 
 def _battery_config_getter():
@@ -1706,36 +1663,51 @@ battery_monitor = BatteryMonitor(
 )
 
 
-@app.route("/snapshot", methods=["GET"])
-def route_snapshot():
-    """Return the latest preview frame.
+@app.route("/streams", methods=["GET"])
+def route_streams():
+    """Return the BlueOS camera-manager video streams the browser can play.
 
-    The preview pipeline parses ffmpeg's MJPEG output into discrete JPEGs
-    and keeps the most recent complete frame in memory.  Each request
-    returns a whole frame — there is no half-written-file race.
-
-    During an active recording the preview is paused and this returns
-    whatever frame was last received before the pause (or 503 if none).
+    The frontend WebRTC consumer needs the producer name / id / RTSP URL to
+    match a stream in MCM's signalling channel.  This is a thin pass-through
+    over ``GET {CAMERA_MANAGER_URL}/streams`` (queried via urllib — no extra
+    dependency) that normalises just the fields the browser helper uses.
     """
-    frame, age = preview_mgr.get_latest_frame()
-    if not frame:
-        return jsonify({"success": False, "message": "No snapshot available yet"}), 503
-    resp = make_response(frame)
-    resp.headers["Content-Type"] = "image/jpeg"
-    resp.headers["Cache-Control"] = "no-store"
-    if age is not None:
-        resp.headers["X-Snapshot-Age-Ms"] = str(int(age * 1000))
-    return resp
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"{CAMERA_MANAGER_URL}/streams", timeout=5) as r:
+            raw = json.loads(r.read().decode())
+    except Exception as e:
+        logger.warning(f"Could not query BlueOS camera manager streams: {e}")
+        return jsonify({"success": False, "message": str(e), "streams": []}), 502
 
-
-@app.route("/snapshot/latest", methods=["GET"])
-def route_snapshot_latest():
-    """Alias for /snapshot — the in-memory frame is always the most recent.
-
-    Kept for backwards compatibility with older clients that still hit
-    /snapshot/latest expecting a no-side-effects fetch.
-    """
-    return route_snapshot()
+    out = []
+    for s in raw or []:
+        try:
+            sid = s.get("id")
+            vas = s.get("video_and_stream") or {}
+            name = vas.get("name") or "stream"
+            info = vas.get("stream_information") or {}
+            cfg = info.get("configuration") or {}
+            if cfg.get("type") != "video":
+                continue
+            rtsp = None
+            for ep in info.get("endpoints") or []:
+                if isinstance(ep, str) and ep.lower().startswith("rtsp://"):
+                    rtsp = _rewrite_rtsp_host(ep)
+                    break
+            if not (sid and rtsp):
+                continue
+            out.append({
+                "stream_id": str(sid),
+                "name": name,
+                "rtsp_url": rtsp,
+                "encode": (cfg.get("encode") or "").upper(),
+                "running": bool(s.get("running")),
+            })
+        except Exception as parse_err:
+            logger.debug(f"Skipping malformed /streams entry: {parse_err}")
+            continue
+    return jsonify({"success": True, "streams": out})
 
 
 @app.route("/rotate", methods=["POST"])
@@ -1754,10 +1726,6 @@ def route_rotate():
     cfg = load_config()
     cfg["rotation_degrees"] = image_rotation
     save_config(cfg)
-    try:
-        preview_mgr.set_rotation(image_rotation)
-    except Exception as e:
-        logger.warning(f"Could not update preview rotation: {e}")
     return jsonify({"success": True, "rotation_degrees": image_rotation})
 
 
@@ -1935,11 +1903,6 @@ def route_detect_radcam():
     hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
     init_default_recipes(radcam=True)
     register_service()
-    if not recording:
-        try:
-            preview_mgr.start("radcam")
-        except Exception as e:
-            logger.warning(f"Could not switch preview to RadCam source: {e}")
     return jsonify({"success": True, "message": "RadCam detected, mode switched"})
 
 
@@ -2288,17 +2251,12 @@ def _boot():
         hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
         init_default_recipes(radcam=True)
 
-    # Start the live preview pipeline once the camera is known.  If a recipe
-    # is configured to auto-start below, the start_fn will stop the preview
-    # before the recorder takes the camera, then restart it on stop.
-    if camera_ok:
-        try:
-            preview_mgr.set_rotation(image_rotation)
-            _start_active_preview()
-        except Exception as e:
-            logger.warning(f"Could not start live preview pipeline: {e}")
-    else:
-        logger.info("Skipping preview pipeline — camera not yet available")
+    # The live preview is served by the BlueOS camera manager directly to the
+    # browser over WebRTC (signalling on :6021); nothing to start here.  If
+    # the camera is not yet available the WebRTC client will simply retry
+    # once MCM publishes the producer.
+    if not camera_ok:
+        logger.info("Camera not yet available — WebRTC preview will appear once MCM exposes the stream")
 
     if rid:
         recipe = get_recipe(rid)
@@ -2319,14 +2277,10 @@ def _boot():
     logger.info(f"=== {mode_label} boot sequence complete ===")
 
     import atexit
-    atexit.register(_shutdown_preview_safely)
+    atexit.register(_shutdown_safely)
 
 
-def _shutdown_preview_safely():
-    try:
-        preview_mgr.shutdown()
-    except Exception:
-        pass
+def _shutdown_safely():
     try:
         battery_monitor.stop()
     except Exception:
