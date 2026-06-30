@@ -188,7 +188,6 @@ def load_config():
         "radcam_focus_us": 900,
         "radcam_zoom_us": 900,
         "radcam_pan_us": 1500,
-        "radcam_ext_servo_us": 1500,
         "battery": {
             "enabled": True,
             "serial_port": "auto",
@@ -1900,7 +1899,6 @@ def route_detect_radcam():
     hw.set_aux_pwm("focus", cfg.get("radcam_focus_us", 900))
     hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 900))
     hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
-    hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
     init_default_recipes(radcam=True)
     register_service()
     return jsonify({"success": True, "message": "RadCam detected, mode switched"})
@@ -2248,7 +2246,6 @@ def _boot():
         hw.set_aux_pwm("focus", cfg.get("radcam_focus_us", 900))
         hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 900))
         hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
-        hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
         init_default_recipes(radcam=True)
 
     # The live preview is served by the BlueOS camera manager directly to the

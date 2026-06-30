@@ -9,8 +9,8 @@ A BlueOS extension that turns a Raspberry Pi 4 into a standalone, deployable dro
 - **Still capture mode** at configurable intervals (0.1s resolution)
 - **Camera tilt servo** control (1000-2000 us PWM on GPIO 18)
 - **Lumen light** control via servo PWM (GPIO 13)
-- **Release servo** continuous-rotation drive for surface recovery (GPIO 12)
-- **Focus / zoom / pan / external** auxiliary servo PWM channels (GPIO 20 / 26 / 16 / 19)
+- **Release servo** continuous-rotation drive for surface recovery (GPIO 19, hardware-PWM on Pi 5)
+- **Focus / zoom / pan** auxiliary servo PWM channels (GPIO 20 / 26 / 16)
 - **RGB LED** status indicator (WS2812 NeoPixel on GPIO 10)
 - **System telemetry** subtitle overlay (CPU temp, voltage, clock, servo position, light level)
 - **Disk space guard** — stops recording when < 1 GB free
@@ -23,11 +23,10 @@ A BlueOS extension that turns a Raspberry Pi 4 into a standalone, deployable dro
 | RGB Status LED (WS2812) | GPIO 10 (SPI MOSI) | Pin 19 |
 | Camera Tilt Servo | GPIO 18 (PWM, Pin 12) | Pin 12 |
 | Lumen Light | GPIO 13 (PWM1) | Pin 33 |
-| Release Servo | GPIO 12 | Pin 32 |
+| Release Servo (external) | GPIO 19 | Pin 35 |
 | Camera Focus | GPIO 20 | Pin 38 |
 | Zoom | GPIO 26 | Pin 37 |
 | Pan | GPIO 16 | Pin 36 |
-| External Servo | GPIO 19 | Pin 35 |
 | USB Camera | — | /dev/video2 |
 
 ## Quick Start
@@ -101,8 +100,7 @@ Connected cameras must have their streams **removed** from the BlueOS Video Stre
 | RGB Status LED (WS2812) | GPIO 10 (SPI MOSI) | Pin 19 | Single NeoPixel data line |
 | Lumen Light | GPIO 13 (PWM1) | Pin 33 | 1000-2000 µs servo PWM. Modes: always on, pause points only, or snapshot only |
 | Camera Tilt Servo | GPIO 18 | Pin 12 | 1000-2000 µs PWM. Centered at 1500 µs on boot. On Pi 5, driven by the RP1 hardware-PWM peripheral (jitter-free) — requires `dtoverlay=pwm-2chan` in config.txt (see Pi 5 notes below) |
-| External Servo | GPIO 19 | Pin 35 | 1000-2000 µs PWM. On Pi 5, also hardware-PWM (channel 3) under `dtoverlay=pwm-2chan` |
-| Release Servo | GPIO 12 | Pin 32 | Continuous-rotation drive: 1500 µs = stop, 1000 µs = wind, 2000 µs = unwind (frees unit to surface). Held at 1500 µs from boot |
+| Release Servo (external) | GPIO 19 | Pin 35 | Continuous-rotation drive: 1500 µs = stop, 1000 µs = wind, 2000 µs = unwind (frees unit to surface). Held at 1500 µs from boot. On Pi 5, also hardware-PWM (channel 3) under `dtoverlay=pwm-2chan` |
 | Camera Focus | GPIO 20 | Pin 38 | 1000-2000 µs servo-style PWM |
 | Zoom | GPIO 26 | Pin 37 | 1000-2000 µs servo-style PWM |
 | Pan | GPIO 16 | Pin 36 | 1000-2000 µs servo-style PWM |
@@ -112,7 +110,7 @@ All servo/light/PWM signals share a common ground with the Pi. Servos, lights, a
 
 ### Raspberry Pi 5 — jitter-free servo (hardware PWM)
 
-The Pi 5's RP1 I/O controller cannot do DMA-timed PWM the way `pigpio` did on the Pi 4, so a software-timed servo pulse visibly jitters. To get a clean, jitter-free tilt servo on the Pi 5, the extension drives **GPIO 18** (and the external servo on **GPIO 19**) through the RP1 **hardware-PWM** peripheral. This requires the PWM overlay to be enabled on the host:
+The Pi 5's RP1 I/O controller cannot do DMA-timed PWM the way `pigpio` did on the Pi 4, so a software-timed servo pulse visibly jitters. To get a clean, jitter-free tilt servo on the Pi 5, the extension drives **GPIO 18** (and the external release servo on **GPIO 19**) through the RP1 **hardware-PWM** peripheral. This requires the PWM overlay to be enabled on the host:
 
 1. Edit `/boot/firmware/config.txt` and add a line:
 
@@ -124,7 +122,7 @@ dtoverlay=pwm-2chan
 
 This maps GPIO 18 → PWM channel 2 and GPIO 19 → PWM channel 3 on the RP1. The extension auto-detects the hardware-PWM chip at startup; if the overlay is missing it falls back to software PWM (functional but jittery). The container must run privileged so `/sys/class/pwm` is writable (already set in the extension permissions). The active servo backend is reported in `/telemetry` under `gpio_backends` (e.g. `rp1-hw-pwm+lgpio`).
 
-The remaining servo-style outputs (release, focus, zoom, pan, light) stay on software PWM, which is fine for their use (release is a continuous-rotation drive; the others are infrequent, low-precision moves).
+The remaining servo-style outputs (focus, zoom, pan, light) stay on software PWM, which is fine for their use — they are infrequent, low-precision moves.
 
 ## 3. LED Status Indicators
 

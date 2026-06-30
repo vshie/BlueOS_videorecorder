@@ -11,16 +11,17 @@ GPIO assignments:
   - GPIO 13 (Pin 33): Lumen light (1000-2000 us servo-style PWM; 1000 us = off,
         2000 us = full brightness. Note: a disabled/floating signal turns the
         light ON at full brightness, so we always hold 1000 us to keep it off.)
-  - GPIO 12 (Pin 32): Release servo on a continuous-rotation drive.
-        1500 us = stop (idle), 1000 us = wind one direction, 2000 us =
-        unwind the opposite direction.  The release mechanism is a string
-        wound around a post: running unwind for ~60 s lets the string
-        spool off and frees the unit to float to the surface.  Held at
-        1500 us from boot.
+  - GPIO 19 (Pin 35): Release servo on a continuous-rotation drive
+        ("external release servo").  1500 us = stop (idle), 1000 us = wind
+        one direction, 2000 us = unwind the opposite direction.  The
+        release mechanism is a string wound around a post: running unwind
+        for ~60 s lets the string spool off and frees the unit to float to
+        the surface.  Held at 1500 us from boot.  GPIO 19 is hardware-PWM
+        capable on the Pi 5 (RP1 channel 3 under ``dtoverlay=pwm-2chan``)
+        for jitter-free pulses; on the Pi 4 it runs through pigpio.
   - GPIO 20 (Pin 38): Camera focus (1000-2000 us servo-style PWM)
   - GPIO 26 (Pin 37): Zoom (1000-2000 us servo-style PWM)
   - GPIO 16 (Pin 36): Pan (1000-2000 us servo-style PWM)
-  - GPIO 19 (Pin 35): External servo (1000-2000 us servo-style PWM)
 """
 
 import math
@@ -40,17 +41,15 @@ LED_GPIO = 10
 # from GPIO 21 (which has no PWM peripheral on the RP1).
 SERVO_GPIO = 18
 LIGHT_GPIO = 13
-RELEASE_GPIO = 12
+RELEASE_GPIO = 19   # Pin 35 — external release servo (continuous-rotation drive)
 FOCUS_GPIO = 20
 ZOOM_GPIO = 26
 PAN_GPIO = 16
-EXT_SERVO_GPIO = 19
 
 AUX_PWM_GPIOS = {
     "focus": FOCUS_GPIO,
     "zoom": ZOOM_GPIO,
     "pan": PAN_GPIO,
-    "ext_servo": EXT_SERVO_GPIO,
 }
 
 # Servo PWM range (microseconds)
@@ -569,7 +568,7 @@ class HardwareController:
     # ── Auxiliary Servo PWM Outputs ────────────────────────────────────
 
     def set_aux_pwm(self, channel, position_us):
-        """Set an auxiliary PWM channel. channel is one of: focus, zoom, pan, ext_servo."""
+        """Set an auxiliary PWM channel. channel is one of: focus, zoom, pan."""
         if channel not in AUX_PWM_GPIOS:
             raise ValueError(f"Unknown aux PWM channel: {channel}")
         position_us = max(SERVO_MIN_US, min(SERVO_MAX_US, int(position_us)))
