@@ -60,6 +60,14 @@ RADCAM_IP = "192.168.2.10"
 CAMERA_MANAGER_URL = "http://127.0.0.1:6020"
 RTSP_HOST = "127.0.0.1"
 
+# The H264 USB Camera plugged into the DropCam is always /dev/video2.  On
+# first boot MCM publishes it as a UDP stream that the extension cannot
+# consume; ensure_rtsp_stream_for_video2() swaps it to a localhost RTSP
+# endpoint while preserving the user's resolution/encode/fps choices.
+TARGET_CAMERA_DEVICE = "/dev/video2"
+TARGET_RTSP_PATH = "video_2"   # rtsp://0.0.0.0:8554/video_2
+TARGET_RTSP_NAME = "DropCam RTSP"
+
 # ── Recording state ──────────────────────────────────────────────────────
 gst_process = None
 recording = False
@@ -176,6 +184,193 @@ def discover_blueos_stream(refresh=True):
     blueos_rtsp_url, blueos_rtsp_encode = url, encode
     logger.info(f"BlueOS camera stream: {url} ({encode})")
     return url, encode
+
+
+# ── MCM stream auto-configuration ────────────────────────────────────────
+#
+# On a fresh BlueOS install MCM picks up the USB H264 camera and exposes it
+# as a UDP stream (defaults to udp://<host>:5600).  The DropCam extension
+# consumes the camera over a *localhost RTSP* endpoint instead, so the user
+# has historically had to manually delete the UDP stream and create an RTSP
+# one via the BlueOS "Video Streams" page before the extension can record.
+#
+# ensure_rtsp_stream_for_video2() does that swap programmatically: it
+# inspects MCM's running streams, and for any stream bound to the target
+# device that does NOT already advertise an rtsp:// endpoint it removes
+# the UDP-only stream and creates an RTSP one with the same encode /
+# resolution / framerate / extended_configuration the user (or BlueOS
+# default) had picked, just on a new endpoint URL.  Streams that already
+# include an rtsp:// endpoint are left alone — even if they also have a UDP
+# one — because the recorder is happy with either as long as RTSP works.
+#
+# The helper is safe to call repeatedly: it's a no-op once /dev/video2 is
+# already RTSP, so it can run at boot, on recording-start failure, and from
+# the Setup-tab "Auto-Configure" button without surprises.
+
+_DEFAULT_EXTENDED_CONFIG = {
+    "thermal": False,
+    "disable_mavlink": False,
+    "disable_zenoh": False,
+    "disable_thumbnails": False,
+    "disable_lazy": False,
+}
+
+
+def _mcm_get_streams():
+    import urllib.request
+    with urllib.request.urlopen(f"{CAMERA_MANAGER_URL}/streams", timeout=5) as r:
+        return json.loads(r.read().decode())
+
+
+def _mcm_delete_stream_by_name(name):
+    import urllib.request, urllib.parse, urllib.error
+    url = f"{CAMERA_MANAGER_URL}/delete_stream?name={urllib.parse.quote(name)}"
+    req = urllib.request.Request(url, method="DELETE")
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return r.status, r.read().decode()
+
+
+def _mcm_post_stream(body):
+    import urllib.request
+    req = urllib.request.Request(
+        f"{CAMERA_MANAGER_URL}/streams",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return r.status, r.read().decode()
+
+
+def _summarize_stream(s):
+    """Compact representation used in /camera/ensure_rtsp responses + logs."""
+    vas = s.get("video_and_stream") or {}
+    src = (vas.get("video_source") or {}).get("Local") or {}
+    return {
+        "name": vas.get("name"),
+        "device": src.get("device_path"),
+        "endpoints": (vas.get("stream_information") or {}).get("endpoints", []),
+        "state": s.get("state"),
+    }
+
+
+def ensure_rtsp_stream_for_video2():
+    """Make sure MCM is publishing an RTSP stream for ``TARGET_CAMERA_DEVICE``.
+
+    Returns a dict describing what happened so callers (boot logger, the
+    /camera/ensure_rtsp route, the Setup-tab button) can surface a
+    user-readable result:
+
+      action ∈ {"already_rtsp", "swapped", "no_target_stream", "error"}
+      before, after            -> list of {name, device, endpoints, state}
+      message                  -> short human-readable summary
+      error                    -> exception text when action == "error"
+    """
+    try:
+        before = _mcm_get_streams()
+    except Exception as e:
+        logger.warning(f"ensure_rtsp: cannot reach MCM: {e}")
+        return {"action": "error",
+                "message": f"Camera manager not reachable: {e}",
+                "error": str(e), "before": [], "after": []}
+
+    targets = []
+    for s in before or []:
+        vas = s.get("video_and_stream") or {}
+        src = (vas.get("video_source") or {}).get("Local") or {}
+        if src.get("device_path") != TARGET_CAMERA_DEVICE:
+            continue
+        endpoints = (vas.get("stream_information") or {}).get("endpoints") or []
+        targets.append((s, endpoints))
+
+    if not targets:
+        msg = (f"No MCM stream bound to {TARGET_CAMERA_DEVICE}; "
+               "is the camera plugged in?")
+        logger.info(f"ensure_rtsp: {msg}")
+        return {"action": "no_target_stream", "message": msg,
+                "before": [_summarize_stream(s) for s, _ in []],
+                "after": [_summarize_stream(s) for s in (before or [])]}
+
+    # If any stream for this device already advertises rtsp, we're done.
+    if any(any(ep.startswith("rtsp://") for ep in eps) for _, eps in targets):
+        msg = f"{TARGET_CAMERA_DEVICE} already has an RTSP stream — no change."
+        logger.debug(f"ensure_rtsp: {msg}")
+        return {"action": "already_rtsp", "message": msg,
+                "before": [_summarize_stream(s) for s, _ in targets],
+                "after":  [_summarize_stream(s) for s, _ in targets]}
+
+    # Pick the first UDP-only stream as the template so we preserve the
+    # user's encode/resolution/fps + extended_configuration if they changed
+    # them.  Any remaining streams bound to the same device get deleted too
+    # (MCM only allows one stream per source, so re-POSTing would 500
+    # otherwise — exactly the collision we hit during probing).
+    template_stream, _ = targets[0]
+    template_vas = template_stream["video_and_stream"]
+    template_si = template_vas["stream_information"]
+    configuration = template_si.get("configuration") or {
+        "type": "video", "encode": "H264",
+        "height": 1080, "width": 1920,
+        "frame_interval": {"numerator": 1, "denominator": 30},
+    }
+    extended_configuration = template_si.get("extended_configuration") or dict(_DEFAULT_EXTENDED_CONFIG)
+    rtsp_endpoint = f"rtsp://0.0.0.0:8554/{TARGET_RTSP_PATH}"
+
+    # Preserve any pre-existing rtsp endpoints if they had any (defensive — we
+    # only get here when the loop above found none, but a future tweak might).
+    existing_rtsp = [ep for _, eps in targets for ep in eps
+                     if ep.startswith("rtsp://")]
+    if rtsp_endpoint not in existing_rtsp:
+        endpoints = [rtsp_endpoint] + existing_rtsp
+    else:
+        endpoints = existing_rtsp
+
+    deleted = []
+    try:
+        for s, _ in targets:
+            name = s["video_and_stream"]["name"]
+            code, body = _mcm_delete_stream_by_name(name)
+            logger.info(f"ensure_rtsp: deleted '{name}' (HTTP {code})")
+            deleted.append(name)
+        time.sleep(0.5)   # MCM frees the v4l source asynchronously
+        post_body = {
+            "name": TARGET_RTSP_NAME,
+            "source": TARGET_CAMERA_DEVICE,
+            "stream_information": {
+                "endpoints": endpoints,
+                "configuration": configuration,
+                "extended_configuration": extended_configuration,
+            },
+        }
+        code, body = _mcm_post_stream(post_body)
+        logger.info(f"ensure_rtsp: created '{TARGET_RTSP_NAME}' "
+                    f"endpoint={endpoints[0]} (HTTP {code})")
+    except Exception as e:
+        logger.error(f"ensure_rtsp: swap failed mid-flight: {e}", exc_info=True)
+        try:
+            after = _mcm_get_streams()
+        except Exception:
+            after = []
+        return {"action": "error",
+                "message": (f"Stream swap failed after deleting {deleted}: {e}. "
+                            "Recreate the stream manually in BlueOS."),
+                "error": str(e),
+                "before": [_summarize_stream(s) for s, _ in targets],
+                "after": [_summarize_stream(s) for s in (after or [])]}
+
+    try:
+        after = _mcm_get_streams()
+    except Exception:
+        after = []
+
+    msg = (f"Swapped {TARGET_CAMERA_DEVICE}: removed {len(deleted)} UDP "
+           f"stream(s), created '{TARGET_RTSP_NAME}' on {rtsp_endpoint}.")
+    logger.info(f"ensure_rtsp: {msg}")
+    # Force the next discover_blueos_stream() call to repopulate the cache.
+    global blueos_rtsp_url
+    blueos_rtsp_url = None
+    return {"action": "swapped", "message": msg,
+            "before": [_summarize_stream(s) for s, _ in targets],
+            "after": [_summarize_stream(s) for s in (after or [])]}
 
 
 # ── Config ───────────────────────────────────────────────────────────────
@@ -813,6 +1008,23 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
             # DropCam: record the BlueOS camera-manager RTSP stream (BlueOS
             # owns the USB camera, so we no longer touch /dev/video* directly).
             url, encode = discover_blueos_stream(refresh=True)
+            if not url:
+                # No RTSP stream exposed.  The most common cause is that MCM
+                # is publishing /dev/video2 as UDP only (default after a fresh
+                # camera plug-in / BlueOS reset).  Try the auto-swap once and
+                # re-discover before giving up; if MCM is unreachable or no
+                # /dev/video2 stream exists the fixer is a quiet no-op.
+                logger.info("No RTSP stream; attempting one-shot RTSP swap for "
+                            f"{TARGET_CAMERA_DEVICE}")
+                try:
+                    fix = ensure_rtsp_stream_for_video2()
+                    logger.info(f"Recovery RTSP swap: action={fix['action']} "
+                                f"msg={fix.get('message','')}")
+                    if fix["action"] == "swapped":
+                        time.sleep(1.5)   # let MCM bring the RTSP pipeline up
+                        url, encode = discover_blueos_stream(refresh=True)
+                except Exception as e:
+                    logger.warning(f"Recovery RTSP swap raised: {e}")
             if not url:
                 recording_error = ("No BlueOS camera stream available. Check that "
                                    "the camera is connected and streaming in BlueOS.")
@@ -1732,6 +1944,21 @@ def route_streams():
     return jsonify({"success": True, "streams": out})
 
 
+@app.route("/camera/ensure_rtsp", methods=["POST"])
+def route_camera_ensure_rtsp():
+    """One-shot fix-up: make sure MCM exposes ``TARGET_CAMERA_DEVICE`` as RTSP.
+
+    Returns the same dict ``ensure_rtsp_stream_for_video2()`` produces.
+    Always returns HTTP 200 (even for ``action == "error"``) so the UI can
+    render the structured result; non-200 is reserved for actual extension
+    crashes.  ``success`` is True for the no-op + happy paths and False
+    when MCM is unreachable / mid-flight swap blew up.
+    """
+    result = ensure_rtsp_stream_for_video2()
+    result["success"] = result["action"] in ("swapped", "already_rtsp")
+    return jsonify(result), 200
+
+
 @app.route("/rotate", methods=["POST"])
 def route_rotate():
     """Cycle image rotation by 90 degrees."""
@@ -2218,6 +2445,19 @@ def _wait_for_camera():
         return True
 
     radcam_mode = False
+    # Auto-fix the common first-boot case: MCM picked up the USB H264 camera
+    # and exposed it as UDP, which the extension cannot consume.  This is
+    # idempotent — once /dev/video2 is RTSP it short-circuits to a no-op,
+    # so it costs ~1 HTTP roundtrip on every subsequent boot.
+    try:
+        result = ensure_rtsp_stream_for_video2()
+        if result["action"] == "swapped":
+            logger.info(f"Boot RTSP swap: {result['message']}")
+        elif result["action"] == "error":
+            logger.warning(f"Boot RTSP swap could not complete: {result['message']}")
+    except Exception as e:
+        logger.warning(f"Boot RTSP swap raised: {e}", exc_info=True)
+
     for attempt in range(1, CAMERA_BOOT_RETRIES + 1):
         url, encode = discover_blueos_stream(refresh=True)
         if url:

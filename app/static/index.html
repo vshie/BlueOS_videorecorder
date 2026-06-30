@@ -2075,6 +2075,21 @@ function loadSetup() {
   document.getElementById('setupContent').innerHTML = `
 <h2>DropCam Setup Guide</h2>
 
+<div class="card" style="margin:8px 0 16px;background:#fafafa;border-left:4px solid #1a73e8">
+  <h3 style="margin-top:0">Auto-Configure Camera Stream</h3>
+  <p style="margin:4px 0">
+    On a fresh BlueOS install the H264 USB camera (<code>/dev/video2</code>) is published as a
+    <strong>UDP</strong> stream, which this extension cannot consume. Click below to swap it for an
+    <strong>RTSP</strong> stream at <code>rtsp://0.0.0.0:8554/video_2</code>. Your resolution / encode /
+    framerate are preserved. Safe to click multiple times &mdash; it's a no-op if RTSP is already configured.
+  </p>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+    <button class="btn-primary" id="ensureRtspBtn" onclick="ensureRtspStream()">Auto-Configure Camera Stream (RTSP)</button>
+    <span id="ensureRtspStatus" class="mono" style="font-size:.85em;color:#555"></span>
+  </div>
+  <pre id="ensureRtspDetails" class="mono" style="display:none;margin-top:6px;font-size:.78em;background:#fff;padding:6px;border:1px solid #ddd;border-radius:4px;overflow-x:auto"></pre>
+</div>
+
 <h3>1. Initial BlueOS Setup</h3>
 <ul>
   <li>Flash BlueOS to a microSD card (32 GB+ recommended, high-endurance).</li>
@@ -2154,6 +2169,44 @@ function loadSetup() {
   <li><strong>Extension logs:</strong> View logs from the BlueOS Extension Manager or run <code>docker logs blueos-videorecorder</code>.</li>
 </ul>
 `;
+}
+
+/* Auto-configure the MCM camera stream for /dev/video2 to RTSP. */
+async function ensureRtspStream() {
+  const btn = document.getElementById('ensureRtspBtn');
+  const stat = document.getElementById('ensureRtspStatus');
+  const det = document.getElementById('ensureRtspDetails');
+  btn.disabled = true;
+  stat.textContent = 'Working...';
+  stat.style.color = '#555';
+  det.style.display = 'none';
+  try {
+    const d = await api('/camera/ensure_rtsp', {method: 'POST'});
+    const ok = d && d.success;
+    if (d.action === 'already_rtsp') {
+      stat.textContent = '✓ ' + d.message;
+      stat.style.color = '#1a73e8';
+    } else if (d.action === 'swapped') {
+      stat.textContent = '✓ ' + d.message;
+      stat.style.color = '#2e7d32';
+    } else if (d.action === 'no_target_stream') {
+      stat.textContent = '⚠ ' + d.message;
+      stat.style.color = '#c77700';
+    } else {
+      stat.textContent = '✗ ' + (d.message || 'Failed');
+      stat.style.color = '#c83232';
+    }
+    det.textContent = 'Before:\n' +
+      (d.before || []).map(s => `  ${s.name} (${s.device}) -> ${JSON.stringify(s.endpoints)} [${s.state}]`).join('\n') +
+      '\n\nAfter:\n' +
+      (d.after || []).map(s => `  ${s.name} (${s.device}) -> ${JSON.stringify(s.endpoints)} [${s.state}]`).join('\n');
+    det.style.display = 'block';
+  } catch (e) {
+    stat.textContent = '✗ ' + e;
+    stat.style.color = '#c83232';
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /* ── Init ──────────────────────────────────── */
