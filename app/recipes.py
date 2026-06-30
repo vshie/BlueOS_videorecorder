@@ -73,14 +73,14 @@ RECIPE_SCHEMA_DEFAULTS = {
     "radcam_zoom_us": 900,
     "release_enable": False,
     "release_offset_s": 0,
-    # Closed-loop release: when > 0, the release runs until the rotation
-    # sensor has counted this many rising edges (or release_max_duration_s
-    # elapses, whichever comes first).  0 = use plain timed release.
-    "release_rotations": 0,
-    # Safety cap on how long the release pin is held in the unwind direction.
-    # Applies to both timed releases (= run for this long) and rotation-based
-    # releases (= max wait before giving up on the sensor).
-    "release_max_duration_s": 60,
+    # Winch vertical profiling (oscillates the release servo during the
+    # recording window).  See app/hardware.py WINCH_* constants for the
+    # PWMs and target RPM.  winch_rotations is per-leg; total motion budget
+    # is winch_profiles * 2 * leg_time.
+    "winch_enable": False,
+    "winch_rotations": 10,
+    "winch_profiles": 1,
+    "winch_start_delay_minutes": 0,
 }
 
 # Allowed window for release-trigger offset relative to recording finish.
@@ -323,27 +323,47 @@ def validate_recipe(data):
             else:
                 clean["release_offset_s"] = ros
 
-    if "release_rotations" in data:
-        try:
-            rot = int(float(data["release_rotations"]))
-        except (ValueError, TypeError):
-            errors.append("release_rotations must be a non-negative integer")
-        else:
-            if rot < 0 or rot > 10000:
-                errors.append("release_rotations must be between 0 and 10000 (0 = use timed release)")
-            else:
-                clean["release_rotations"] = rot
+    if "winch_enable" in data:
+        clean["winch_enable"] = bool(data["winch_enable"])
 
-    if "release_max_duration_s" in data:
+    if "winch_rotations" in data:
         try:
-            rmd = int(float(data["release_max_duration_s"]))
+            wr = int(float(data["winch_rotations"]))
         except (ValueError, TypeError):
-            errors.append("release_max_duration_s must be a positive integer (seconds)")
+            errors.append("winch_rotations must be an integer")
         else:
-            if rmd < 1 or rmd > 3600:
-                errors.append("release_max_duration_s must be between 1 and 3600 seconds")
+            from hardware import WINCH_ROTATIONS_MAX
+            if wr < 1 or wr > WINCH_ROTATIONS_MAX:
+                errors.append(
+                    f"winch_rotations must be between 1 and {WINCH_ROTATIONS_MAX}"
+                )
             else:
-                clean["release_max_duration_s"] = rmd
+                clean["winch_rotations"] = wr
+
+    if "winch_profiles" in data:
+        try:
+            wp = int(float(data["winch_profiles"]))
+        except (ValueError, TypeError):
+            errors.append("winch_profiles must be an integer")
+        else:
+            if wp < 1 or wp > 10000:
+                errors.append("winch_profiles must be >= 1")
+            else:
+                clean["winch_profiles"] = wp
+
+    if "winch_start_delay_minutes" in data:
+        try:
+            wsd = float(data["winch_start_delay_minutes"])
+        except (ValueError, TypeError):
+            errors.append("winch_start_delay_minutes must be a number")
+        else:
+            if wsd < 0 or wsd > RECIPE_MAX_DURATION_MINUTES:
+                errors.append(
+                    f"winch_start_delay_minutes must be between 0 "
+                    f"and {RECIPE_MAX_DURATION_MINUTES} minutes"
+                )
+            else:
+                clean["winch_start_delay_minutes"] = wsd
 
     if "radcam_focus_finder" in data:
         clean["radcam_focus_finder"] = bool(data["radcam_focus_finder"])

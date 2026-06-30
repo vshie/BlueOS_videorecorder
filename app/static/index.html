@@ -336,9 +336,16 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
               Wind
             </button>
             <button class="btn-sm" id="releaseTestBtn" onclick="testRelease()"
-                    title="Click to fire a 60-second unwind (2000 us), the same behaviour the recipe uses. Click again to cancel. Cancels any running recipe.">
+                    title="Click to fire a fast unwind (2000 us) that stops after 52 shaft rotations (60 s safety cap), the same behaviour the recipe uses. Click again to cancel. Cancels any running recipe.">
               Test Release
             </button>
+          </div>
+          <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-top:4px"
+               title="Slow rotation-counted jog (~24 RPM). Closed-loop on the shaft sensor; safety-capped at 60 s.">
+            <input type="number" id="manualRevs" value="3" min="1" max="200" step="1" style="width:5em">
+            <span class="text-muted" style="font-size:.78em">rev</span>
+            <button class="btn-sm" id="manualUnwindBtn" onclick="manualJog('unwind')">Unwind N</button>
+            <button class="btn-sm" id="manualWindBtn"   onclick="manualJog('wind')">Wind N</button>
           </div>
         </div>
       </div>
@@ -418,6 +425,8 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         <div class="telem-item"><div class="telem-label">Servo</div><div class="telem-value" id="tServo">--</div></div>
         <div class="telem-item"><div class="telem-label">Lumen Light</div><div class="telem-value" id="tLight">--</div></div>
         <div class="telem-item"><div class="telem-label">Release Servo</div><div class="telem-value" id="tRelease">--</div></div>
+        <div class="telem-item"><div class="telem-label">Winch State</div><div class="telem-value" id="tWinchState">--</div></div>
+        <div class="telem-item"><div class="telem-label">Winch Turns</div><div class="telem-value" id="tWinchTurns">--</div></div>
         <div class="telem-item radcam-only"><div class="telem-label">Focus</div><div class="telem-value" id="tFocus">--</div></div>
         <div class="telem-item radcam-only"><div class="telem-label">Zoom</div><div class="telem-value" id="tZoom">--</div></div>
         <div class="telem-item"><div class="telem-label">Battery V</div><div class="telem-value" id="tBattV">--</div></div>
@@ -485,7 +494,7 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
       <div class="form-group" style="min-width:18em;flex:1.2">
         <label>Duration</label>
         <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
-          <input type="number" id="rDuration" value="30" min="0" step="any" style="width:6.5em" oninput="updateSweepCalc()" title="Recording length (use Minutes or Hours)">
+          <input type="number" id="rDuration" value="30" min="0" step="any" style="width:6.5em" oninput="updateSweepCalc();updateWinchCalc()" title="Recording length (use Minutes or Hours)">
           <span style="display:inline-flex;align-items:center;gap:12px;font-size:.9em;white-space:nowrap">
             <label style="font-weight:normal;margin:0;cursor:pointer"><input type="radio" name="rDurationUnit" id="rDurationUnitMin" value="minutes" checked onchange="onRecipeDurationUnitChange()"> Minutes</label>
             <label style="font-weight:normal;margin:0;cursor:pointer"><input type="radio" name="rDurationUnit" id="rDurationUnitHr" value="hours" onchange="onRecipeDurationUnitChange()"> Hours</label>
@@ -641,28 +650,38 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         </div>
       </div>
     </div>
-    <div class="form-row" id="releaseRotationsRow" style="display:none">
-      <div class="form-group" style="min-width:18em">
-        <label>Stop after N rotations (0 = use timer)</label>
-        <div style="display:flex;gap:6px;align-items:center">
-          <input type="number" id="rReleaseRotations" value="0" min="0" max="10000" step="1" style="width:7em">
-          <span class="mono text-muted">rotations</span>
-        </div>
-      </div>
-      <div class="form-group" style="min-width:18em">
-        <label>Safety cap (max release run time)</label>
-        <div style="display:flex;gap:6px;align-items:center">
-          <input type="number" id="rReleaseMaxDuration" value="60" min="1" max="3600" step="1" style="width:7em">
-          <span class="mono text-muted">seconds</span>
-        </div>
+    <div id="releaseHint" class="text-muted mt-8" style="font-size:.82em;display:none">
+      When recording finishes (plus the configured offset), the release servo runs unwind (2000 us)
+      until the shaft rotation sensor has counted 52 rotations (or 60 s elapses as a safety cap),
+      then returns to stop (1500 us). The string spools off the post and the unit floats to the surface.
+    </div>
+
+    <h3>Winch (Vertical Profiling)</h3>
+    <div class="form-row">
+      <div class="form-group narrow">
+        <label><input type="checkbox" id="rWinchEnable" onchange="toggleWinchFields()"> Enable Winch Profiling</label>
       </div>
     </div>
-    <div id="releaseHint" class="text-muted mt-8" style="font-size:.82em;display:none">
-      When recording finishes (plus the configured offset), the release servo runs unwind (2000 us).
-      With <strong>Stop after N rotations &gt; 0</strong>, the run ends as soon as the shaft
-      sensor has counted that many rotations (or the safety cap elapses, whichever comes first).
-      With <strong>N = 0</strong>, the run is purely timed for the safety-cap duration.
-      The shaft is always returned to stop (1500 us) afterwards.
+    <div id="winchFields" style="display:none">
+      <div class="form-row">
+        <div class="form-group narrow">
+          <label>Revolutions per leg</label>
+          <input type="number" id="rWinchRotations" value="10" min="1" max="30" step="1" oninput="updateWinchCalc()">
+        </div>
+        <div class="form-group narrow">
+          <label>Profiles (oscillations)</label>
+          <input type="number" id="rWinchProfiles" value="1" min="1" max="9999" step="1" oninput="updateWinchCalc()">
+        </div>
+        <div class="form-group narrow">
+          <label>Delay before profiling (min)</label>
+          <input type="number" id="rWinchStartDelay" value="0" min="0" step="0.1" oninput="updateWinchCalc()">
+        </div>
+      </div>
+      <div id="winchCalc" class="text-muted mt-8" style="font-size:.82em"></div>
+      <div class="text-muted" style="font-size:.78em;margin-top:4px">
+        Available speeds: <span id="winchAvailableRpm">Unwind 24 RPM / Wind 24 RPM</span> (bench-calibrated).
+        Same speed used for unwind and wind. Cap: 30 revolutions per leg.
+      </div>
     </div>
 
     <hr>
@@ -899,6 +918,31 @@ async function pollTelemetry() {
   document.getElementById('tLight').textContent = d.light_on ? d.light_brightness_pct + '%' : 'Off';
   if (d.release_position_us != null) {
     updateReleaseUi(d.release_position_us, d.release_direction, !!d.release_running);
+  }
+  const winchStateEl = document.getElementById('tWinchState');
+  const winchTurnsEl = document.getElementById('tWinchTurns');
+  if (winchStateEl) {
+    if (d.winch_state) {
+      const label = d.winch_state === 'idle' ? 'Idle' :
+                    d.winch_state === 'unwind' ? 'Unwind (' + (d.winch_unwind_rpm != null ? d.winch_unwind_rpm + ' RPM' : '') + ')' :
+                    d.winch_state === 'wind'   ? 'Wind ('   + (d.winch_wind_rpm   != null ? d.winch_wind_rpm   + ' RPM' : '') + ')' :
+                    d.winch_state === 'pause'  ? 'Pause' :
+                    d.winch_state === 'error'  ? 'ERROR (motion in pause)' :
+                    d.winch_state;
+      winchStateEl.textContent = label;
+      winchStateEl.style.color = d.winch_state === 'error' ? '#d32f2f' : '';
+      winchStateEl.style.fontWeight = d.winch_state === 'error' ? 'bold' : '';
+    } else {
+      winchStateEl.textContent = '--';
+    }
+  }
+  if (winchTurnsEl) {
+    if (d.winch_turns != null) {
+      const t = d.winch_turns;
+      winchTurnsEl.textContent = (t > 0 ? '+' : '') + t + ' rev';
+    } else {
+      winchTurnsEl.textContent = '--';
+    }
   }
   document.getElementById('tHealth').textContent = isRecording ? (d.recording_ok ? 'OK' : 'STALL') : '--';
   document.getElementById('sysTime').textContent = d.timestamp || '--';
@@ -1197,6 +1241,25 @@ function releaseWindStop() {
   if (btn) btn.classList.remove('btn-danger');
   // Always send stop on release/leave even if we never sent wind — cheap idempotent call.
   _postRelease('stop');
+}
+
+async function manualJog(direction) {
+  const n = +document.getElementById('manualRevs').value || 0;
+  if (n <= 0) { alert('Enter a rotation count >= 1'); return; }
+  const d = await api('/release', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'rotate', direction: direction, rotations: n}),
+  });
+  if (d && d.success) {
+    updateReleaseUi(d.position_us, d.direction, d.running);
+    if (d.schedule_cancelled) {
+      const sched = document.getElementById('scheduleInfo');
+      if (sched) sched.textContent = 'Schedule cancelled by manual release control.';
+    }
+  } else if (d && d.message) {
+    alert(d.message);
+  }
 }
 
 async function testRelease() {
@@ -1722,6 +1785,7 @@ function onRecipeDurationUnitChange() {
   }
   recipeDurationUnitLast = now;
   updateSweepCalc();
+  updateWinchCalc();
 }
 
 /** Duration in minutes from the recipe form (NaN if the number field is invalid). */
@@ -1771,15 +1835,19 @@ function newRecipe() {
   document.getElementById('rRecZoomVal').textContent = curZoom;
   document.getElementById('rReleaseEnable').checked = false;
   document.getElementById('rReleaseOffset').value = 0;
-  document.getElementById('rReleaseRotations').value = 0;
-  document.getElementById('rReleaseMaxDuration').value = 60;
+  document.getElementById('rWinchEnable').checked = false;
+  document.getElementById('rWinchRotations').value = 10;
+  document.getElementById('rWinchProfiles').value = 1;
+  document.getElementById('rWinchStartDelay').value = 0;
   document.getElementById('editorTitle').textContent = 'New Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
   toggleServoFields();
   toggleFocusFinderFields();
   toggleReleaseFields();
+  toggleWinchFields();
   updateSweepCalc();
+  updateWinchCalc();
 }
 
 async function editRecipe(id) {
@@ -1826,15 +1894,19 @@ async function editRecipe(id) {
   document.getElementById('rRecZoomVal').textContent = rZoom;
   document.getElementById('rReleaseEnable').checked = !!r.release_enable;
   document.getElementById('rReleaseOffset').value = (r.release_offset_s != null ? r.release_offset_s : 0);
-  document.getElementById('rReleaseRotations').value = (r.release_rotations != null ? r.release_rotations : 0);
-  document.getElementById('rReleaseMaxDuration').value = (r.release_max_duration_s != null ? r.release_max_duration_s : 60);
+  document.getElementById('rWinchEnable').checked = !!r.winch_enable;
+  document.getElementById('rWinchRotations').value = (r.winch_rotations != null ? r.winch_rotations : 10);
+  document.getElementById('rWinchProfiles').value = (r.winch_profiles != null ? r.winch_profiles : 1);
+  document.getElementById('rWinchStartDelay').value = (r.winch_start_delay_minutes != null ? r.winch_start_delay_minutes : 0);
   document.getElementById('editorTitle').textContent = 'Edit Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
   toggleServoFields();
   toggleFocusFinderFields();
   toggleReleaseFields();
+  toggleWinchFields();
   updateSweepCalc();
+  updateWinchCalc();
 }
 
 function cancelEditor() { document.getElementById('recipeEditor').classList.add('hidden'); }
@@ -1871,8 +1943,10 @@ async function saveCurrentRecipe() {
     radcam_zoom_us: +document.getElementById('rRecZoom').value,
     release_enable: document.getElementById('rReleaseEnable').checked,
     release_offset_s: +document.getElementById('rReleaseOffset').value,
-    release_rotations: +document.getElementById('rReleaseRotations').value,
-    release_max_duration_s: +document.getElementById('rReleaseMaxDuration').value,
+    winch_enable: document.getElementById('rWinchEnable').checked,
+    winch_rotations: +document.getElementById('rWinchRotations').value,
+    winch_profiles: +document.getElementById('rWinchProfiles').value,
+    winch_start_delay_minutes: +document.getElementById('rWinchStartDelay').value,
   };
   const id = document.getElementById('rId').value;
   if (id) body.id = id;
@@ -1905,9 +1979,65 @@ function toggleFocusFinderFields() {
 function toggleReleaseFields() {
   const on = document.getElementById('rReleaseEnable').checked;
   document.getElementById('releaseOffsetGroup').style.display = on ? '' : 'none';
-  document.getElementById('releaseRotationsRow').style.display = on ? '' : 'none';
   document.getElementById('releaseHint').style.display = on ? '' : 'none';
 }
+
+function toggleWinchFields() {
+  const on = document.getElementById('rWinchEnable').checked;
+  document.getElementById('winchFields').style.display = on ? '' : 'none';
+  if (on) updateWinchCalc();
+}
+
+// Speeds and cap hardcoded from bench calibration; mirror app/hardware.py
+// WINCH_*_RPM and WINCH_ROTATIONS_MAX.  Update both if you re-calibrate.
+const WINCH_RPM = 24;
+const WINCH_MAX_ROTATIONS = 30;
+
+function fmtMS(seconds) {
+  if (!isFinite(seconds) || seconds < 0) return '--';
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds - m * 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function updateWinchCalc() {
+  const calcEl = document.getElementById('winchCalc');
+  if (!calcEl) return;
+  const enabled = document.getElementById('rWinchEnable').checked;
+  if (!enabled) { calcEl.textContent = ''; return; }
+
+  let rec_min = getRecipeDurationMinutesFromForm();
+  if (Number.isNaN(rec_min)) rec_min = 30;
+  const duration_s = rec_min * 60;
+
+  const rotations = Math.max(1, Math.min(WINCH_MAX_ROTATIONS,
+                              +document.getElementById('rWinchRotations').value || 0));
+  const profiles  = Math.max(1, +document.getElementById('rWinchProfiles').value || 1);
+  const delay_min = Math.max(0, +document.getElementById('rWinchStartDelay').value || 0);
+  const delay_s   = delay_min * 60;
+
+  const leg_s        = (rotations / WINCH_RPM) * 60;
+  const profile_s    = 2 * leg_s;
+  const motion_s     = profiles * profile_s;
+  const usable_s     = Math.max(0, duration_s - delay_s);
+  const stationary_s = usable_s - motion_s;
+  const pauses       = 2 * profiles;
+  const pause_s      = stationary_s > 0 ? stationary_s / pauses : 0;
+
+  const warn = stationary_s < 0;
+  const sty = warn ? 'color:#c83232' : '';
+  calcEl.innerHTML =
+    `<span style="${sty}">` +
+    `Delay before profiling: ${fmtMS(delay_s)} | ` +
+    `Each ascent/descent: ${leg_s.toFixed(1)}s | ` +
+    `Per profile: ${profile_s.toFixed(1)}s | ` +
+    `${profiles} profile${profiles === 1 ? '' : 's'} | ` +
+    (warn
+      ? `Motion exceeds usable time by ${fmtMS(-stationary_s)} — reduce revolutions, profiles, or delay.`
+      : `Stationary time: ${fmtMS(stationary_s)} (${pauses} pauses of ${pause_s.toFixed(1)}s)`) +
+    `</span>`;
+}
+
 function previewServo(val, labelId) {
   document.getElementById(labelId).textContent = val;
   api('/servo', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({position_us:+val})});

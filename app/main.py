@@ -335,6 +335,13 @@ def update_ass_file():
                         if batt.get("low_voltage_alarm"):
                             tag += " LOW"
                         parts.append(tag)
+                try:
+                    if hw.is_winch_active():
+                        parts.append(
+                            f"Winch:{hw.get_winch_state()}:{hw.get_winch_turns():+d}"
+                        )
+                except Exception:
+                    pass
                 parts.append(f"Recipe:{rname}")
                 parts.append(f"Rec:{ok}")
                 if cpu_t is not None:
@@ -1622,6 +1629,15 @@ def route_telemetry():
             data["rotation_rpm"] = round(hw.get_rotation_rpm(), 1)
         except Exception:
             pass
+        try:
+            from hardware import WINCH_UNWIND_RPM, WINCH_WIND_RPM
+            data["winch_active"] = hw.is_winch_active()
+            data["winch_state"] = hw.get_winch_state()
+            data["winch_turns"] = hw.get_winch_turns()
+            data["winch_unwind_rpm"] = WINCH_UNWIND_RPM
+            data["winch_wind_rpm"] = WINCH_WIND_RPM
+        except Exception:
+            pass
         data["radcam_mode"] = radcam_mode
         if radcam_mode:
             data["aux_pwm"] = hw.get_all_aux_pwm()
@@ -1781,21 +1797,27 @@ def route_release():
     The release uses a continuous-rotation drive: 1500 us = stop,
     1000 us = wind one direction, 2000 us = unwind the other direction.
 
-    Body: ``{"action": "stop" | "wind" | "unwind" | "test"}`` or
+    Body: ``{"action": "stop" | "wind" | "unwind" | "test" | "rotate"}`` or
     ``{"position_us": <int>}``.
 
     - ``wind`` / ``unwind`` set a sustained pulse; the caller is responsible
       for sending ``stop`` (typical pattern: press-and-hold UI button).
-    - ``test`` runs unwind for ``RELEASE_DEFAULT_RUN_S`` seconds (60 s)
-      then auto-returns to stop — same as the recipe trigger behaviour.
-      Calling ``test`` again, or ``stop``, while a test is in flight will
-      cancel it.
+    - ``test`` runs a fast unwind (2000 us) until ``RELEASE_ROTATION_CAP``
+      (52) sensor rotations have been counted, or ``RELEASE_MAX_DURATION_S``
+      (60 s) elapses as a safety cap, then auto-returns to stop.  Same
+      closed-loop behaviour the recipe trigger uses.  Calling ``test``
+      again, or ``stop``, while a test is in flight will cancel it.
+    - ``rotate`` runs a slow rotation-counted jog: body must include
+      ``rotations`` (int >= 1) and ``direction`` ("unwind" or "wind").
+      Uses the winch-calibration PWMs (WINCH_UNWIND_US / WINCH_WIND_US,
+      ~24 RPM) and the same closed-loop stop logic.
 
     Any call here cancels a running scheduled recipe.
     """
     from hardware import (
         RELEASE_WIND_US, RELEASE_UNWIND_US, RELEASE_STOP_US,
-        RELEASE_DEFAULT_RUN_S,
+        RELEASE_ROTATION_CAP, RELEASE_MAX_DURATION_S,
+        WINCH_UNWIND_US, WINCH_WIND_US,
     )
 
     data = request.get_json(silent=True) or {}
@@ -1820,10 +1842,35 @@ def route_release():
     elif action == "unwind":
         hw.release_unwind()
     elif action == "test":
-        # If a test is already running, calling /release with action=test
-        # again starts a fresh 60s window (the worker cancels the prior run).
-        # Use action=stop to abort.
-        hw.release_run_for(RELEASE_UNWIND_US, RELEASE_DEFAULT_RUN_S)
+        # Calling /release with action=test starts a fresh closed-loop
+        # 52-rotation fast unwind (cancels any prior in-flight run).  Use
+        # action=stop to abort.  Same path the recipe-finish release uses.
+        hw.release_run_for_rotations(
+            RELEASE_UNWIND_US, RELEASE_ROTATION_CAP, RELEASE_MAX_DURATION_S,
+        )
+    elif action == "rotate":
+        # Slow rotation-counted jog from the main page.  Closed-loop on
+        # the rotation sensor; safety-capped at RELEASE_MAX_DURATION_S so
+        # a stalled or missing sensor cannot hold the servo indefinitely.
+        try:
+            rotations = int(data.get("rotations", 0))
+        except (TypeError, ValueError):
+            return jsonify({"success": False,
+                            "message": "rotations must be an integer"}), 400
+        direction = (data.get("direction") or "").lower()
+        if rotations <= 0:
+            return jsonify({"success": False,
+                            "message": "rotations must be >= 1"}), 400
+        if direction == "unwind":
+            jog_pwm = WINCH_UNWIND_US
+        elif direction == "wind":
+            jog_pwm = WINCH_WIND_US
+        else:
+            return jsonify({"success": False,
+                            "message": "direction must be 'unwind' or 'wind'"}), 400
+        hw.release_run_for_rotations(
+            jog_pwm, rotations, RELEASE_MAX_DURATION_S,
+        )
     elif "position_us" in data:
         # Direct low-level set (cancels any timed run).
         try:

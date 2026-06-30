@@ -80,6 +80,29 @@ RELEASE_WIND_US = SERVO_MIN_US      # 1000 us — winds string onto the post
 RELEASE_UNWIND_US = SERVO_MAX_US    # 2000 us — releases the unit to surface
 RELEASE_DEFAULT_RUN_S = 60          # how long the recipe holds unwind for
 
+# Fast release (recipe-trigger + manual Test Release) stops after this many
+# shaft rotations, with RELEASE_MAX_DURATION_S as the safety cap.  At
+# RELEASE_UNWIND_US (2000 us, ~112 RPM measured), 52 rotations completes in
+# ~28 s; the 60 s cap protects against sensor failure / spool jam.
+RELEASE_ROTATION_CAP = 52
+RELEASE_MAX_DURATION_S = 60
+
+# Slow PWM values for manual rotation-counted jogs + recipe winch oscillation.
+# Bench-calibrated 2026-06: the unwind deadband edge is at 1515 us (motion
+# first appears as ~21 RPM), and the wind deadband edge is at 1454 us (also
+# ~21 RPM).  We pick 1516 / 1453 — one microsecond into the moving region on
+# each side — which gave ~24 RPM in both directions on the matched-speed
+# verification.  WINCH_*_RPM is the value shown in the UI and used by the
+# scheduler's stationary-time preview; future closed-loop calibration may
+# refine these without rewriting callers.
+WINCH_UNWIND_US = 1516
+WINCH_WIND_US = 1453
+WINCH_UNWIND_RPM = 24
+WINCH_WIND_RPM = 24
+
+# Recipe cap on user-selected revolutions per profile leg.
+WINCH_ROTATIONS_MAX = 30
+
 # Backwards-compat alias used by older callers — interpreted as "stop".
 RELEASE_OFF_US = RELEASE_STOP_US
 
@@ -132,6 +155,24 @@ class HardwareController:
         self._rotation_last_wall_s = 0.0
         self._rotation_intervals_us = deque(maxlen=ROTATION_RPM_WINDOW)
         self._rotation_available = False
+
+        # Recipe winch state.  All reads/writes share _rotation_lock so the
+        # pigpio edge callback can update _winch_turns / _winch_state without
+        # racing with /status readers or the scheduler's _winch_loop.
+        #   _winch_active   -> True while a winch profile sequence is running
+        #   _winch_direction -> +1 unwind, -1 wind, 0 pause (callback uses this
+        #                       to decide how to update _winch_turns)
+        #   _winch_turns    -> signed cumulative shaft rotations during this
+        #                       recipe's winch run (positive = unwound /
+        #                       descended, negative = wound back)
+        #   _winch_state    -> 'idle' | 'unwind' | 'wind' | 'pause' | 'error'
+        #   _winch_error    -> latched true after any pause-state edge; the
+        #                       scheduler clears it on the next leg.
+        self._winch_active = False
+        self._winch_direction = 0
+        self._winch_turns = 0
+        self._winch_state = "idle"
+        self._winch_error = False
 
     def init(self):
         if self._initialized:
@@ -669,6 +710,22 @@ class HardwareController:
                     self._rotation_intervals_us.append(interval)
             self._rotation_last_tick = tick
             self._rotation_last_wall_s = time.monotonic()
+            # Winch counter: signed turns, direction-aware.  Edges seen while
+            # the scheduler thinks we're paused indicate the shaft moved
+            # against the held 1500 us pulse (stall-torque overrun, line
+            # tension, etc.) — count it as +1 (assumed descent) and latch the
+            # error flag so the scheduler can log it.  We DO NOT abort: the
+            # recipe keeps stepping through its pause->wind->pause->unwind
+            # sequence as if nothing had happened.
+            if self._winch_active:
+                if self._winch_direction > 0:
+                    self._winch_turns += 1
+                elif self._winch_direction < 0:
+                    self._winch_turns -= 1
+                else:
+                    self._winch_turns += 1
+                    self._winch_state = "error"
+                    self._winch_error = True
 
     def is_rotation_sensor_available(self):
         return self._rotation_available
@@ -809,6 +866,144 @@ class HardwareController:
         """Last finished release-by-rotations run, or None if none yet."""
         return getattr(self, "_last_release_rotation_result", None)
 
+    # ── Recipe Winch (vertical-profile oscillation) ────────────────────
+    #
+    # Public API used by scheduler._winch_loop.  The scheduler owns the
+    # leg sequencing (unwind N -> pause -> wind N -> pause); this layer
+    # provides the per-leg motion primitive plus the signed turns counter
+    # and 'idle/unwind/wind/pause/error' state read by /status, the ASS
+    # subtitle overlay, and events.ndjson.
+
+    def winch_begin(self):
+        """Mark the start of a recipe winch run: zero turns, clear error,
+        flag the rotation callback to start tracking signed turns."""
+        with self._rotation_lock:
+            self._winch_active = True
+            self._winch_direction = 0
+            self._winch_turns = 0
+            self._winch_state = "idle"
+            self._winch_error = False
+
+    def winch_end(self):
+        """End the recipe winch run: stop the pin and clear active flag.
+        Leaves _winch_turns / _winch_state readable for final reporting."""
+        try:
+            self.set_release(RELEASE_STOP_US)
+        except Exception:
+            pass
+        with self._rotation_lock:
+            self._winch_active = False
+            self._winch_direction = 0
+            self._winch_state = "idle"
+
+    def winch_set_leg(self, direction):
+        """Set the upcoming-leg direction (+1 unwind / -1 wind) and clear the
+        latched error flag so a fresh pause-overrun condition can be detected
+        on the next pause.  Does NOT drive the servo — winch_run_leg() does."""
+        with self._rotation_lock:
+            self._winch_direction = 1 if direction > 0 else -1
+            self._winch_state = "unwind" if direction > 0 else "wind"
+            self._winch_error = False
+
+    def winch_set_pause(self):
+        """Enter the pause phase: direction 0 so any sensor edge will be
+        flagged as an overrun, state 'pause' for telemetry."""
+        try:
+            self.set_release(RELEASE_STOP_US)
+        except Exception:
+            pass
+        with self._rotation_lock:
+            self._winch_direction = 0
+            self._winch_state = "pause"
+
+    def get_winch_turns(self):
+        with self._rotation_lock:
+            return self._winch_turns
+
+    def get_winch_state(self):
+        with self._rotation_lock:
+            return self._winch_state
+
+    def is_winch_active(self):
+        with self._rotation_lock:
+            return self._winch_active
+
+    def winch_run_leg(self, position_us, target_rotations, max_duration_s,
+                      stop_event=None):
+        """BLOCKING: drive ``position_us`` until ``target_rotations`` more
+        sensor edges have been seen on top of the count at entry, or
+        ``max_duration_s`` elapses, or ``stop_event`` is set.  Always
+        returns the pin to 1500 us before returning.
+
+        Caller (the scheduler's _winch_loop) is responsible for having
+        called winch_set_leg(direction) first so the rotation callback
+        signs the turns correctly.
+
+        Returns a dict: {outcome: target|timeout|cancelled,
+                         delivered, elapsed_s, position_us}.
+        """
+        target_rotations = int(target_rotations)
+        max_duration_s = float(max_duration_s)
+        if target_rotations <= 0:
+            raise ValueError("target_rotations must be > 0")
+        if max_duration_s <= 0:
+            raise ValueError("max_duration_s must be > 0")
+        # Snapshot the GLOBAL count delta so the winch counter (which moves
+        # signed) doesn't matter for the per-leg target check.
+        start_count = self.get_rotation_count()
+        sensor_ok = self.is_rotation_sensor_available()
+        t_start = time.monotonic()
+        deadline = t_start + max_duration_s
+        outcome = "timeout"
+        try:
+            self.set_release(position_us)
+            if not sensor_ok:
+                # No sensor: degrade to a timed wait so the recipe still has
+                # rough motion.  Scheduler will pick this up via outcome.
+                logger.warning(
+                    "Winch leg falling back to timed motion (no sensor); "
+                    f"holding {position_us} us for {max_duration_s:.1f}s"
+                )
+                if stop_event is not None and stop_event.wait(max_duration_s):
+                    outcome = "cancelled"
+                else:
+                    time.sleep(max(0.0, deadline - time.monotonic()))
+                    outcome = "no_sensor_timeout"
+                return None  # populated below in finally
+            poll_s = 0.02
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    outcome = "cancelled"
+                    break
+                delivered = self.get_rotation_count() - start_count
+                if delivered >= target_rotations:
+                    outcome = "target"
+                    break
+                if time.monotonic() >= deadline:
+                    outcome = "timeout"
+                    break
+                if stop_event is not None:
+                    if stop_event.wait(poll_s):
+                        outcome = "cancelled"
+                        break
+                else:
+                    time.sleep(poll_s)
+        finally:
+            try:
+                self.set_release(RELEASE_STOP_US)
+            except Exception:
+                pass
+        delivered = self.get_rotation_count() - start_count
+        elapsed = time.monotonic() - t_start
+        return {
+            "outcome": outcome,
+            "delivered": delivered,
+            "target": target_rotations,
+            "elapsed_s": round(elapsed, 2),
+            "position_us": position_us,
+            "sensor_available": sensor_ok,
+        }
+
     # ── Auxiliary Servo PWM Outputs ────────────────────────────────────
 
     def set_aux_pwm(self, channel, position_us):
@@ -849,6 +1044,10 @@ class HardwareController:
     def cleanup(self):
         logger.info("Cleaning up hardware...")
         self._sweep_stop.set()
+        try:
+            self.winch_end()
+        except Exception:
+            pass
         self._teardown_rotation_sensor()
         self.led_off()
         if self._led:
