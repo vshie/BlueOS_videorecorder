@@ -152,7 +152,7 @@ class Scheduler:
             duration_s = recipe.get("duration_minutes", 30) * 60
             if self._hw and recipe.get("release_enable"):
                 offset_s = int(recipe.get("release_offset_s", 0))
-                self._schedule_release(duration_s, offset_s)
+                self._schedule_release(duration_s, offset_s, recipe)
 
             if self._hw:
                 if "radcam_focus_us" in recipe:
@@ -231,9 +231,8 @@ class Scheduler:
             if self._hw:
                 self._hw.led_warning()
 
-    def _schedule_release(self, duration_s, offset_s):
-        """Schedule the release servo to run unwind (2000 us) for
-        ``hardware.RELEASE_DEFAULT_RUN_S`` seconds, starting at
+    def _schedule_release(self, duration_s, offset_s, recipe):
+        """Schedule the release servo to run unwind (2000 us) starting at
         ``duration_s + offset_s`` seconds from now.
 
         - ``offset_s`` < 0  → starts that many seconds *before* the recording
@@ -242,24 +241,75 @@ class Scheduler:
         - ``offset_s`` > 0  → starts that many seconds *after* the recording
           stops.
 
+        When ``recipe["release_rotations"] > 0`` the release uses the shaft
+        rotation sensor as a closed-loop stop (capped at
+        ``release_max_duration_s`` for safety).  Otherwise it falls back to
+        the legacy timed release for ``release_max_duration_s`` seconds
+        (or ``hardware.RELEASE_DEFAULT_RUN_S`` if the field is missing).
+
         The timer is cancellable via ``self._stop``.
         """
         delay_s = max(0.0, float(duration_s) + float(offset_s))
+        target_rotations = int(recipe.get("release_rotations", 0) or 0)
+        max_duration_s = int(recipe.get("release_max_duration_s", 0) or 0)
+        mode_desc = (f"{target_rotations} rotations (cap {max_duration_s or 60}s)"
+                     if target_rotations > 0
+                     else f"timed {max_duration_s or 60}s")
         logger.info(
-            f"Release scheduled: unwind in {delay_s:.0f}s "
+            f"Release scheduled: {mode_desc} in {delay_s:.0f}s "
             f"(duration={duration_s:.0f}s, offset={offset_s:+d}s)"
         )
         self._release_thread = threading.Thread(
-            target=self._release_loop, args=(delay_s,), daemon=True,
+            target=self._release_loop,
+            args=(delay_s, target_rotations, max_duration_s),
+            daemon=True,
         )
         self._release_thread.start()
 
-    def _release_loop(self, delay_s):
+    def _release_loop(self, delay_s, target_rotations, max_duration_s):
         if self._stop.wait(delay_s):
             return
         try:
             from hardware import RELEASE_UNWIND_US, RELEASE_DEFAULT_RUN_S
-            self._hw.release_run_for(RELEASE_UNWIND_US, RELEASE_DEFAULT_RUN_S)
+            duration = max_duration_s if max_duration_s > 0 else RELEASE_DEFAULT_RUN_S
+            if target_rotations > 0:
+                # Forward the result into events.ndjson via main.log_event so
+                # post-mortem analysis can tell whether the sensor hit the
+                # target, timed out, or was cancelled.
+                def _on_done(result):
+                    try:
+                        import main
+                        detail = (
+                            f"outcome={result['outcome']} "
+                            f"delivered={result['delivered']}/{result['target']} "
+                            f"elapsed={result['elapsed_s']}s "
+                            f"sensor_ok={result['sensor_available']}"
+                        )
+                        main.log_event("release_by_rotations_done", detail)
+                    except Exception as e:
+                        logger.warning(f"release event log failed: {e}")
+                try:
+                    import main
+                    main.log_event(
+                        "release_by_rotations_started",
+                        f"target={target_rotations} cap={duration}s",
+                    )
+                except Exception:
+                    pass
+                self._hw.release_run_for_rotations(
+                    RELEASE_UNWIND_US, target_rotations, duration,
+                    on_complete=_on_done,
+                )
+            else:
+                try:
+                    import main
+                    main.log_event(
+                        "release_timed_started",
+                        f"duration={duration}s",
+                    )
+                except Exception:
+                    pass
+                self._hw.release_run_for(RELEASE_UNWIND_US, duration)
         except Exception as e:
             logger.error(f"Release run failed: {e}")
 

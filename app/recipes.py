@@ -73,6 +73,14 @@ RECIPE_SCHEMA_DEFAULTS = {
     "radcam_zoom_us": 900,
     "release_enable": False,
     "release_offset_s": 0,
+    # Closed-loop release: when > 0, the release runs until the rotation
+    # sensor has counted this many rising edges (or release_max_duration_s
+    # elapses, whichever comes first).  0 = use plain timed release.
+    "release_rotations": 0,
+    # Safety cap on how long the release pin is held in the unwind direction.
+    # Applies to both timed releases (= run for this long) and rotation-based
+    # releases (= max wait before giving up on the sensor).
+    "release_max_duration_s": 60,
 }
 
 # Allowed window for release-trigger offset relative to recording finish.
@@ -314,6 +322,28 @@ def validate_recipe(data):
                 )
             else:
                 clean["release_offset_s"] = ros
+
+    if "release_rotations" in data:
+        try:
+            rot = int(float(data["release_rotations"]))
+        except (ValueError, TypeError):
+            errors.append("release_rotations must be a non-negative integer")
+        else:
+            if rot < 0 or rot > 10000:
+                errors.append("release_rotations must be between 0 and 10000 (0 = use timed release)")
+            else:
+                clean["release_rotations"] = rot
+
+    if "release_max_duration_s" in data:
+        try:
+            rmd = int(float(data["release_max_duration_s"]))
+        except (ValueError, TypeError):
+            errors.append("release_max_duration_s must be a positive integer (seconds)")
+        else:
+            if rmd < 1 or rmd > 3600:
+                errors.append("release_max_duration_s must be between 1 and 3600 seconds")
+            else:
+                clean["release_max_duration_s"] = rmd
 
     if "radcam_focus_finder" in data:
         clean["radcam_focus_finder"] = bool(data["radcam_focus_finder"])

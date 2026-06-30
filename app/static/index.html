@@ -641,10 +641,28 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         </div>
       </div>
     </div>
+    <div class="form-row" id="releaseRotationsRow" style="display:none">
+      <div class="form-group" style="min-width:18em">
+        <label>Stop after N rotations (0 = use timer)</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="number" id="rReleaseRotations" value="0" min="0" max="10000" step="1" style="width:7em">
+          <span class="mono text-muted">rotations</span>
+        </div>
+      </div>
+      <div class="form-group" style="min-width:18em">
+        <label>Safety cap (max release run time)</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="number" id="rReleaseMaxDuration" value="60" min="1" max="3600" step="1" style="width:7em">
+          <span class="mono text-muted">seconds</span>
+        </div>
+      </div>
+    </div>
     <div id="releaseHint" class="text-muted mt-8" style="font-size:.82em;display:none">
-      When recording finishes (plus the configured offset), the release servo
-      will run unwind (2000 us) for 60 seconds, then return to stop (1500 us).
-      The string spools off the post and the unit floats to the surface.
+      When recording finishes (plus the configured offset), the release servo runs unwind (2000 us).
+      With <strong>Stop after N rotations &gt; 0</strong>, the run ends as soon as the shaft
+      sensor has counted that many rotations (or the safety cap elapses, whichever comes first).
+      With <strong>N = 0</strong>, the run is purely timed for the safety-cap duration.
+      The shaft is always returned to stop (1500 us) afterwards.
     </div>
 
     <hr>
@@ -1753,6 +1771,8 @@ function newRecipe() {
   document.getElementById('rRecZoomVal').textContent = curZoom;
   document.getElementById('rReleaseEnable').checked = false;
   document.getElementById('rReleaseOffset').value = 0;
+  document.getElementById('rReleaseRotations').value = 0;
+  document.getElementById('rReleaseMaxDuration').value = 60;
   document.getElementById('editorTitle').textContent = 'New Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
@@ -1806,6 +1826,8 @@ async function editRecipe(id) {
   document.getElementById('rRecZoomVal').textContent = rZoom;
   document.getElementById('rReleaseEnable').checked = !!r.release_enable;
   document.getElementById('rReleaseOffset').value = (r.release_offset_s != null ? r.release_offset_s : 0);
+  document.getElementById('rReleaseRotations').value = (r.release_rotations != null ? r.release_rotations : 0);
+  document.getElementById('rReleaseMaxDuration').value = (r.release_max_duration_s != null ? r.release_max_duration_s : 60);
   document.getElementById('editorTitle').textContent = 'Edit Recipe';
   document.getElementById('recipeEditor').classList.remove('hidden');
   toggleStillsFields();
@@ -1849,6 +1871,8 @@ async function saveCurrentRecipe() {
     radcam_zoom_us: +document.getElementById('rRecZoom').value,
     release_enable: document.getElementById('rReleaseEnable').checked,
     release_offset_s: +document.getElementById('rReleaseOffset').value,
+    release_rotations: +document.getElementById('rReleaseRotations').value,
+    release_max_duration_s: +document.getElementById('rReleaseMaxDuration').value,
   };
   const id = document.getElementById('rId').value;
   if (id) body.id = id;
@@ -1881,6 +1905,7 @@ function toggleFocusFinderFields() {
 function toggleReleaseFields() {
   const on = document.getElementById('rReleaseEnable').checked;
   document.getElementById('releaseOffsetGroup').style.display = on ? '' : 'none';
+  document.getElementById('releaseRotationsRow').style.display = on ? '' : 'none';
   document.getElementById('releaseHint').style.display = on ? '' : 'none';
 }
 function previewServo(val, labelId) {

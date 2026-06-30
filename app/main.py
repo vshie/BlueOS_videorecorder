@@ -1616,6 +1616,12 @@ def route_telemetry():
         data["release_position_us"] = hw.get_release_position()
         data["release_direction"] = hw.get_release_direction()
         data["release_running"] = hw.is_release_running()
+        try:
+            data["rotation_sensor_available"] = hw.is_rotation_sensor_available()
+            data["rotation_count"] = hw.get_rotation_count()
+            data["rotation_rpm"] = round(hw.get_rotation_rpm(), 1)
+        except Exception:
+            pass
         data["radcam_mode"] = radcam_mode
         if radcam_mode:
             data["aux_pwm"] = hw.get_all_aux_pwm()
@@ -2250,6 +2256,16 @@ def _boot():
         hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
         hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
         init_default_recipes(radcam=True)
+
+    # Release-shaft rotation sensor lives on GPIO 26 (shared with the RadCam
+    # zoom aux output), so only set it up in DropCam mode.  It's optional —
+    # if pigpiod / the sensor isn't available, init returns False and the
+    # rest of the system keeps running with rotation_count=0.
+    try:
+        if not radcam_mode:
+            hw.init_rotation_sensor(enable=True)
+    except Exception as e:
+        logger.warning(f"Rotation sensor init failed: {e}")
 
     # The live preview is served by the BlueOS camera manager directly to the
     # browser over WebRTC (signalling on :6021); nothing to start here.  If

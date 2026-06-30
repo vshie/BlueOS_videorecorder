@@ -28,6 +28,7 @@ import threading
 import time
 import logging
 import atexit
+from collections import deque
 
 from gpio_backend import make_servo_backend, make_led_backend
 
@@ -45,6 +46,18 @@ FOCUS_GPIO = 20
 ZOOM_GPIO = 26
 PAN_GPIO = 16
 EXT_SERVO_GPIO = 19
+
+# Release-servo shaft rotation sensor (DropCam only).  The sensor produces an
+# analog 0 V -> 3.3 V ramp once per shaft rotation, snapping back to 0 V at
+# the end of each ramp.  Read as a Schmitt-triggered digital input with a
+# software glitch filter so each ramp resolves to a single rising edge.
+# Shares the GPIO with ZOOM_GPIO above; only one of the two roles is wired
+# on a given board (DropCam = sensor, RadCam = zoom output), so the rotation
+# sensor only initialises when the caller explicitly enables it.
+ROTATION_SENSOR_GPIO = 26
+ROTATION_GLITCH_FILTER_US = 10000     # 10 ms — validated against bench sweep
+ROTATION_RPM_WINDOW = 5               # smooth RPM over the last N rotations
+ROTATION_RPM_STALE_S = 3.0            # no rotation in this long -> RPM = 0
 
 AUX_PWM_GPIOS = {
     "focus": FOCUS_GPIO,
@@ -106,6 +119,19 @@ class HardwareController:
         # state when cleared.
         self._battery_alarm = False
         self._desired_led = None  # tuple: (kind, r, g, b, mode, rate_hz, cycle_s)
+
+        # Release-servo rotation sensor (initialised lazily by
+        # init_rotation_sensor() once the caller knows DropCam mode).
+        # _rotation_count is incremented from a pigpio callback thread; reads
+        # under _rotation_lock for atomicity with reset_rotation_count().
+        self._rotation_pi = None
+        self._rotation_cb = None
+        self._rotation_count = 0
+        self._rotation_lock = threading.Lock()
+        self._rotation_last_tick = None     # pigpio tick (us, 32-bit)
+        self._rotation_last_wall_s = 0.0
+        self._rotation_intervals_us = deque(maxlen=ROTATION_RPM_WINDOW)
+        self._rotation_available = False
 
     def init(self):
         if self._initialized:
@@ -566,6 +592,223 @@ class HardwareController:
         with self._lock:
             self._release_run_active = False
 
+    # ── Release-Shaft Rotation Sensor ──────────────────────────────────
+    #
+    # Counts rising edges on ROTATION_SENSOR_GPIO via a pigpio callback with
+    # a 10 ms glitch filter (validated on bench against a known PWM sweep).
+    # The sensor and the ZOOM aux output share GPIO 26 — only one of the two
+    # roles is wired on a given board, so init_rotation_sensor() is opt-in
+    # and the caller is expected to skip it on RadCam-mode deployments.
+
+    def init_rotation_sensor(self, enable=True):
+        """Set up the release-shaft rotation sensor on ROTATION_SENSOR_GPIO.
+
+        Idempotent.  When ``enable=False`` (e.g. RadCam mode where the pin is
+        used as a zoom-servo output instead) this is a no-op and any prior
+        callback is torn down so the pin can be driven as an output.
+        Returns True if the sensor is live afterwards.
+        """
+        if not enable:
+            self._teardown_rotation_sensor()
+            return False
+        if self._rotation_available:
+            return True
+        try:
+            import pigpio
+        except ImportError:
+            logger.warning("Rotation sensor unavailable: pigpio not importable")
+            return False
+        try:
+            pi = pigpio.pi()
+            if not pi.connected:
+                logger.warning("Rotation sensor unavailable: pigpiod not reachable")
+                try: pi.stop()
+                except Exception: pass
+                return False
+            pi.set_mode(ROTATION_SENSOR_GPIO, pigpio.INPUT)
+            pi.set_pull_up_down(ROTATION_SENSOR_GPIO, pigpio.PUD_OFF)
+            pi.set_glitch_filter(ROTATION_SENSOR_GPIO, ROTATION_GLITCH_FILTER_US)
+            cb = pi.callback(ROTATION_SENSOR_GPIO, pigpio.RISING_EDGE,
+                             self._on_rotation_edge)
+        except Exception as e:
+            logger.warning(f"Rotation sensor init failed: {e}")
+            return False
+        self._rotation_pi = pi
+        self._rotation_cb = cb
+        self._rotation_available = True
+        logger.info(
+            f"Rotation sensor ready on GPIO {ROTATION_SENSOR_GPIO} "
+            f"(glitch filter {ROTATION_GLITCH_FILTER_US} us)"
+        )
+        return True
+
+    def _teardown_rotation_sensor(self):
+        try:
+            if self._rotation_cb is not None:
+                self._rotation_cb.cancel()
+        except Exception:
+            pass
+        try:
+            if self._rotation_pi is not None:
+                self._rotation_pi.stop()
+        except Exception:
+            pass
+        self._rotation_cb = None
+        self._rotation_pi = None
+        self._rotation_available = False
+
+    def _on_rotation_edge(self, gpio, level, tick):
+        # Runs in a pigpio callback thread.  Keep this short.
+        # tick is a uint32 microsecond counter; use tickDiff to handle wrap.
+        import pigpio
+        with self._rotation_lock:
+            self._rotation_count += 1
+            if self._rotation_last_tick is not None:
+                interval = pigpio.tickDiff(self._rotation_last_tick, tick)
+                if 0 < interval < 60_000_000:   # sanity cap (1 min between rotations)
+                    self._rotation_intervals_us.append(interval)
+            self._rotation_last_tick = tick
+            self._rotation_last_wall_s = time.monotonic()
+
+    def is_rotation_sensor_available(self):
+        return self._rotation_available
+
+    def get_rotation_count(self):
+        with self._rotation_lock:
+            return self._rotation_count
+
+    def reset_rotation_count(self):
+        with self._rotation_lock:
+            self._rotation_count = 0
+            self._rotation_last_tick = None
+            self._rotation_last_wall_s = 0.0
+            self._rotation_intervals_us.clear()
+
+    def get_rotation_rpm(self):
+        """Mean RPM over the most recent ROTATION_RPM_WINDOW intervals.
+
+        Returns 0.0 if no rotation has been seen in the last
+        ROTATION_RPM_STALE_S seconds (shaft considered stopped).
+        """
+        with self._rotation_lock:
+            if not self._rotation_intervals_us or self._rotation_last_wall_s == 0:
+                return 0.0
+            if (time.monotonic() - self._rotation_last_wall_s) > ROTATION_RPM_STALE_S:
+                return 0.0
+            mean_us = sum(self._rotation_intervals_us) / len(self._rotation_intervals_us)
+        if mean_us <= 0:
+            return 0.0
+        return 60_000_000.0 / mean_us
+
+    def release_run_for_rotations(self, position_us, target_rotations,
+                                  max_duration_s, on_complete=None):
+        """Hold ``position_us`` until ``target_rotations`` rising edges of the
+        rotation sensor have been observed, or ``max_duration_s`` elapses,
+        whichever comes first.  Then return the shaft to stop.
+
+        Uses a count *delta* captured at start so the global rotation counter
+        (used by /status and the subtitle overlay) is not disturbed.  Spawns
+        a daemon thread and returns immediately.  Cancels any prior in-flight
+        release run.
+
+        ``on_complete`` is an optional callable invoked with the result dict
+        from the worker thread (same shape as get_last_release_rotation_result).
+        It runs in the worker thread so it must be quick / non-blocking.
+        """
+        target_rotations = int(target_rotations)
+        max_duration_s = float(max_duration_s)
+        if target_rotations <= 0:
+            raise ValueError("target_rotations must be > 0")
+        if max_duration_s <= 0:
+            raise ValueError("max_duration_s must be > 0")
+        self._cancel_release_run()
+        self._release_run_cancel.clear()
+        with self._lock:
+            self._release_run_active = True
+        self._release_run_thread = threading.Thread(
+            target=self._release_run_worker_rotations,
+            args=(int(position_us), target_rotations, max_duration_s, on_complete),
+            daemon=True,
+            name="release-run-rotations",
+        )
+        self._release_run_thread.start()
+
+    def _release_run_worker_rotations(self, position_us, target, max_duration_s,
+                                       on_complete=None):
+        """Worker for release_run_for_rotations.  Emits structured info-logs
+        at start and end that callers (main.py) can forward to events.ndjson.
+        """
+        start_count = self.get_rotation_count()
+        sensor_ok = self.is_rotation_sensor_available()
+        outcome = "started"
+        t_start = time.monotonic()
+        deadline = t_start + max_duration_s
+        delivered = 0
+        try:
+            if not sensor_ok:
+                logger.warning(
+                    "Rotation sensor not available — falling back to timed "
+                    f"release for {max_duration_s:.1f}s at {position_us}us"
+                )
+                self.set_release(position_us)
+                cancelled = self._release_run_cancel.wait(max_duration_s)
+                outcome = "cancelled" if cancelled else "no_sensor_timeout"
+                return
+            logger.info(
+                f"Release-by-rotations: target={target} rotations at "
+                f"{position_us} us, safety cap {max_duration_s:.1f}s"
+            )
+            self.set_release(position_us)
+            # Poll every 20 ms — gives ~0.04 rotation precision at 112 RPM.
+            poll_s = 0.02
+            while True:
+                if self._release_run_cancel.is_set():
+                    outcome = "cancelled"
+                    break
+                delivered = self.get_rotation_count() - start_count
+                if delivered >= target:
+                    outcome = "target_reached"
+                    break
+                if time.monotonic() >= deadline:
+                    outcome = "timed_out"
+                    break
+                if self._release_run_cancel.wait(poll_s):
+                    outcome = "cancelled"
+                    break
+        finally:
+            try:
+                self.set_release(RELEASE_STOP_US)
+            except Exception:
+                pass
+            with self._lock:
+                self._release_run_active = False
+            elapsed = time.monotonic() - t_start
+            delivered = self.get_rotation_count() - start_count
+            logger.info(
+                f"Release-by-rotations done: outcome={outcome} "
+                f"delivered={delivered}/{target} rotations in {elapsed:.1f}s"
+            )
+            # Stash the last-run result for callers to surface in events.ndjson.
+            result = {
+                "outcome": outcome,
+                "delivered": delivered,
+                "target": target,
+                "elapsed_s": round(elapsed, 2),
+                "position_us": position_us,
+                "max_duration_s": max_duration_s,
+                "sensor_available": sensor_ok,
+            }
+            self._last_release_rotation_result = result
+            if on_complete is not None:
+                try:
+                    on_complete(result)
+                except Exception as e:
+                    logger.warning(f"release_run_for_rotations on_complete failed: {e}")
+
+    def get_last_release_rotation_result(self):
+        """Last finished release-by-rotations run, or None if none yet."""
+        return getattr(self, "_last_release_rotation_result", None)
+
     # ── Auxiliary Servo PWM Outputs ────────────────────────────────────
 
     def set_aux_pwm(self, channel, position_us):
@@ -606,6 +849,7 @@ class HardwareController:
     def cleanup(self):
         logger.info("Cleaning up hardware...")
         self._sweep_stop.set()
+        self._teardown_rotation_sensor()
         self.led_off()
         if self._led:
             try:
