@@ -87,18 +87,20 @@ RELEASE_DEFAULT_RUN_S = 60          # how long the recipe holds unwind for
 RELEASE_ROTATION_CAP = 52
 RELEASE_MAX_DURATION_S = 60
 
-# Slow PWM values for manual rotation-counted jogs + recipe winch oscillation.
-# Bench-calibrated 2026-06: the unwind deadband edge is at 1515 us (motion
-# first appears as ~21 RPM), and the wind deadband edge is at 1454 us (also
-# ~21 RPM).  We pick 1516 / 1453 — one microsecond into the moving region on
-# each side — which gave ~24 RPM in both directions on the matched-speed
-# verification.  WINCH_*_RPM is the value shown in the UI and used by the
-# scheduler's stationary-time preview; future closed-loop calibration may
-# refine these without rewriting callers.
-WINCH_UNWIND_US = 1516
-WINCH_WIND_US = 1453
-WINCH_UNWIND_RPM = 24
-WINCH_WIND_RPM = 24
+# PWM values for manual rotation-counted jogs + recipe winch oscillation.
+# Re-calibrated 2026-06 because the original 1516/1453 pair (~24 RPM) was
+# too close to the deadband edge to deliver useful torque under spool load
+# — the wind direction stalled against tension.  Sweep at this PWM range
+# now shows a clean step at 1555/1410 (~45 RPM) and a higher plateau at
+# 1560/1400 (~52 RPM each).  We pick the 1560/1400 pair: well past the
+# torque-starved deadband, well matched both directions (drift minimised),
+# and roughly double the previous speed.  WINCH_*_RPM is shown in the UI
+# and used by the scheduler's stationary-time preview; future closed-loop
+# calibration may refine these without rewriting callers.
+WINCH_UNWIND_US = 1560
+WINCH_WIND_US = 1400
+WINCH_UNWIND_RPM = 52
+WINCH_WIND_RPM = 52
 
 # Recipe cap on user-selected revolutions per profile leg.
 WINCH_ROTATIONS_MAX = 30

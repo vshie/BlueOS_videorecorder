@@ -2037,7 +2037,7 @@ def route_release():
     - ``rotate`` runs a slow rotation-counted jog: body must include
       ``rotations`` (int >= 1) and ``direction`` ("unwind" or "wind").
       Uses the winch-calibration PWMs (WINCH_UNWIND_US / WINCH_WIND_US,
-      ~24 RPM) and the same closed-loop stop logic.
+      ~52 RPM) and the same closed-loop stop logic.
 
     Any call here cancels a running scheduled recipe.
     """

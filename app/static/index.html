@@ -341,7 +341,7 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
             </button>
           </div>
           <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-top:4px"
-               title="Slow rotation-counted jog (~24 RPM). Closed-loop on the shaft sensor; safety-capped at 60 s.">
+               title="Rotation-counted jog (~52 RPM). Closed-loop on the shaft sensor; safety-capped at 60 s.">
             <input type="number" id="manualRevs" value="3" min="1" max="200" step="1" style="width:5em">
             <span class="text-muted" style="font-size:.78em">rev</span>
             <button class="btn-sm" id="manualUnwindBtn" onclick="manualJog('unwind')">Unwind N</button>
@@ -679,7 +679,7 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
       </div>
       <div id="winchCalc" class="text-muted mt-8" style="font-size:.82em"></div>
       <div class="text-muted" style="font-size:.78em;margin-top:4px">
-        Available speeds: <span id="winchAvailableRpm">Unwind 24 RPM / Wind 24 RPM</span> (bench-calibrated).
+        Available speeds: <span id="winchAvailableRpm">Unwind 52 RPM / Wind 52 RPM</span> (bench-calibrated).
         Same speed used for unwind and wind. Cap: 30 revolutions per leg.
       </div>
     </div>
@@ -1990,7 +1990,7 @@ function toggleWinchFields() {
 
 // Speeds and cap hardcoded from bench calibration; mirror app/hardware.py
 // WINCH_*_RPM and WINCH_ROTATIONS_MAX.  Update both if you re-calibrate.
-const WINCH_RPM = 24;
+const WINCH_RPM = 52;
 const WINCH_MAX_ROTATIONS = 30;
 
 function fmtMS(seconds) {
