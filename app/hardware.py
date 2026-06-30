@@ -820,6 +820,12 @@ class HardwareController:
             self.set_release(position_us)
             # Poll every 20 ms — gives ~0.04 rotation precision at 112 RPM.
             poll_s = 0.02
+            # Same sensor-stall guard as the winch path.  At fast release
+            # (~112 RPM) the first edge should arrive within ~0.5 s, so
+            # 2.5 s of zero edges almost certainly means the input is
+            # being clobbered (eg GPIO 26 collision with the zoom aux
+            # output).  Abort instead of running the full safety cap.
+            stall_threshold_s = 2.5
             while True:
                 if self._release_run_cancel.is_set():
                     outcome = "cancelled"
@@ -828,7 +834,16 @@ class HardwareController:
                 if delivered >= target:
                     outcome = "target_reached"
                     break
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if delivered == 0 and (now - t_start) >= stall_threshold_s:
+                    outcome = "sensor_stalled"
+                    logger.error(
+                        f"Release-by-rotations aborted: no rotation edges "
+                        f"in {stall_threshold_s:.1f}s at {position_us} us "
+                        f"— sensor input may be silenced."
+                    )
+                    break
+                if now >= deadline:
                     outcome = "timed_out"
                     break
                 if self._release_run_cancel.wait(poll_s):
@@ -972,6 +987,14 @@ class HardwareController:
                     time.sleep(max(0.0, deadline - time.monotonic()))
                     outcome = "no_sensor_timeout"
                 return None  # populated below in finally
+            # Sensor-stall guard.  If the rotation sensor reports zero
+            # edges within this many seconds of starting the leg the input
+            # is almost certainly being clobbered (the GPIO 26 / "zoom"
+            # collision that turned 3-rev legs into 9-rev runaways).
+            # Abort early instead of running the full leg_cap_s budget.
+            # 2.5 s is generous enough for healthy operation at every RPM
+            # the winch supports (>= ~24 RPM -> first edge by 2.5 s).
+            stall_threshold_s = 2.5
             poll_s = 0.02
             while True:
                 if stop_event is not None and stop_event.is_set():
@@ -981,7 +1004,17 @@ class HardwareController:
                 if delivered >= target_rotations:
                     outcome = "target"
                     break
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if delivered == 0 and (now - t_start) >= stall_threshold_s:
+                    outcome = "sensor_stalled"
+                    logger.error(
+                        f"Winch leg aborted: no rotation edges in "
+                        f"{stall_threshold_s:.1f}s at {position_us} us "
+                        f"(target {target_rotations} rev) — sensor input "
+                        f"may be silenced (eg GPIO 26 collision with zoom)."
+                    )
+                    break
+                if now >= deadline:
                     outcome = "timeout"
                     break
                 if stop_event is not None:
@@ -1008,18 +1041,43 @@ class HardwareController:
 
     # ── Auxiliary Servo PWM Outputs ────────────────────────────────────
 
+    def _aux_pwm_conflicts_with_sensor(self, gpio):
+        """Return True if ``gpio`` is the active rotation-sensor input pin.
+
+        GPIO 26 is dual-purpose (RadCam zoom servo output / DropCam release
+        rotation sensor input).  When the rotation sensor is initialised,
+        driving the pin as a servo would override the input and silence the
+        callback — which is exactly the bug that turned 3-rev winch legs
+        into 7-9 rev runaways.  This guard is consulted by every aux-PWM
+        write path so an over-eager recipe or stray API call cannot
+        re-clobber the pin while the sensor is active.
+        """
+        return gpio == ROTATION_SENSOR_GPIO and self._rotation_available
+
     def set_aux_pwm(self, channel, position_us):
-        """Set an auxiliary PWM channel. channel is one of: focus, zoom, pan, ext_servo."""
+        """Set an auxiliary PWM channel. channel is one of: focus, zoom, pan, ext_servo.
+
+        Returns True if the pin was driven, False if the call was skipped
+        because of a sensor-conflict guard (the cached _aux_positions value
+        is still updated so /status reflects the user's intent).
+        """
         if channel not in AUX_PWM_GPIOS:
             raise ValueError(f"Unknown aux PWM channel: {channel}")
         position_us = max(SERVO_MIN_US, min(SERVO_MAX_US, int(position_us)))
         gpio = AUX_PWM_GPIOS[channel]
         with self._lock:
             self._aux_positions[channel] = position_us
+        if self._aux_pwm_conflicts_with_sensor(gpio):
+            logger.warning(
+                f"Skipping aux PWM '{channel}' (GPIO {gpio} = {position_us} us) "
+                f"— rotation sensor is using this pin in DropCam mode."
+            )
+            return False
         if self._servo and self._servo.available:
             self._servo.set_pulse(gpio, position_us)
         else:
             logger.debug(f"Aux PWM sim [{channel}]: {position_us} us")
+        return True
 
     def get_aux_pwm(self, channel):
         if channel not in AUX_PWM_GPIOS:
@@ -1036,10 +1094,28 @@ class HardwareController:
         if channel not in AUX_PWM_GPIOS:
             raise ValueError(f"Unknown aux PWM channel: {channel}")
         gpio = AUX_PWM_GPIOS[channel]
+        if self._aux_pwm_conflicts_with_sensor(gpio):
+            logger.warning(
+                f"Skipping aux_pwm_off '{channel}' (GPIO {gpio}) "
+                f"— rotation sensor is using this pin."
+            )
+            return False
         if self._servo and self._servo.available:
             self._servo.set_pulse(gpio, 0)
         else:
             logger.debug(f"Aux PWM sim [{channel}]: off")
+        return True
+
+    def is_aux_pwm_available(self, channel):
+        """Return True if writing to ``channel`` will reach the pin.
+
+        Lets callers (eg the scheduler) skip noisy recipe-driven warnings
+        for channels that are physically unwired in the current build
+        (DropCam blocks zoom because the pin reads the rotation sensor).
+        """
+        if channel not in AUX_PWM_GPIOS:
+            return False
+        return not self._aux_pwm_conflicts_with_sensor(AUX_PWM_GPIOS[channel])
 
     # ── Cleanup ──────────────────────────────────────────────────────────
 

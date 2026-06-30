@@ -158,10 +158,17 @@ class Scheduler:
                 self._schedule_release(duration_s, offset_s, recipe)
 
             if self._hw:
-                if "radcam_focus_us" in recipe:
+                # NB: ``zoom`` shares GPIO 26 with the DropCam release-shaft
+                # rotation sensor.  is_aux_pwm_available() returns False for
+                # ``zoom`` when the sensor is live so we skip the recipe push
+                # entirely and don't clobber the input — otherwise pigpiod
+                # starts driving the pin as a servo output, the sensor
+                # callback goes silent, and closed-loop winch legs run away
+                # to the safety cap (~9 rev instead of 3).
+                if "radcam_focus_us" in recipe and self._hw.is_aux_pwm_available("focus"):
                     self._hw.set_aux_pwm("focus", recipe["radcam_focus_us"])
                     logger.info(f"Recipe applied focus={recipe['radcam_focus_us']} us")
-                if "radcam_zoom_us" in recipe:
+                if "radcam_zoom_us" in recipe and self._hw.is_aux_pwm_available("zoom"):
                     self._hw.set_aux_pwm("zoom", recipe["radcam_zoom_us"])
                     logger.info(f"Recipe applied zoom={recipe['radcam_zoom_us']} us")
 
