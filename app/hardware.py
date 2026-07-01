@@ -55,7 +55,19 @@ EXT_SERVO_GPIO = 19
 # on a given board (DropCam = sensor, RadCam = zoom output), so the rotation
 # sensor only initialises when the caller explicitly enables it.
 ROTATION_SENSOR_GPIO = 26
-ROTATION_GLITCH_FILTER_US = 10000     # 10 ms — validated against bench sweep
+# 100 ms glitch filter.  We trigger on the FAST snap-back (falling edge)
+# from ~3.3 V to ~0 V, not the slow ramp up through the input threshold.
+# Both rest levels are stable for the entire rotation period so a large
+# filter is fine — it just kills threshold-band noise while the shaft is
+# stationary.  Fastest real signal is the 112 RPM fast release (535 ms
+# per rev), so 100 ms leaves ~50 ms of margin before we start clipping
+# real edges.
+ROTATION_GLITCH_FILTER_US = 100000
+# Software min-inter-edge debounce, belt-and-suspenders on top of the
+# hardware filter.  At the max real RPM (~120) two rotations can arrive
+# no closer than ~500 ms apart, so 250 ms rejects any duplicate/noise
+# edge pair without ever discarding a real rotation.
+ROTATION_MIN_INTER_EDGE_S = 0.25
 ROTATION_RPM_WINDOW = 5               # smooth RPM over the last N rotations
 ROTATION_RPM_STALE_S = 3.0            # no rotation in this long -> RPM = 0
 
@@ -637,8 +649,15 @@ class HardwareController:
 
     # ── Release-Shaft Rotation Sensor ──────────────────────────────────
     #
-    # Counts rising edges on ROTATION_SENSOR_GPIO via a pigpio callback with
-    # a 10 ms glitch filter (validated on bench against a known PWM sweep).
+    # Counts *falling* edges on ROTATION_SENSOR_GPIO via a pigpio callback.
+    # The sensor produces a slow 0 V -> 3.3 V ramp once per rotation and then
+    # snaps sharply back to 0 V; falling on the snap-back gives one clean,
+    # well-defined pulse per rotation instead of the noisy slow crossing on
+    # the way up.  Combined with a 100 ms hardware glitch filter and a
+    # 250 ms software min-inter-edge debounce, this is highly resistant to
+    # the threshold-band chatter that used to fire spurious "pause" edges
+    # while the shaft was stationary.
+    #
     # The sensor and the ZOOM aux output share GPIO 26 — only one of the two
     # roles is wired on a given board, so init_rotation_sensor() is opt-in
     # and the caller is expected to skip it on RadCam-mode deployments.
@@ -671,7 +690,11 @@ class HardwareController:
             pi.set_mode(ROTATION_SENSOR_GPIO, pigpio.INPUT)
             pi.set_pull_up_down(ROTATION_SENSOR_GPIO, pigpio.PUD_OFF)
             pi.set_glitch_filter(ROTATION_SENSOR_GPIO, ROTATION_GLITCH_FILTER_US)
-            cb = pi.callback(ROTATION_SENSOR_GPIO, pigpio.RISING_EDGE,
+            # Trigger on the fast snap-back (3.3 V -> 0 V) rather than the
+            # slow ramp up through the input threshold; both rest levels
+            # are stable for the full rotation period so this is much
+            # more noise-tolerant than RISING_EDGE.
+            cb = pi.callback(ROTATION_SENSOR_GPIO, pigpio.FALLING_EDGE,
                              self._on_rotation_edge)
         except Exception as e:
             logger.warning(f"Rotation sensor init failed: {e}")
@@ -681,7 +704,8 @@ class HardwareController:
         self._rotation_available = True
         logger.info(
             f"Rotation sensor ready on GPIO {ROTATION_SENSOR_GPIO} "
-            f"(glitch filter {ROTATION_GLITCH_FILTER_US} us)"
+            f"(falling-edge, glitch filter {ROTATION_GLITCH_FILTER_US/1000:.0f} ms, "
+            f"sw debounce {ROTATION_MIN_INTER_EDGE_S*1000:.0f} ms)"
         )
         return True
 
@@ -705,6 +729,16 @@ class HardwareController:
         # tick is a uint32 microsecond counter; use tickDiff to handle wrap.
         import pigpio
         with self._rotation_lock:
+            # Software min-inter-edge debounce.  Belt-and-suspenders on top
+            # of the pigpio glitch filter; catches any noise pair that
+            # cleared the hardware filter (eg two 100+ ms plateaus in a
+            # noisy threshold window).  Real rotations are always spaced
+            # >= 500 ms apart at our max operating RPM, so a 250 ms window
+            # rejects duplicates without ever discarding a valid edge.
+            if self._rotation_last_tick is not None:
+                interval_us = pigpio.tickDiff(self._rotation_last_tick, tick)
+                if interval_us < int(ROTATION_MIN_INTER_EDGE_S * 1_000_000):
+                    return
             self._rotation_count += 1
             if self._rotation_last_tick is not None:
                 interval = pigpio.tickDiff(self._rotation_last_tick, tick)
