@@ -97,6 +97,11 @@ recording_error = ""
 # the recording is auto-aborted.
 WATCHDOG_INTERVAL_S = 5
 STALL_ABORT_INTERVALS = 6  # ~30s of no data written
+# The fragmented-MP4 muxer flushes a whole ~5s fragment to disk at once, so a
+# single flat poll interval between flushes is normal, not a stall.  Require a
+# couple of consecutive flat intervals before flagging a warning / logging a
+# stall, so the status LED doesn't flicker yellow between fragment flushes.
+STALL_WARN_INTERVALS = 2
 
 stills_thread = None
 stop_stills_thread = False
@@ -781,13 +786,17 @@ def recording_health_watchdog():
             if current_video_file:
                 sz = os.path.getsize(current_video_file) if os.path.exists(current_video_file) else 0
                 if sz > last_size:
-                    if file_stall_count > 0 and recording:
+                    if file_stall_count >= STALL_WARN_INTERVALS and recording:
                         hw.led_recording()
                     file_stall_count = 0
                 else:
                     file_stall_count += 1
-                    log_event("file_stall", f"No growth for {file_stall_count} intervals ({sz} bytes)")
-                    hw.led_warning()
+                    # One flat interval is normal between fragment flushes;
+                    # only warn/log once it persists (a real stall keeps
+                    # climbing toward STALL_ABORT_INTERVALS).
+                    if file_stall_count >= STALL_WARN_INTERVALS:
+                        log_event("file_stall", f"No growth for {file_stall_count} intervals ({sz} bytes)")
+                        hw.led_warning()
                     if file_stall_count >= STALL_ABORT_INTERVALS:
                         secs = file_stall_count * WATCHDOG_INTERVAL_S
                         _abort_recording(
