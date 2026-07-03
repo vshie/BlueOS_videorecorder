@@ -1,9 +1,10 @@
 """
 DropCam - Standalone BlueOS Video Recording Extension
 
-Records H264 video from the BlueOS mavlink-camera-manager RTSP stream into .mp4
-files (recorded as power-cut-safe MPEG-TS, then remuxed to MP4 on stop for
-VLC/subtitle compatibility), or captures stills at a configurable interval.
+Records H264 video from the BlueOS mavlink-camera-manager RTSP stream into
+power-cut-safe fragmented .mp4 files (a self-contained moof/mdat fragment every
+5 s, so a crash loses at most the final fragment and no TS→MP4 remux is needed),
+or captures stills at a configurable interval.
 BlueOS owns the USB camera; the extension consumes its published RTSP stream
 rather than reading /dev/video* directly. Controls a camera tilt servo, lumen
 light, and RGB status LED. Supports auto-start via saved recording recipes.
@@ -1031,13 +1032,19 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
                 logger.error(recording_error)
                 return False
             depay = "rtph265depay ! h265parse" if encode == "H265" else "rtph264depay ! h264parse"
-            filename = basename + ".ts"
+            filename = basename + ".mp4"
             filepath = os.path.join(rec_dir, filename)
             current_video_file = filepath
+            # Record straight to a fragmented MP4 (a moof/mdat fragment every 5 s)
+            # instead of MPEG-TS.  fragment-duration keeps the file power-cut-safe:
+            # the moov header is written up front and every fragment is
+            # self-contained, so a crash loses at most the final ~5 s fragment.
+            # This yields a ready-to-play .mp4 with no slow TS→MP4 remux on stop
+            # (the remux was pure USB I/O at ~9.5 MB/s, ~18 min for a 10 GiB file).
             pipeline = (
                 f"rtspsrc location={url} protocols=tcp latency=200 "
                 "retry=10 timeout=5000000 ! "
-                f"{depay} ! queue ! mpegtsmux name=mux ! "
+                f"{depay} ! queue ! mp4mux fragment-duration=5000 ! "
                 f"filesink location={filepath}"
             )
         command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
@@ -1483,11 +1490,12 @@ def _stop_recording_internal():
     if video_path and os.path.exists(video_path):
         time.sleep(2)
         if video_path.endswith(".ts"):
-            # USB/DropCam: rotation is stamped during the lossless TS→MP4 remux.
+            # Legacy path: only hit by .ts files from older builds still finishing
+            # up.  Rotation is stamped during the lossless TS→MP4 remux.
             video_path = _remux_to_mp4(video_path, was_usb=was_usb,
                                        usb_rec_dir=usb_rec_dir, rotation=saved_rotation)
         elif video_path.endswith(".mp4") and saved_rotation:
-            # RadCam: GStreamer wrote the .mp4 directly, so stamp rotation now.
+            # DropCam and RadCam both write the .mp4 directly, so stamp rotation now.
             video_path = _apply_rotation_metadata_mp4(video_path, saved_rotation)
         dur, st = get_video_duration(video_path)
         if dur and ass_path and os.path.exists(ass_path):

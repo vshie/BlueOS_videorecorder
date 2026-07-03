@@ -5,7 +5,7 @@ A BlueOS extension that turns a Raspberry Pi 4 into a standalone, deployable dro
 ## Features
 
 - **Auto-recording** with configurable delay, duration, and servo movement plans ("recipes")
-- **H264 USB camera** recording to power-cut-safe `.ts` (MPEG-TS) container
+- **H264 USB camera** recording to power-cut-safe fragmented `.mp4` (ready to play on stop, no remux)
 - **Still capture mode** at configurable intervals (0.1s resolution)
 - **Camera tilt servo** control (1000-2000 us PWM on GPIO 18)
 - **Lumen light** control via servo PWM (GPIO 13)
@@ -137,7 +137,7 @@ When retrieving a deployed camera, the LED tells you exactly what state the syst
 | **Slow red flash** | Recording | Video or stills capture is in progress. This is the default; recipes can customize the color and blink rate. |
 | **Fast yellow flash** | Warning | A problem occurred: recording file not growing, disk full, USB storage disconnected, or scheduler error. Recording may have stopped. |
 | **Very fast red flash** (6&nbsp;Hz, full brightness) | Low battery | Battery voltage dropped below the `low_voltage` threshold (default 13.0&nbsp;V). Overrides every other LED state until voltage rises above `clear_voltage` (default 13.2&nbsp;V, 0.2&nbsp;V hysteresis). **Recording is not stopped** — the alarm is advisory only, so recipes keep running while the LED signals the low-power condition. Thresholds configurable in `config.json` under the `"battery"` block. |
-| **Slow green flash** | Processing | Recording has stopped and the system is remuxing TS→MP4, or transferring files between USB and SD card. Do not remove power or USB drive. |
+| **Slow green flash** | Processing | Recording has stopped and the system is applying rotation metadata, transferring files between USB and SD card, or remuxing a legacy TS→MP4 file. Do not remove power or USB drive. |
 | **Solid blue** | Complete | A scheduled recording has finished and all processing is done. Safe to power off or retrieve the USB drive. |
 
 **Retrieval lifecycle:** Off → Breathing blue → Slow flash (recording) → Slow green flash (processing) → Solid blue (done — safe to retrieve).
@@ -162,7 +162,7 @@ The Raspberry Pi does not have a real-time clock (RTC). Without internet access,
 
 ## 6. Recording Details
 
-- Video is recorded as MPEG-TS during capture (resilient to power cuts), then automatically remuxed to **.mp4** when recording stops for maximum player compatibility.
+- Video is recorded directly to a fragmented **.mp4** during capture. A self-contained fragment is flushed every 5 seconds and the file header is written up front, so the recording stays resilient to power cuts (a crash loses at most the final ~5 s fragment) while being ready to play the moment recording stops — no TS→MP4 remux needed.
 - Still capture mode saves JPEG frames at the configured interval.
 - Subtitle files (.ass) are generated alongside video recordings with system telemetry data.
 - Recording stops automatically if disk space drops below **1 GB**.
@@ -179,5 +179,5 @@ The Raspberry Pi does not have a real-time clock (RTC). Without internet access,
 - **Camera not detected:** Ensure the USB camera is connected and appears as `/dev/video2`. Replug and restart the extension.
 - **Servo not moving:** Verify wiring and that the pigpio daemon is running inside the container. Check extension logs.
 - **LED not lighting:** Ensure the WS2812 data line is on GPIO 10 and shares a ground with the Pi.
-- **Recordings empty or corrupt:** Check disk space. If power was lost during recording, a .ts file may remain (not yet remuxed to .mp4) but is still playable.
+- **Recordings empty or corrupt:** Check disk space. Recordings are fragmented .mp4 files that stay playable even if power was lost mid-recording (only the final ~5 s fragment is lost). Legacy .ts files from older builds are auto-remuxed to .mp4 on next start.
 - **Extension logs:** View logs from the BlueOS Extension Manager or run `docker logs blueos-videorecorder`.
