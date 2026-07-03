@@ -2528,6 +2528,7 @@ def _boot():
         disk_free_fn=get_disk_free_mb,
         hw=hw,
         capture_still_fn=_sweep_snapshot,
+        log_event_fn=log_event,
     )
 
     hw.led_idle()

@@ -43,6 +43,7 @@ class Scheduler:
         self._stop_recording_fn = None
         self._get_disk_free_fn = None
         self._capture_still_fn = None
+        self._log_event_fn = None
         self._hw = None
         self._state = "idle"
         self._lock = threading.Lock()
@@ -51,12 +52,27 @@ class Scheduler:
         self._release_thread = None
         self._winch_thread = None
 
-    def configure(self, *, start_fn, stop_fn, disk_free_fn, hw, capture_still_fn=None):
+    def configure(self, *, start_fn, stop_fn, disk_free_fn, hw,
+                  capture_still_fn=None, log_event_fn=None):
         self._start_recording_fn = start_fn
         self._stop_recording_fn = stop_fn
         self._get_disk_free_fn = disk_free_fn
         self._capture_still_fn = capture_still_fn
+        # Inject main's log_event so scheduler-thread events land in the active
+        # recording's events.ndjson.  Re-importing main here would load a second
+        # module copy (main.py runs as __main__), whose current_events_file is
+        # always None, silently dropping every winch/release event.
+        self._log_event_fn = log_event_fn
         self._hw = hw
+
+    def _log(self, event, detail=""):
+        """Best-effort event log via the injected main.log_event."""
+        if not self._log_event_fn:
+            return
+        try:
+            self._log_event_fn(event, detail)
+        except Exception as e:
+            logger.debug(f"scheduler log_event failed: {e}")
 
     def start(self, recipe):
         """Begin the auto-start sequence for the given recipe dict."""
@@ -300,26 +316,18 @@ class Scheduler:
             )
 
             def _on_done(result):
-                try:
-                    import main
-                    detail = (
-                        f"outcome={result['outcome']} "
-                        f"delivered={result['delivered']}/{result['target']} "
-                        f"elapsed={result['elapsed_s']}s "
-                        f"sensor_ok={result['sensor_available']}"
-                    )
-                    main.log_event("release_by_rotations_done", detail)
-                except Exception as e:
-                    logger.warning(f"release event log failed: {e}")
-
-            try:
-                import main
-                main.log_event(
-                    "release_by_rotations_started",
-                    f"target={RELEASE_ROTATION_CAP} cap={RELEASE_MAX_DURATION_S}s",
+                detail = (
+                    f"outcome={result['outcome']} "
+                    f"delivered={result['delivered']}/{result['target']} "
+                    f"elapsed={result['elapsed_s']}s "
+                    f"sensor_ok={result['sensor_available']}"
                 )
-            except Exception:
-                pass
+                self._log("release_by_rotations_done", detail)
+
+            self._log(
+                "release_by_rotations_started",
+                f"target={RELEASE_ROTATION_CAP} cap={RELEASE_MAX_DURATION_S}s",
+            )
             self._hw.release_run_for_rotations(
                 RELEASE_UNWIND_US, RELEASE_ROTATION_CAP, RELEASE_MAX_DURATION_S,
                 on_complete=_on_done,
@@ -359,16 +367,12 @@ class Scheduler:
         pauses = max(1, 2 * profiles)
         pause_s = stationary_s / pauses
 
-        try:
-            import main
-            main.log_event(
-                "winch_started",
-                f"profiles={profiles} rotations={rotations} "
-                f"leg_s={leg_s:.1f} pause_s={pause_s:.1f} "
-                f"start_delay_s={start_delay_s:.0f}",
-            )
-        except Exception:
-            pass
+        self._log(
+            "winch_started",
+            f"profiles={profiles} rotations={rotations} "
+            f"leg_s={leg_s:.1f} pause_s={pause_s:.1f} "
+            f"start_delay_s={start_delay_s:.0f}",
+        )
 
         self._hw.winch_begin()
         try:
@@ -384,11 +388,8 @@ class Scheduler:
                     return
                 # Unwind leg
                 self._hw.winch_set_leg(+1)
-                try:
-                    main.log_event("winch_unwind",
-                                   f"profile={i+1}/{profiles} target={rotations}")
-                except Exception:
-                    pass
+                self._log("winch_unwind",
+                          f"profile={i+1}/{profiles} target={rotations}")
                 self._hw.winch_run_leg(WINCH_UNWIND_US, rotations,
                                        leg_cap_s, stop_event=self._stop)
                 if self._stop.is_set():
@@ -396,33 +397,24 @@ class Scheduler:
 
                 # Pause
                 self._hw.winch_set_pause()
-                try:
-                    main.log_event("winch_pause",
-                                   f"profile={i+1} after=unwind "
-                                   f"pause_s={pause_s:.1f}")
-                except Exception:
-                    pass
+                self._log("winch_pause",
+                          f"profile={i+1} after=unwind "
+                          f"pause_s={pause_s:.1f}")
                 if self._stop.wait(pause_s):
                     return
                 if self._hw.is_winch_active() and self._hw.get_winch_state() == "error":
-                    try:
-                        main.log_event(
-                            "winch_pause_rotation_error",
-                            f"profile={i+1} after=unwind "
-                            f"turns={self._hw.get_winch_turns()}",
-                        )
-                    except Exception:
-                        pass
+                    self._log(
+                        "winch_pause_rotation_error",
+                        f"profile={i+1} after=unwind "
+                        f"turns={self._hw.get_winch_turns()}",
+                    )
 
                 if self._stop.is_set():
                     return
                 # Wind leg
                 self._hw.winch_set_leg(-1)
-                try:
-                    main.log_event("winch_wind",
-                                   f"profile={i+1}/{profiles} target={rotations}")
-                except Exception:
-                    pass
+                self._log("winch_wind",
+                          f"profile={i+1}/{profiles} target={rotations}")
                 self._hw.winch_run_leg(WINCH_WIND_US, rotations,
                                        leg_cap_s, stop_event=self._stop)
                 if self._stop.is_set():
@@ -430,32 +422,25 @@ class Scheduler:
 
                 # Trailing pause
                 self._hw.winch_set_pause()
-                try:
-                    main.log_event("winch_pause",
-                                   f"profile={i+1} after=wind "
-                                   f"pause_s={pause_s:.1f}")
-                except Exception:
-                    pass
+                self._log("winch_pause",
+                          f"profile={i+1} after=wind "
+                          f"pause_s={pause_s:.1f}")
                 if self._stop.wait(pause_s):
                     return
                 if self._hw.is_winch_active() and self._hw.get_winch_state() == "error":
-                    try:
-                        main.log_event(
-                            "winch_pause_rotation_error",
-                            f"profile={i+1} after=wind "
-                            f"turns={self._hw.get_winch_turns()}",
-                        )
-                    except Exception:
-                        pass
+                    self._log(
+                        "winch_pause_rotation_error",
+                        f"profile={i+1} after=wind "
+                        f"turns={self._hw.get_winch_turns()}",
+                    )
         except Exception as e:
             logger.error(f"Winch loop failed: {e}", exc_info=True)
         finally:
             try:
                 turns = self._hw.get_winch_turns()
                 state = self._hw.get_winch_state()
-                import main
-                main.log_event("winch_finished",
-                               f"turns={turns} final_state={state}")
+                self._log("winch_finished",
+                          f"turns={turns} final_state={state}")
             except Exception:
                 pass
             try:
