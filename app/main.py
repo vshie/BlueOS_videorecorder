@@ -1232,7 +1232,7 @@ def _apply_rotation_metadata_mp4(mp4_path, rotation):
 
     show_led = not recording
     if show_led:
-        hw.flash_led(0, 20, 0, rate_hz=0.5)
+        hw.led_processing()
     remux_filename = os.path.basename(mp4_path)
     remux_stage = f"Applying {deg}° rotation metadata"
     remux_progress = 0
@@ -1309,7 +1309,7 @@ def _remux_to_mp4(ts_path, was_usb=False, usb_rec_dir=None, rotation=0):
 
     show_led = not recording
     if show_led:
-        hw.flash_led(0, 20, 0, rate_hz=0.5)
+        hw.led_processing()
 
     ts_size = 0
     try:

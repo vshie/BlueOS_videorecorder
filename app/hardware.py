@@ -318,6 +318,12 @@ class HardwareController:
     def led_recording(self):
         self.flash_led(20, 0, 0, rate_hz=0.5)
 
+    def led_processing(self):
+        """Slow yellow flash while post-processing (rotation metadata, file
+        transfer, or a legacy TS→MP4 remux).  Yellow — not green — signals that
+        the unit is busy and should not be interrupted / powered off yet."""
+        self.flash_led(20, 14, 0, rate_hz=0.5)
+
     def led_warning(self):
         self.flash_led(255, 180, 0, rate_hz=2.0)
 

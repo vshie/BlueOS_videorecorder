@@ -137,10 +137,10 @@ When retrieving a deployed camera, the LED tells you exactly what state the syst
 | **Slow red flash** | Recording | Video or stills capture is in progress. This is the default; recipes can customize the color and blink rate. |
 | **Fast yellow flash** | Warning | A problem occurred: recording file not growing, disk full, USB storage disconnected, or scheduler error. Recording may have stopped. |
 | **Very fast red flash** (6&nbsp;Hz, full brightness) | Low battery | Battery voltage dropped below the `low_voltage` threshold (default 13.0&nbsp;V). Overrides every other LED state until voltage rises above `clear_voltage` (default 13.2&nbsp;V, 0.2&nbsp;V hysteresis). **Recording is not stopped** — the alarm is advisory only, so recipes keep running while the LED signals the low-power condition. Thresholds configurable in `config.json` under the `"battery"` block. |
-| **Slow green flash** | Processing | Recording has stopped and the system is applying rotation metadata, transferring files between USB and SD card, or remuxing a legacy TS→MP4 file. Do not remove power or USB drive. |
+| **Slow yellow flash** | Processing | Recording has stopped and the system is applying rotation metadata, transferring files between USB and SD card, or remuxing a legacy TS→MP4 file. Do not remove power or USB drive. |
 | **Solid blue** | Complete | A scheduled recording has finished and all processing is done. Safe to power off or retrieve the USB drive. |
 
-**Retrieval lifecycle:** Off → Breathing blue → Slow flash (recording) → Slow green flash (processing) → Solid blue (done — safe to retrieve).
+**Retrieval lifecycle:** Off → Breathing blue → Slow flash (recording) → Slow yellow flash (processing) → Solid blue (done — safe to retrieve).
 
 Recipe recordings can customize the recording LED color (red, green, blue, yellow, cyan, magenta, white) and blink rate (solid, slow, fast). The other states (idle, warning, processing, complete) are always the same regardless of recipe settings. The low-battery alarm is a special high-priority state that overrides all of the above — recording continues, only the LED indicator changes.
 
