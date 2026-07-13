@@ -212,42 +212,50 @@ class HardwareController:
         logger.info("Hardware controller initialized")
 
     def _init_servo(self):
+        # Bring the servo backend up first. On the DeckHand PCB this
+        # runs the PCA9685 init sequence which broadcasts ALL_LED_OFF
+        # SHUT before touching PRE_SCALE, so no channel can twitch
+        # during reconfig even while ~OE is still enabled.
         self._servo = make_servo_backend()
-        # Enable the PCA9685 output stage on the DeckHand PCB. GPIO 4 is
-        # wired to the PCA9685 ~OE pin (10 k pull-up on-board), so unless
-        # we drive it LOW every servo channel stays high-Z and no motion
-        # happens. Safe no-op on legacy direct-PWM boards (no ~OE line)
-        # and on dev machines (get_gpio_line() returns None).
         line = get_gpio_line()
+
+        # Preset the safety-critical channels to their idle pulse widths
+        # BEFORE dropping ~OE. The PCA9685's SHUT state (set in
+        # _init_chip) holds every output LOW at the pin; writing a
+        # non-SHUT pulse to a specific channel clears the SHUT bit for
+        # that channel only. Doing this before releasing ~OE means the
+        # outputs go straight from "held LOW by ~OE" to "already at
+        # their safe defaults" — the servos never see uncommanded
+        # pulses.  Skipped if the backend didn't come up (sim mode).
+        if self._servo.available:
+            try:
+                # Lumen light: 1000 us = off. A floating/undriven signal
+                # on this pin makes the light come on at full brightness.
+                self._servo.set_pulse(LIGHT_GPIO, SERVO_MIN_US)
+            except Exception as e:
+                logger.warning(f"Could not preset light off: {e}")
+            try:
+                # Continuous-rotation release drive: 1500 us = stop.
+                self._servo.set_pulse(RELEASE_GPIO, RELEASE_STOP_US)
+            except Exception as e:
+                logger.warning(f"Could not preset release servo stop: {e}")
+            try:
+                # Camera tilt servo: 1500 us = centre.
+                self._servo.set_pulse(SERVO_GPIO, SERVO_MID_US)
+            except Exception as e:
+                logger.warning(f"Could not preset tilt servo center: {e}")
+
+        # Now enable the PCA9685 output stage. GPIO 4 is wired to
+        # ~OE (10 k pull-up on-board), so until we drive it LOW every
+        # channel is forced LOW regardless of the PWM registers.
+        # Safe no-op on legacy direct-PWM boards (no ~OE line) and on
+        # dev machines (get_gpio_line() returns None).
         if line is not None:
             try:
                 line.claim_output(PCA9685_OE_GPIO, 0)
                 logger.info(f"PCA9685 ~OE (GPIO {PCA9685_OE_GPIO}) driven LOW (outputs enabled)")
             except Exception as e:
                 logger.warning(f"Could not drive PCA9685 ~OE low: {e}")
-        if not self._servo.available:
-            return
-        # Drive the Lumen light to its "off" pulse (1000 us) immediately,
-        # because a floating/undriven signal on this pin makes the light
-        # come on at full brightness.
-        try:
-            self._servo.set_pulse(LIGHT_GPIO, SERVO_MIN_US)
-        except Exception as e:
-            logger.warning(f"Could not preset light off: {e}")
-        # Park the release servo at its stop pulse (1500 us) on boot so
-        # the continuous-rotation drive is stationary while idle.
-        try:
-            self._servo.set_pulse(RELEASE_GPIO, RELEASE_STOP_US)
-        except Exception as e:
-            logger.warning(f"Could not preset release servo stop: {e}")
-        # Center the camera tilt servo on boot. Without this, the channel
-        # produces no pulses until something calls set_servo(), so the
-        # shaft is uncommanded and may sit at an arbitrary angle even
-        # though telemetry reports the cached default of 1500 us.
-        try:
-            self._servo.set_pulse(SERVO_GPIO, SERVO_MID_US)
-        except Exception as e:
-            logger.warning(f"Could not preset tilt servo center: {e}")
 
     def _init_led(self):
         self._led = make_led_backend(LED_GPIO, LED_COUNT, LED_BRIGHTNESS)
