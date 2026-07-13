@@ -16,8 +16,12 @@ Background polling thread that:
 Wiring: on the DeckHand PCB the Daly BMS is wired to UART4 on the Pi
 (GPIO 8 TX, GPIO 9 RX) through an SN65HVD75 RS485 transceiver. GPIO 11
 drives DE/~RE (tied together): HIGH before writing, LOW to receive. The
-default serial_port is /dev/ttyAMA4 and the direction line is toggled by
-a5_bus._read() via a callback injected by _connect().
+direction line is toggled by a5_bus._read() via a callback injected by
+_connect(). The default serial_port is "auto" — the port scanner uses
+the sysfs of_node MMIO address to find whichever /dev/ttyAMA<N> is
+currently mapped to UART4 hardware (0x7e201800 on BCM2711), because
+the ttyAMA index depends on device-tree overlay load order and is not
+fixed across systems.
 """
 
 from __future__ import annotations
@@ -36,11 +40,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
     # DeckHand PCB wires the BMS to UART4 (GPIO 8/9) through an SN65HVD75
-    # RS485 transceiver; that surfaces as /dev/ttyAMA4 on the Pi when
-    # `dtoverlay=uart4` is enabled in /boot/firmware/config.txt. "auto"
-    # scans the Pi's UART devices first (ttyAMA*), then USB serial
-    # adapters, so mixed / legacy setups still work.
-    "serial_port": "/dev/ttyAMA4",
+    # RS485 transceiver. The Linux tty name for a given hardware UART is
+    # NOT fixed on the Pi — it depends on the order in which `dtoverlay=
+    # uartN` overlays enumerate at boot, so UART4 can appear as anything
+    # from /dev/ttyAMA1 to /dev/ttyAMA4 depending on which other UART
+    # overlays are enabled in /boot/config.txt. "auto" (the default)
+    # discovers UART4 by matching the sysfs of_node MMIO address
+    # (7e201800) first, then probes any other Pi UARTs and USB serial
+    # adapters so mixed / legacy setups still work.
+    "serial_port": "auto",
     "board_number": 1,
     "baud_rate": 9600,
     "serial_timeout_s": 0.5,
@@ -334,6 +342,15 @@ class BatteryMonitor:
         msg = "; ".join(errors) if errors else "no candidates probed"
         raise RuntimeError(f"No Daly BMS found ({msg})")
 
+    # Remembers which DE GPIOs we've already logged the "direction control
+    # on GPIO N" message for, so a reconnect loop doesn't spam it once per
+    # probe cycle. Also acts as a "we've already claimed this pin" flag —
+    # GpioLine.claim_output() is idempotent, but re-logging is not.
+    _de_toggle_logged: set[int] = set()
+    # Same idea for the UART4 discovery message: log it once per resolved
+    # tty path so a probe/reconnect loop doesn't spam the same info line.
+    _uart4_logged: str | None = None
+
     @staticmethod
     def _make_de_toggle(cfg: dict[str, Any]) -> Callable[[bool], None] | None:
         """Build a callback that toggles the RS485 driver-enable GPIO.
@@ -367,7 +384,9 @@ class BatteryMonitor:
         except Exception as exc:
             logger.warning("RS485 DE (GPIO %d) claim failed: %s", de_gpio_int, exc)
             return None
-        logger.info("RS485 half-duplex direction control on GPIO %d", de_gpio_int)
+        if de_gpio_int not in BatteryMonitor._de_toggle_logged:
+            logger.info("RS485 half-duplex direction control on GPIO %d", de_gpio_int)
+            BatteryMonitor._de_toggle_logged.add(de_gpio_int)
 
         def _toggle(transmit: bool) -> None:
             try:
@@ -500,14 +519,60 @@ class BatteryMonitor:
         return voltage
 
     @staticmethod
+    def _find_pi_uart_by_mmio(mmio_hex_addresses: tuple[str, ...]) -> str | None:
+        """Return the /dev/ttyAMA<N> currently mapped to one of the given
+        UART hardware MMIO addresses, or None if no match is found.
+
+        Linux enumerates the Pi's PL011 UARTs into /dev/ttyAMA<N> in the
+        order the device-tree overlays are loaded, so a given UART
+        controller does NOT keep the same tty name across systems. The
+        stable identifier is the sysfs of_node symlink, which points to
+        the device-tree node named ``serial@<mmio>``. We prefer the
+        first match in ``mmio_hex_addresses`` so callers can list
+        multiple candidates in priority order (Pi 4 first, then Pi 5).
+
+        Example on a Pi 4 with ``dtoverlay=uart3,uart4,uart5`` enabled:
+            ttyAMA0 -> serial@7e201000   (primary console UART0)
+            ttyAMA1 -> serial@7e201600   (UART3)
+            ttyAMA2 -> serial@7e201800   (UART4)  <-- matches on 7e201800
+            ttyAMA3 -> serial@7e201a00   (UART5)
+        """
+        import glob
+
+        mapping: dict[str, str] = {}  # mmio -> /dev/ttyAMA<N>
+        for tty_path in sorted(glob.glob("/sys/class/tty/ttyAMA*")):
+            of_link = os.path.join(tty_path, "device", "of_node")
+            try:
+                target = os.path.realpath(of_link)
+            except OSError:
+                continue
+            base = os.path.basename(target).lower()  # e.g. "serial@7e201800"
+            if "@" not in base:
+                continue
+            mmio = base.split("@", 1)[1]
+            dev_path = f"/dev/{os.path.basename(tty_path)}"
+            mapping.setdefault(mmio, dev_path)
+
+        for wanted in mmio_hex_addresses:
+            hit = mapping.get(wanted.lower())
+            if hit and os.path.exists(hit):
+                return hit
+        return None
+
+    @staticmethod
     def _iter_candidate_ports() -> list[str]:
         """Enumerate serial device paths to probe, Pi-UART first.
 
-        On the DeckHand PCB the BMS lives on /dev/ttyAMA4 (UART4), so we
-        try Pi hardware UARTs before USB adapters. Combines pyserial's
-        `list_ports.comports()` with a direct glob over /dev so we don't
-        miss devices that pyserial's enumeration drops (some adapters
-        lack udev info inside containers).
+        On the DeckHand PCB the BMS lives on Pi UART4 (GPIO 8/9). Because
+        the /dev/ttyAMA<N> index depends on device-tree overlay load
+        order, we resolve UART4 by MMIO address (7e201800 on BCM2711,
+        matches the same UART controller on BCM2712/RP1 legacy layout)
+        and put that tty first. We then fall back to all remaining ttyAMA
+        devices, /dev/serial0, and finally USB serial adapters, so legacy
+        setups (BMS on ttyAMA0 / USB-RS485) still auto-detect. Combines
+        pyserial's ``list_ports.comports()`` with a direct glob over /dev
+        so we don't miss devices that pyserial's enumeration drops (some
+        adapters lack udev info inside containers).
         """
         import glob
 
@@ -520,11 +585,22 @@ class BatteryMonitor:
                 return
             seen.append(path)
 
-        # Pi hardware UARTs first — /dev/ttyAMA4 is the DeckHand default,
-        # /dev/serial0 is a symlink to whichever UART is aliased to the
-        # header (useful on Pi 4/Pi 5 setups that predate the DeckHand
-        # migration).
-        for path in ("/dev/ttyAMA4", "/dev/serial0"):
+        # Prefer the actual UART4 hardware, wherever the kernel put it.
+        uart4 = BatteryMonitor._find_pi_uart_by_mmio(("7e201800",))
+        if uart4:
+            if BatteryMonitor._uart4_logged != uart4:
+                logger.info("BMS auto-scan: resolved UART4 hardware to %s", uart4)
+                BatteryMonitor._uart4_logged = uart4
+            _add(uart4)
+        elif BatteryMonitor._uart4_logged != "__missing__":
+            logger.info(
+                "BMS auto-scan: UART4 MMIO (0x7e201800) not exposed as any "
+                "ttyAMA* — check that 'dtoverlay=uart4' is set in "
+                "/boot/config.txt on the host and the Pi has been rebooted."
+            )
+            BatteryMonitor._uart4_logged = "__missing__"
+
+        for path in ("/dev/serial0",):
             if os.path.exists(path):
                 _add(path)
         for pattern in ("/dev/ttyAMA*",):
