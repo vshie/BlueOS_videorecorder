@@ -107,7 +107,14 @@ class PackInfo:
 
 
 class BoardDalyBMS(DalyBMS):
-    """DalyBMS that targets a specific board number on a shared RS485 bus."""
+    """DalyBMS that targets a specific board number on a shared RS485 bus.
+
+    Supports half-duplex RS485 transceivers (SN65HVD75 on the DeckHand PCB)
+    via ``set_direction_control()``: a caller supplies a ``toggle(transmit)``
+    callback that drives the transceiver's DE/~RE pin, and this class flips
+    it HIGH before each write, waits for the frame to drain out of the UART
+    FIFO, then flips it back LOW to receive.
+    """
 
     def __init__(
         self,
@@ -121,6 +128,55 @@ class BoardDalyBMS(DalyBMS):
         self.host_address = board_to_host(board_number)
         self.baudrate = baudrate
         self.serial_timeout = serial_timeout
+        # Half-duplex direction control (populated by set_direction_control()).
+        self._de_toggle: Any = None
+        self._de_release_delay_s: float = 0.001
+
+    def set_direction_control(
+        self,
+        toggle: Any,
+        release_delay_s: float = 0.001,
+    ) -> None:
+        """Register a driver-enable callback for half-duplex RS485.
+
+        ``toggle(transmit: bool)`` is called with ``True`` immediately
+        before ``serial.write()`` and ``False`` after the frame has been
+        flushed to the wire and the extra release delay has elapsed.
+        ``release_delay_s`` covers the pyserial ``flush()`` + UART shift-
+        register drain time — 15 A5 bytes at 9600 baud take ~16 ms end to
+        end, and ``flush()`` blocks until the last byte is on the wire, so
+        a small extra pad (~1 ms) is enough to avoid clipping the trailing
+        CRC. Pass ``None`` to disable direction control (auto-direction
+        transceivers, USB adapters).
+        """
+        self._de_toggle = toggle
+        self._de_release_delay_s = max(0.0, float(release_delay_s))
+
+    def _write_frame(self, message_bytes: bytes) -> int:
+        """Send a frame with half-duplex DE handling if configured.
+
+        Returns the number of bytes written (same contract as
+        pyserial.Serial.write). When a DE toggle is registered, drives
+        the transceiver into transmit before the write, waits for
+        ``flush()`` + the release delay to guarantee the last stop bit
+        has left the shift register, then hands the bus back to the
+        receiver.
+        """
+        toggle = self._de_toggle
+        if toggle is None:
+            return self.serial.write(message_bytes)
+        toggle(True)
+        try:
+            written = self.serial.write(message_bytes)
+            try:
+                self.serial.flush()
+            except Exception:
+                pass
+            if self._de_release_delay_s > 0:
+                time.sleep(self._de_release_delay_s)
+        finally:
+            toggle(False)
+        return written
 
     def connect(self, device: str) -> None:
         self.serial = serial.Serial(
@@ -187,7 +243,7 @@ class BoardDalyBMS(DalyBMS):
         self.serial.reset_input_buffer()
         self.serial.reset_output_buffer()
 
-        if not self.serial.write(message_bytes):
+        if not self._write_frame(message_bytes):
             self.logger.error("serial write failed for command %s", command)
             return False
         time.sleep(0.15 if write else 0.05)
@@ -276,7 +332,7 @@ class BoardDalyBMS(DalyBMS):
             now = time.time()
             if solicit and now >= next_solicit:
                 try:
-                    self.serial.write(self._format_message("90"))
+                    self._write_frame(self._format_message("90"))
                 except Exception as exc:
                     self.logger.debug("solicit 0x90 failed: %s", exc)
                 next_solicit = now + 0.7

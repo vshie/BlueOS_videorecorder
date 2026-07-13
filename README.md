@@ -1,34 +1,61 @@
 # DropCam - BlueOS Standalone Video Recording Extension
 
-A BlueOS extension that turns a Raspberry Pi 4 into a standalone, deployable drop-camera recording system. No Navigator autopilot required.
+A BlueOS extension that turns a Raspberry Pi 4 or Pi 5 into a standalone, deployable drop-camera recording system. No Navigator autopilot required. Runs on the DeckHand PCB (BR-103953 Rev A), which routes every servo/PWM output through a PCA9685 over I2C, brings the Daly BMS in on the Pi's onboard UART4 (RS-485 via SN65HVD75), and adds a battery-backed MCP7940N RTC so the system clock is correct on boot without internet.
 
 ## Features
 
 - **Auto-recording** with configurable delay, duration, and servo movement plans ("recipes")
 - **H264 USB camera** recording to power-cut-safe fragmented `.mp4` (ready to play on stop, no remux)
 - **Still capture mode** at configurable intervals (0.1s resolution)
-- **Camera tilt servo** control (1000-2000 us PWM on GPIO 18)
-- **Lumen light** control via servo PWM (GPIO 13)
-- **Release servo** continuous-rotation drive for surface recovery (GPIO 12)
-- **Focus / zoom / pan / external** auxiliary servo PWM channels (GPIO 20 / 26 / 16 / 19)
+- **PCA9685-driven servo outputs** (tilt, lumen light, release, focus, zoom, pan, external, spare) — identical code path on Pi 4 and Pi 5
+- **RS-485 Daly BMS** on UART4 with GPIO-driven half-duplex direction control
+- **Battery-backed RTC** (MCP7940N) — system clock is set from the RTC at boot and written back once NTP syncs
 - **RGB LED** status indicator (WS2812 NeoPixel on GPIO 10)
 - **System telemetry** subtitle overlay (CPU temp, voltage, clock, servo position, light level)
 - **Disk space guard** — stops recording when < 1 GB free
 - **Web interface** with Status, Recipes, and Setup tabs
 
-## Hardware Wiring
+## Hardware Wiring (DeckHand PCB, BR-103953 Rev A)
 
-| Component | GPIO | Physical Pin |
-|-----------|------|-------------|
-| RGB Status LED (WS2812) | GPIO 10 (SPI MOSI) | Pin 19 |
-| Camera Tilt Servo | GPIO 18 (PWM, Pin 12) | Pin 12 |
-| Lumen Light | GPIO 13 (PWM1) | Pin 33 |
-| Release Servo | GPIO 12 | Pin 32 |
-| Camera Focus | GPIO 20 | Pin 38 |
-| Zoom | GPIO 26 | Pin 37 |
-| Pan | GPIO 16 | Pin 36 |
-| External Servo | GPIO 19 | Pin 35 |
-| USB Camera | — | /dev/video2 |
+Servo/PWM outputs on the PCA9685 (I2C 0x40, J105 header):
+
+| Function | PCA9685 Channel | J105 Pin |
+|----------|-----------------|----------|
+| Camera Tilt Servo | 0 (TILT) | 1 |
+| Lumen Light | 1 (LUMEN) | 4 |
+| Release Servo | 2 (RELEASE) | 7 |
+| External Servo | 3 (EXTSERVO) | 10 |
+| Camera Focus | 4 (FOCUS) | 13 |
+| Zoom | 5 (ZOOM) | 16 |
+| Pan | 6 (PAN) | 19 |
+| Spare | 7 (SPARE) | 22 |
+
+Direct Pi connections:
+
+| Function | Pi GPIO | Pi Pin | Notes |
+|----------|---------|--------|-------|
+| RGB Status LED (WS2812) | GPIO 10 (SPI MOSI) | Pin 19 | Data line to J104 pin 3 |
+| PCA9685 output enable (~OE) | GPIO 4 | Pin 7 | Active LOW; driven low at boot to enable outputs |
+| RS-485 UART TX | GPIO 8 (UART4 TX) | Pin 24 | To SN65HVD75 DI |
+| RS-485 UART RX | GPIO 9 (UART4 RX) | Pin 21 | From SN65HVD75 RO |
+| RS-485 DE / ~RE | GPIO 11 | Pin 23 | HIGH = transmit, LOW = receive |
+| I2C-1 SDA | GPIO 2 | Pin 3 | PCA9685 (0x40) + MCP7940N RTC (0x6F) |
+| I2C-1 SCL | GPIO 3 | Pin 5 | Same bus |
+| Release-shaft rotation sensor | GPIO 20 | Pin 38 | Falling-edge alert, via J104 pin 4 |
+| USB Camera | — | /dev/video2 | H264 USB camera |
+
+## Host Prerequisites (BlueOS Pi)
+
+Edit `/boot/firmware/config.txt` on the Pi and ensure the following lines exist, then reboot:
+
+```
+dtparam=i2c_arm=on
+dtoverlay=uart4
+```
+
+`i2c_arm` exposes `/dev/i2c-1` (PCA9685 + RTC). `dtoverlay=uart4` maps UART4 to GPIO 8/9 and creates `/dev/ttyAMA4` for the Daly BMS. GPIO 11 stays available as a plain GPIO for RS-485 direction control.
+
+The MCP7940N is driven by the extension in Python (no `dtoverlay=i2c-rtc` needed).
 
 ## Quick Start
 
@@ -96,35 +123,29 @@ Connected cameras must have their streams **removed** from the BlueOS Video Stre
 
 ## 2. Hardware Wiring
 
-| Component | GPIO | Physical Pin | Notes |
-|-----------|------|--------------|-------|
-| RGB Status LED (WS2812) | GPIO 10 (SPI MOSI) | Pin 19 | Single NeoPixel data line |
-| Lumen Light | GPIO 13 (PWM1) | Pin 33 | 1000-2000 µs servo PWM. Modes: always on, pause points only, or snapshot only |
-| Camera Tilt Servo | GPIO 18 | Pin 12 | 1000-2000 µs PWM. Centered at 1500 µs on boot. On Pi 5, driven by the RP1 hardware-PWM peripheral (jitter-free) — requires `dtoverlay=pwm-2chan` in config.txt (see Pi 5 notes below) |
-| External Servo | GPIO 19 | Pin 35 | 1000-2000 µs PWM. On Pi 5, also hardware-PWM (channel 3) under `dtoverlay=pwm-2chan` |
-| Release Servo | GPIO 12 | Pin 32 | Continuous-rotation drive: 1500 µs = stop, 1000 µs = wind, 2000 µs = unwind (frees unit to surface). Held at 1500 µs from boot |
-| Camera Focus | GPIO 20 | Pin 38 | 1000-2000 µs servo-style PWM |
-| Zoom | GPIO 26 | Pin 37 | 1000-2000 µs servo-style PWM |
-| Pan | GPIO 16 | Pin 36 | 1000-2000 µs servo-style PWM |
-| USB Camera | /dev/video2 | — | H264 USB camera (1080p 30fps) |
+The DeckHand PCB (BR-103953 Rev A) sits on the Pi's 40-pin header. All servo/light/motor outputs come off the PCA9685 (I2C 0x40) via header **J105**, and the Daly BMS connects to header **J108** (RS-485). Refer to the tables in the top of this README for the full pinout — the notes below focus on runtime behaviour:
 
-All servo/light/PWM signals share a common ground with the Pi. Servos, lights, and motors require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header.
+| Function | Notes |
+|----------|-------|
+| RGB Status LED (WS2812) | GPIO 10 / SPI MOSI. Single NeoPixel data line to J104 pin 3. |
+| Lumen Light | PCA9685 channel 1 (J105 pin 4). 1000-2000 µs servo PWM. Modes: always on, pause points only, or snapshot only. |
+| Camera Tilt Servo | PCA9685 channel 0 (J105 pin 1). 1000-2000 µs PWM. Centered at 1500 µs on boot. |
+| External Servo | PCA9685 channel 3 (J105 pin 10). 1000-2000 µs PWM. |
+| Release Servo | PCA9685 channel 2 (J105 pin 7). Continuous-rotation drive: 1500 µs = stop, 1000 µs = wind, 2000 µs = unwind (frees unit to surface). Held at 1500 µs from boot. |
+| Release rotation sensor | GPIO 20 (J104 pin 4). Falling-edge alert via lgpio; 100 ms glitch filter + 250 ms software debounce. |
+| Camera Focus | PCA9685 channel 4 (J105 pin 13). 1000-2000 µs servo PWM. |
+| Zoom | PCA9685 channel 5 (J105 pin 16). 1000-2000 µs servo PWM. |
+| Pan | PCA9685 channel 6 (J105 pin 19). 1000-2000 µs servo PWM. |
+| Spare | PCA9685 channel 7 (J105 pin 22). Unused / reserved. |
+| Daly BMS (RS-485) | UART4 (GPIO 8 TX / GPIO 9 RX) + GPIO 11 DE/~RE, wired through SN65HVD75. Terminates 120 Ω via SJ101 (unpopulated by default). Connector J108. |
+| MCP7940N RTC | I2C 0x6F on the same bus as the PCA9685. Battery-backed by CR1220 on BT101. |
+| USB Camera | H264 USB camera (1080p 30fps) at /dev/video2. |
 
-### Raspberry Pi 5 — jitter-free servo (hardware PWM)
+All servo/light/PWM signals share a common ground with the Pi. Servos, lights, and motors require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header. The PCA9685 outputs are 3.3 V through 220 Ω series resistors (RN101/RN102) — this is enough drive for standard servo signal inputs but not for direct MOSFET gate switching.
 
-The Pi 5's RP1 I/O controller cannot do DMA-timed PWM the way `pigpio` did on the Pi 4, so a software-timed servo pulse visibly jitters. To get a clean, jitter-free tilt servo on the Pi 5, the extension drives **GPIO 18** (and the external servo on **GPIO 19**) through the RP1 **hardware-PWM** peripheral. This requires the PWM overlay to be enabled on the host:
+### Pi 4 vs Pi 5
 
-1. Edit `/boot/firmware/config.txt` and add a line:
-
-```
-dtoverlay=pwm-2chan
-```
-
-2. Reboot the Pi.
-
-This maps GPIO 18 → PWM channel 2 and GPIO 19 → PWM channel 3 on the RP1. The extension auto-detects the hardware-PWM chip at startup; if the overlay is missing it falls back to software PWM (functional but jittery). The container must run privileged so `/sys/class/pwm` is writable (already set in the extension permissions). The active servo backend is reported in `/telemetry` under `gpio_backends` (e.g. `rp1-hw-pwm+lgpio`).
-
-The remaining servo-style outputs (release, focus, zoom, pan, light) stay on software PWM, which is fine for their use (release is a continuous-rotation drive; the others are infrequent, low-precision moves).
+Because every servo/PWM output runs off the PCA9685 over I2C, the same driver code path is used on both boards. There is no per-board `dtoverlay` requirement beyond `i2c_arm=on` and `uart4`. The `pigpiod` daemon is still started in the container as a defensive fallback for legacy direct-PWM builds, but is not required on the DeckHand PCB. The active servo backend is reported in `/telemetry` under `gpio_backends` — on the DeckHand PCB you should see `"servo": "pca9685"`.
 
 ## 3. LED Status Indicators
 
@@ -146,10 +167,14 @@ Recipe recordings can customize the recording LED color (red, green, blue, yello
 
 ## 4. Time Synchronization
 
-The Raspberry Pi does not have a real-time clock (RTC). Without internet access, the system time resets on each boot. To synchronize the clock:
+The DeckHand PCB includes a battery-backed MCP7940N RTC on I2C 0x6F. At container startup the extension reads the RTC and, if the year is plausible (>= 2024), sets the Pi system clock via `clock_settime` before anything timestamps a file. Once the OS reports that NTP has synchronised the clock (or the browser sync path completes), a background thread writes the corrected time back to the RTC so a subsequent power cycle boots with an accurate clock.
+
+The RTC's runtime state (present, battery backup, oscillator running, last sync/write time) is surfaced under `rtc` in `/telemetry`.
+
+If the RTC is missing (dev machine, legacy board) or the coin cell is dead the extension falls back to the previous behaviour:
 
 - Connect a phone or laptop to the BlueOS WiFi AP.
-- Open this DropCam page in a browser — the system clock will be synchronized to your device's time automatically by BlueOS.
+- Open this DropCam page in a browser — BlueOS will sync the system clock to your device's time.
 - A yellow banner on the Status tab warns when the clock is not synchronized.
 
 ## 5. Recording Plans (Recipes)
@@ -177,7 +202,9 @@ The Raspberry Pi does not have a real-time clock (RTC). Without internet access,
 ## 8. Troubleshooting
 
 - **Camera not detected:** Ensure the USB camera is connected and appears as `/dev/video2`. Replug and restart the extension.
-- **Servo not moving:** Verify wiring and that the pigpio daemon is running inside the container. Check extension logs.
+- **Servo not moving:** Confirm I2C is enabled on the host (`dtparam=i2c_arm=on`) and that `i2cdetect -y 1` shows both `0x40` (PCA9685) and `0x6f` (RTC). Check that `/telemetry` reports `"servo": "pca9685"`. If it shows `sim`, the extension could not open the I2C bus. GPIO 4 (~OE) must be pulled LOW at boot; if it is stuck HIGH, every channel stays high-Z and no servo moves.
+- **BMS not detected:** Confirm `dtoverlay=uart4` is in `/boot/firmware/config.txt` and that `/dev/ttyAMA4` exists. `/battery` should report `serial_port: "/dev/ttyAMA4"`. If you replaced the shield with a USB adapter, set `serial_port` to `"auto"` in `dropcam_config.json` and clear `rs485_de_gpio` to null.
+- **RTC time wrong on boot:** Check the CR1220 coin cell (BT101) and `rtc.battery_backup` / `rtc.oscillator_running` in `/telemetry`. `rtc.power_failed` = true means the RTC lost power since the last sync — the extension clears the flag once the system clock is set.
 - **LED not lighting:** Ensure the WS2812 data line is on GPIO 10 and shares a ground with the Pi.
 - **Recordings empty or corrupt:** Check disk space. Recordings are fragmented .mp4 files that stay playable even if power was lost mid-recording (only the final ~5 s fragment is lost). Legacy .ts files from older builds are auto-remuxed to .mp4 on next start.
 - **Extension logs:** View logs from the BlueOS Extension Manager or run `docker logs blueos-videorecorder`.

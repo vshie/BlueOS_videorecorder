@@ -1,5 +1,5 @@
 """
-Battery monitor for the Doris battery pack (Daly BMS over RS485-to-USB).
+Battery monitor for the Doris battery pack (Daly BMS over RS485).
 
 Background polling thread that:
   - Opens the serial port, reads a full snapshot every poll_interval_s
@@ -7,11 +7,17 @@ Background polling thread that:
   - Tracks time since last full charge via FullChargeTracker
   - Appends a CSV row per poll to a per-power-up file
         - Filename starts as an incrementing number, e.g. battery_0007.csv,
-          because the Pi has no RTC and may not have internet on boot
+          because a battery-backed RTC is not always current on boot
         - Once is_time_synced() reports True the file is renamed to
           battery_0007_YYYYMMDD_HHMMSS.csv (keeping the sequence number)
   - Drives the LED battery-low alarm with hysteresis when voltage drops
     below low_voltage and clears it once it rises above clear_voltage
+
+Wiring: on the DeckHand PCB the Daly BMS is wired to UART4 on the Pi
+(GPIO 8 TX, GPIO 9 RX) through an SN65HVD75 RS485 transceiver. GPIO 11
+drives DE/~RE (tied together): HIGH before writing, LOW to receive. The
+default serial_port is /dev/ttyAMA4 and the direction line is toggled by
+a5_bus._read() via a callback injected by _connect().
 """
 
 from __future__ import annotations
@@ -29,11 +35,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
-    # "auto" (or empty) auto-scans every /dev/ttyUSB*/ttyACM*/list_ports
-    # candidate, probes each for a Daly BMS response, and uses the first
-    # one that answers. Set to an explicit path (e.g. "/dev/ttyUSB0") to
-    # skip scanning.
-    "serial_port": "auto",
+    # DeckHand PCB wires the BMS to UART4 (GPIO 8/9) through an SN65HVD75
+    # RS485 transceiver; that surfaces as /dev/ttyAMA4 on the Pi when
+    # `dtoverlay=uart4` is enabled in /boot/firmware/config.txt. "auto"
+    # scans the Pi's UART devices first (ttyAMA*), then USB serial
+    # adapters, so mixed / legacy setups still work.
+    "serial_port": "/dev/ttyAMA4",
     "board_number": 1,
     "baud_rate": 9600,
     "serial_timeout_s": 0.5,
@@ -56,13 +63,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rest_current_threshold_a": 0.5,
     "log_dir": "/app/videorecordings/battery_logs",
     "charge_state_path": "/app/videorecordings/battery_logs/charge_state.json",
+    # RS485 direction control (SN65HVD75 DE/~RE, tied together on the
+    # DeckHand PCB). Set to null to disable direction toggling for boards
+    # with auto-direction transceivers or external USB adapters.
+    "rs485_de_gpio": 11,
+    # Time to hold DE HIGH after write() before flipping back to receive.
+    # 300 us covers a 15-byte @ 9600 baud frame's last-byte drain plus
+    # some slack for the transceiver's tPHZ (~50 ns).
+    "rs485_de_release_delay_s": 0.001,
 }
 
-# Serial paths we deliberately skip when auto-scanning. The Pi's onboard
-# UART /dev/ttyAMA0 / /dev/ttyS0 sit next to the GPIO pins and are not
-# normally wired to a BMS; probing them at 9600 baud would still be safe
-# but it slows down auto-detection of the real RS485 adapter.
-_AUTO_SCAN_SKIP_PREFIXES = ("/dev/ttyAMA", "/dev/ttyS", "/dev/ttyprintk")
+# Serial paths we deliberately skip when auto-scanning. /dev/ttyS0 is the
+# mini-UART / console alias and /dev/ttyprintk is a kernel logger sink —
+# neither is wired to the BMS. /dev/ttyAMA0 was skipped historically when
+# the BMS lived on a USB adapter; on the DeckHand PCB we deliberately
+# include ttyAMA* so /dev/ttyAMA4 (UART4) auto-detects.
+_AUTO_SCAN_SKIP_PREFIXES = ("/dev/ttyS", "/dev/ttyprintk")
 
 _SEQUENCE_RE = re.compile(r"^battery_(\d+)(?:_.*)?\.csv$", re.IGNORECASE)
 
@@ -283,10 +299,18 @@ class BatteryMonitor:
         retries = int(cfg.get("request_retries", 3))
         mode = self._read_mode(cfg)
         window = float(cfg.get("broadcast_window_s", DEFAULT_CONFIG["broadcast_window_s"]))
+        de_toggle = self._make_de_toggle(cfg)
+        de_release_delay_s = float(
+            cfg.get("rs485_de_release_delay_s",
+                    DEFAULT_CONFIG["rs485_de_release_delay_s"])
+        )
 
         errors: list[str] = []
         for device in candidates:
-            reader = self._probe_device(device, board, baud, timeout, retries, mode, window)
+            reader = self._probe_device(
+                device, board, baud, timeout, retries, mode, window,
+                de_toggle, de_release_delay_s,
+            )
             if reader is None:
                 errors.append(f"{device}: no Daly response")
                 continue
@@ -310,6 +334,49 @@ class BatteryMonitor:
         msg = "; ".join(errors) if errors else "no candidates probed"
         raise RuntimeError(f"No Daly BMS found ({msg})")
 
+    @staticmethod
+    def _make_de_toggle(cfg: dict[str, Any]) -> Callable[[bool], None] | None:
+        """Build a callback that toggles the RS485 driver-enable GPIO.
+
+        Returns a function ``f(transmit: bool) -> None`` that drives the
+        SN65HVD75 DE/~RE pin high before writes and low for receives. Runs
+        via the shared lgpio GpioLine so it works on Pi 4 and Pi 5 without
+        modification.
+
+        Returns None when direction control is disabled (``rs485_de_gpio``
+        set to null / <= 0), the GPIO helper isn't available (dev laptop,
+        missing lgpio), or the claim fails — in which case the reader
+        falls back to plain full-duplex behaviour, which is what USB
+        RS485 adapters with auto-direction transceivers rely on.
+        """
+        de_gpio = cfg.get("rs485_de_gpio")
+        if de_gpio is None:
+            return None
+        try:
+            de_gpio_int = int(de_gpio)
+        except (TypeError, ValueError):
+            return None
+        if de_gpio_int < 0:
+            return None
+        from gpio_backend import get_gpio_line
+        line = get_gpio_line()
+        if line is None:
+            return None
+        try:
+            line.claim_output(de_gpio_int, 0)
+        except Exception as exc:
+            logger.warning("RS485 DE (GPIO %d) claim failed: %s", de_gpio_int, exc)
+            return None
+        logger.info("RS485 half-duplex direction control on GPIO %d", de_gpio_int)
+
+        def _toggle(transmit: bool) -> None:
+            try:
+                line.write(de_gpio_int, 1 if transmit else 0)
+            except Exception as exc:
+                logger.debug("RS485 DE write failed: %s", exc)
+
+        return _toggle
+
     def _probe_device(
         self,
         device: str,
@@ -319,6 +386,8 @@ class BatteryMonitor:
         retries: int,
         mode: str = "auto",
         window: float = 3.0,
+        de_toggle: Callable[[bool], None] | None = None,
+        de_release_delay_s: float = 0.001,
     ) -> Any | None:
         """Open `device`, send one quick BMS read, return the reader if it
         responds with plausible Daly data, else close and return None.
@@ -345,6 +414,20 @@ class BatteryMonitor:
         except Exception as exc:
             logger.debug("Probe %s: open failed: %s", device, exc)
             return None
+
+        # Install the RS485 direction-control callback so writes push
+        # DE high and reads flip it back to receive. Safe no-op on USB
+        # adapters where de_toggle is None.
+        if de_toggle is not None:
+            try:
+                reader._bms.set_direction_control(
+                    de_toggle,
+                    release_delay_s=de_release_delay_s,
+                )
+            except AttributeError:
+                logger.debug("Probe %s: reader has no set_direction_control()", device)
+            except Exception as exc:
+                logger.debug("Probe %s: set_direction_control failed: %s", device, exc)
 
         # Keep the broadcast probe window short so scanning stays responsive;
         # solicited 0x90 frames normally arrive within a few hundred ms.
@@ -418,11 +501,14 @@ class BatteryMonitor:
 
     @staticmethod
     def _iter_candidate_ports() -> list[str]:
-        """Enumerate serial device paths to probe, USB-style first.
+        """Enumerate serial device paths to probe, Pi-UART first.
 
-        Combines pyserial's `list_ports.comports()` with a direct glob over
-        /dev so we don't miss devices that pyserial's enumeration drops
-        (some adapters lack udev info inside containers)."""
+        On the DeckHand PCB the BMS lives on /dev/ttyAMA4 (UART4), so we
+        try Pi hardware UARTs before USB adapters. Combines pyserial's
+        `list_ports.comports()` with a direct glob over /dev so we don't
+        miss devices that pyserial's enumeration drops (some adapters
+        lack udev info inside containers).
+        """
         import glob
 
         seen: list[str] = []
@@ -433,6 +519,17 @@ class BatteryMonitor:
             if any(path.startswith(prefix) for prefix in _AUTO_SCAN_SKIP_PREFIXES):
                 return
             seen.append(path)
+
+        # Pi hardware UARTs first — /dev/ttyAMA4 is the DeckHand default,
+        # /dev/serial0 is a symlink to whichever UART is aliased to the
+        # header (useful on Pi 4/Pi 5 setups that predate the DeckHand
+        # migration).
+        for path in ("/dev/ttyAMA4", "/dev/serial0"):
+            if os.path.exists(path):
+                _add(path)
+        for pattern in ("/dev/ttyAMA*",):
+            for path in sorted(glob.glob(pattern)):
+                _add(path)
 
         try:
             from serial.tools import list_ports

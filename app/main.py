@@ -44,6 +44,7 @@ from recipes import (
 )
 import usb_storage
 from battery import BatteryMonitor
+from rtc_sync import RtcSyncManager
 
 # ── Constants ────────────────────────────────────────────────────────────
 VIDEO_DIR = "/app/videorecordings"
@@ -1875,6 +1876,11 @@ def route_telemetry():
         except Exception as e:
             logger.debug(f"Battery summary unavailable: {e}")
             data["battery"] = {"connected": False, "last_error": str(e)}
+        try:
+            data["rtc"] = rtc_manager.get_status()
+        except Exception as e:
+            logger.debug(f"RTC status unavailable: {e}")
+            data["rtc"] = {"present": False, "last_error": str(e)}
         return jsonify(data)
     except Exception as e:
         logger.error(f"Telemetry error: {e}")
@@ -1912,6 +1918,11 @@ battery_monitor = BatteryMonitor(
     config_getter=_battery_config_getter,
     time_synced_fn=is_time_synced,
 )
+
+# MCP7940N RTC on the DeckHand PCB (I2C address 0x6F). Instantiated lazily
+# — if the board or the I2C bus is missing, RtcSyncManager degrades to a
+# no-op with a diagnostic in its status snapshot rather than raising.
+rtc_manager = RtcSyncManager(is_time_synced_fn=is_time_synced)
 
 
 @app.route("/streams", methods=["GET"])
@@ -2506,6 +2517,18 @@ def _remux_orphaned_ts():
 def _boot():
     """Initialize hardware, default recipes, USB storage, and auto-start if configured."""
     logger.info("=== DropCam boot sequence starting ===")
+    # Bring the system clock up from the DeckHand RTC before anything
+    # timestamps a file — CSV filenames, event logs, and video segments
+    # all key off wall-clock time. Safe no-op on legacy boards / dev
+    # machines without the MCP7940N.
+    try:
+        rtc_manager.sync_from_rtc_on_boot()
+    except Exception as e:
+        logger.warning(f"RTC sync on boot failed: {e}")
+    try:
+        rtc_manager.start_background_sync()
+    except Exception as e:
+        logger.warning(f"RTC background sync failed to start: {e}")
     hw.init()
     try:
         battery_monitor.start()
@@ -2604,6 +2627,10 @@ def _boot():
 def _shutdown_safely():
     try:
         battery_monitor.stop()
+    except Exception:
+        pass
+    try:
+        rtc_manager.stop()
     except Exception:
         pass
 

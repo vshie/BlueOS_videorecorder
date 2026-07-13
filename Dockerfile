@@ -70,10 +70,14 @@ RUN cd /tmp && tar xf lg.tar.gz \
 WORKDIR /app
 
 # Python dependencies (before COPY so app-only edits don't rebuild this layer).
-# Servo/PWM: pigpio (Pi 4, DMA) + lgpio (Pi 5 / RP1) -- lgpio is installed by
-# the lg source build above, not pip. WS2812 LED: rpi_ws281x (Pi 4) + a
-# self-contained SPI driver (Pi 5) that only needs spidev (gpio_backend.py).
-RUN pip3 install flask requests pigpio rpi_ws281x spidev Pillow dalybms pyserial
+# Servo/PWM: on the DeckHand PCB every servo output goes through a PCA9685
+# over I2C (smbus2), so Pi 4 and Pi 5 share one code path. pigpio (Pi 4 DMA)
+# + lgpio (Pi 5 / RP1) remain as fallbacks for legacy direct-PWM boards;
+# lgpio is installed by the lg source build above, not pip. WS2812 LED:
+# rpi_ws281x (Pi 4) + a self-contained SPI driver (Pi 5) that only needs
+# spidev (gpio_backend.py). smbus2 talks to the PCA9685 and the MCP7940N
+# RTC (rtc_sync.py).
+RUN pip3 install flask requests pigpio rpi_ws281x spidev smbus2 Pillow dalybms pyserial
 
 RUN mkdir -p /app/videorecordings
 

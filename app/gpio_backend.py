@@ -1,5 +1,11 @@
 """Cross-Pi GPIO backends for DropCam (Raspberry Pi 4 and Pi 5).
 
+On the DeckHand PCB all servo/PWM outputs go through a PCA9685 driven over
+the primary I2C bus (GPIO 2/3), so the same code path works on the Pi 4
+and Pi 5 with no board-specific PWM timing. The direct-GPIO servo
+backends below (pigpio / lgpio / RP1 hardware-PWM) are kept as fallbacks
+for legacy boards or dev machines without I2C hardware.
+
 The Pi 5 routes all user GPIO through the RP1 I/O chip, which breaks the
 register-poking libraries that work on the Pi 4:
 
@@ -7,24 +13,27 @@ register-poking libraries that work on the Pi 4:
   * rpi_ws281x  (WS2812 LED) -> "ws2811_init failed: Hardware revision is
                                  not supported"
 
-This module hides the two low-level needs behind small backend classes and
+This module hides the low-level needs behind small backend classes and
 selects an implementation that works on the detected board:
 
   Servos / PWM:
-    Pi 4 and earlier -> pigpio (DMA-timed, jitter-free); fall back to lgpio
-    Pi 5             -> lgpio  (software-timed servo pulses via /dev/gpiochipN)
+    DeckHand PCB     -> PCA9685 over I2C (Pi 4 + Pi 5, identical)
+    Legacy fallback  -> pigpio (Pi 4 DMA) / lgpio / RP1 hardware-PWM (Pi 5)
 
   WS2812 RGB LED (wired to GPIO 10 / SPI0 MOSI):
     Pi 4 and earlier -> rpi_ws281x; fall back to rpi5-ws2812 (SPI)
     Pi 5             -> rpi5-ws2812 (SPI, /dev/spidev0.0)
+
+  Single-pin GPIO (OE / RS485 DE / rotation sensor input):
+    Both boards      -> lgpio via GpioLine (chip auto-selected)
 
 Every backend degrades to a no-op "simulation" mode when its library or
 hardware is unavailable (e.g. a developer laptop), so the rest of the app
 keeps running.
 
 NOTE: lgpio servo pulses are *software* timed and have more jitter than
-pigpio's DMA waveforms, so a held servo may fidget a little. For the
-camera/release/light servos here that is acceptable.
+pigpio's DMA waveforms; PCA9685 is DMA-free hardware PWM and does not
+share that limitation.
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +187,41 @@ class LgpioServoBackend(ServoBackend):
                 pass
         try:
             self._lg.gpiochip_close(self._handle)
+        except Exception:
+            pass
+
+
+class Pca9685ServoBackend(ServoBackend):
+    """DeckHand path: 16-channel PCA9685 PWM controller over I2C at 0x40.
+
+    ``set_pulse(channel, pulse_us)`` reuses the existing pigpio/lgpio-style
+    ServoBackend interface; the ``channel`` argument here is the PCA9685
+    output channel (0-15) rather than a Pi GPIO number. hardware.py owns
+    the mapping from function (TILT/LUMEN/RELEASE/...) to channel index.
+    """
+
+    name = "pca9685"
+
+    def __init__(self, address: int = 0x40, bus_number: int = 1,
+                 freq_hz: int = 50, ext_clock_hz: int = 24_576_000) -> None:
+        from pca9685 import Pca9685
+
+        self._pca = Pca9685(
+            address=address, bus_number=bus_number,
+            freq_hz=freq_hz, ext_clock_hz=ext_clock_hz,
+        )
+        self.available = True
+
+    def set_pulse(self, gpio: int, pulse_us: int) -> None:
+        self._pca.set_pulse(int(gpio), int(pulse_us))
+
+    def cleanup(self) -> None:
+        try:
+            self._pca.all_off()
+        except Exception:
+            pass
+        try:
+            self._pca.close()
         except Exception:
             pass
 
@@ -328,11 +373,23 @@ class CompositeServoBackend(ServoBackend):
 def make_servo_backend() -> ServoBackend:
     """Pick the best available servo backend for this board.
 
-    Pi 4: pigpio (DMA, jitter-free) for everything; lgpio fallback.
-    Pi 5: hardware PWM (RP1, jitter-free) for the PWM-capable pins (GPIO
-          18/19), lgpio (software) for the remaining pins. If the PWM overlay
-          isn't loaded, everything falls back to lgpio.
+    Preferred (DeckHand PCB, both Pi 4 and Pi 5): PCA9685 over I2C. This is
+    tried first because the DeckHand shield routes every servo/PWM output
+    through the PCA9685 (channels 0-7 on J105) and the previous direct-GPIO
+    PWM pins are physically NC on the shield.
+
+    Legacy fallback (older direct-wired boards, or dev machines):
+      Pi 4: pigpio (DMA, jitter-free); lgpio fallback.
+      Pi 5: RP1 hardware PWM for GPIO 18/19 + lgpio for the rest.
+      Any: simulation no-op when nothing else works.
     """
+    try:
+        backend = Pca9685ServoBackend()
+        logger.info("Servo backend: %s", backend.name)
+        return backend
+    except Exception as exc:
+        logger.info("PCA9685 servo backend unavailable, falling back: %s", exc)
+
     if not is_pi5():
         for name in ("pigpio", "lgpio"):
             try:
@@ -364,6 +421,152 @@ def make_servo_backend() -> ServoBackend:
     composite = CompositeServoBackend(hw_backend, lg_backend, HW_PWM_PINS)
     logger.info("Servo backend: %s", composite.name)
     return composite
+
+
+# ── Single-pin GPIO helper (lgpio, shared across Pi 4 / Pi 5) ────────────
+
+class GpioLine:
+    """Thin lgpio wrapper for a single output or alert-input GPIO line.
+
+    Used by the DeckHand integration for:
+      * PCA9685 ~OE   (GPIO 4, output, active-low)
+      * RS-485 DE/~RE (GPIO 11, output; HIGH=transmit, LOW=receive)
+      * Release-shaft rotation sensor (GPIO 20, alert input, falling edge)
+
+    lgpio works on both the Pi 4 SoC GPIO chip and the Pi 5 RP1 GPIO chip
+    with the same API, so this replaces the legacy pigpio callback path for
+    the rotation sensor and gives us a board-agnostic OE/DE toggle.
+    """
+
+    def __init__(self) -> None:
+        import lgpio
+
+        self._lg = lgpio
+        self._handle = self._open_header_chip()
+        self._outputs: set[int] = set()
+        self._alerts: dict[int, tuple[Any, Any]] = {}  # type: ignore[name-defined]
+
+    def _open_header_chip(self) -> int:
+        """Open the gpiochip that owns the 40-pin header.
+
+        Same probe logic as LgpioServoBackend: prefer an RP1-labeled chip
+        (Pi 5), otherwise pick the chip with the most lines (Pi 4 SoC).
+        """
+        chips: list[tuple[int, int, int, str]] = []
+        for num in range(8):
+            try:
+                handle = self._lg.gpiochip_open(num)
+            except Exception:
+                continue
+            if handle < 0:
+                continue
+            lines, label = 0, ""
+            try:
+                info = self._lg.gpio_get_chip_info(handle)
+                if isinstance(info, (list, tuple)) and len(info) >= 4:
+                    lines, label = int(info[1]), str(info[3])
+            except Exception:
+                pass
+            chips.append((num, handle, lines, label))
+
+        if not chips:
+            raise RuntimeError("no usable gpiochip found")
+
+        chosen = next((c for c in chips if "rp1" in c[3].lower()), None)
+        if chosen is None:
+            chosen = max(chips, key=lambda c: c[2])
+
+        for _num, handle, _lines, _label in chips:
+            if handle != chosen[1]:
+                try:
+                    self._lg.gpiochip_close(handle)
+                except Exception:
+                    pass
+        return chosen[1]
+
+    def claim_output(self, gpio: int, level: int = 0) -> None:
+        """Claim ``gpio`` as an output driven to ``level`` (0/1). Idempotent."""
+        if gpio in self._outputs:
+            self._lg.gpio_write(self._handle, gpio, 1 if level else 0)
+            return
+        self._lg.gpio_claim_output(self._handle, gpio, 1 if level else 0)
+        self._outputs.add(gpio)
+
+    def write(self, gpio: int, level: int) -> None:
+        if gpio not in self._outputs:
+            self.claim_output(gpio, level)
+            return
+        self._lg.gpio_write(self._handle, gpio, 1 if level else 0)
+
+    def claim_alert_falling(self, gpio: int, callback, debounce_us: int = 0) -> None:
+        """Watch ``gpio`` for falling edges and invoke ``callback(tick_ns)``.
+
+        ``debounce_us`` sets the lgpio glitch filter (a rising OR falling
+        edge that lasts less than this window is ignored) — the equivalent
+        of pigpio's ``set_glitch_filter``. lgpio callback signature is
+        ``(chip, gpio, level, tick_ns)``; we forward the tick to the caller.
+        """
+        LG_FALLING = getattr(self._lg, "FALLING_EDGE", 1)
+        self._lg.gpio_claim_alert(self._handle, gpio, LG_FALLING, 0)
+        if debounce_us and hasattr(self._lg, "gpio_set_debounce_micros"):
+            try:
+                self._lg.gpio_set_debounce_micros(self._handle, gpio, int(debounce_us))
+            except Exception as exc:
+                logger.debug("debounce not supported for gpio %d: %s", gpio, exc)
+        cb = self._lg.callback(self._handle, gpio, LG_FALLING, callback)
+        self._alerts[gpio] = (cb, callback)
+
+    def release(self, gpio: int) -> None:
+        if gpio in self._alerts:
+            cb, _fn = self._alerts.pop(gpio)
+            try:
+                cb.cancel()
+            except Exception:
+                pass
+        if gpio in self._outputs:
+            self._outputs.remove(gpio)
+        try:
+            self._lg.gpio_free(self._handle, gpio)
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        for gpio in list(self._alerts.keys()):
+            self.release(gpio)
+        for gpio in list(self._outputs):
+            try:
+                self._lg.gpio_free(self._handle, gpio)
+            except Exception:
+                pass
+        try:
+            self._lg.gpiochip_close(self._handle)
+        except Exception:
+            pass
+
+
+_gpio_line_singleton: GpioLine | None = None
+_gpio_line_error: Exception | None = None
+
+
+def get_gpio_line() -> GpioLine | None:
+    """Return a shared GpioLine, or None if lgpio isn't available.
+
+    Callers use this to toggle OE/DE or wire an alert without each caring
+    which /dev/gpiochipN to open. Failures (missing lib, no chip) are
+    cached so we don't repeatedly try to import lgpio at runtime.
+    """
+    global _gpio_line_singleton, _gpio_line_error
+    if _gpio_line_singleton is not None:
+        return _gpio_line_singleton
+    if _gpio_line_error is not None:
+        return None
+    try:
+        _gpio_line_singleton = GpioLine()
+        return _gpio_line_singleton
+    except Exception as exc:
+        _gpio_line_error = exc
+        logger.info("GpioLine unavailable (single-pin GPIO will be simulated): %s", exc)
+        return None
 
 
 # ── WS2812 RGB LED backends ──────────────────────────────────────────────

@@ -2,25 +2,32 @@
 Hardware control for DropCam: RGB LED (WS2812), camera servo, lumen light,
 release servo, and auxiliary servo-style PWM outputs.
 
-GPIO assignments:
+Wiring (DeckHand PCB, BR-103953 Rev A):
   - GPIO 10 (Pin 19, SPI MOSI): WS2812/NeoPixel RGB status LED
-  - GPIO 18 (Pin 12): Camera tilt servo (1000-2000 us PWM). On the Pi 5 this is
-        driven by the RP1 hardware-PWM peripheral (jitter-free); requires
-        `dtoverlay=pwm-2chan` in config.txt. (Was GPIO 21 on the Pi 4 build;
-        moved to a hardware-PWM-capable pin to eliminate servo jitter.)
-  - GPIO 13 (Pin 33): Lumen light (1000-2000 us servo-style PWM; 1000 us = off,
-        2000 us = full brightness. Note: a disabled/floating signal turns the
-        light ON at full brightness, so we always hold 1000 us to keep it off.)
-  - GPIO 12 (Pin 32): Release servo on a continuous-rotation drive.
-        1500 us = stop (idle), 1000 us = wind one direction, 2000 us =
-        unwind the opposite direction.  The release mechanism is a string
-        wound around a post: running unwind for ~60 s lets the string
-        spool off and frees the unit to float to the surface.  Held at
-        1500 us from boot.
-  - GPIO 20 (Pin 38): Camera focus (1000-2000 us servo-style PWM)
-  - GPIO 26 (Pin 37): Zoom (1000-2000 us servo-style PWM)
-  - GPIO 16 (Pin 36): Pan (1000-2000 us servo-style PWM)
-  - GPIO 19 (Pin 35): External servo (1000-2000 us servo-style PWM)
+  - I2C1 GPIO 2/3 -> PCA9685 @ 0x40 drives all servo/PWM outputs. Channels
+    are wired 1:1 to J105 header pins (silkscreen labels shown below), and
+    the same driver code runs identically on Pi 4 and Pi 5:
+        Ch 0 = TILT      (camera tilt servo, 1000-2000 us)
+        Ch 1 = LUMEN     (lumen light, 1000 us = off, 2000 us = full)
+        Ch 2 = RELEASE   (continuous-rotation release drive; 1500 = stop,
+                          1000 = wind, 2000 = unwind)
+        Ch 3 = EXTSERVO  (external / aux servo, 1000-2000 us)
+        Ch 4 = FOCUS     (RadCam focus, 1000-2000 us)
+        Ch 5 = ZOOM      (RadCam zoom, 1000-2000 us)
+        Ch 6 = PAN       (RadCam pan, 1000-2000 us)
+        Ch 7 = SPARE     (unused header pin reserved for future actuators)
+  - GPIO 4  (Pin 7):  PCA9685 ~OE (active-low, 10 k pull-up; held HIGH by
+                      default, so we must drive it LOW at init to enable
+                      outputs. Otherwise every channel stays high-Z.)
+  - GPIO 20 (Pin 38): Release-shaft rotation sensor input. Produces an
+                      analog 0 V -> 3.3 V ramp per rotation snapping back
+                      to 0 V; read as a Schmitt-triggered digital input
+                      (falling edge = one rotation) via lgpio alert.
+
+Note on constant naming: the ``*_GPIO`` names below were kept for backwards
+compatibility with earlier direct-PWM builds; their VALUES on the DeckHand
+PCB are PCA9685 channel indices (0-15) passed through the servo backend's
+``set_pulse(channel, us)`` interface.
 """
 
 import math
@@ -30,31 +37,37 @@ import logging
 import atexit
 from collections import deque
 
-from gpio_backend import make_servo_backend, make_led_backend
+from gpio_backend import make_servo_backend, make_led_backend, get_gpio_line
 
 logger = logging.getLogger(__name__)
 
-# GPIO pin assignments
+# WS2812 status LED still lives on a real BCM GPIO (SPI MOSI / GPIO 10).
 LED_GPIO = 10
-# Camera tilt servo. GPIO 18 is hardware-PWM capable on both Pi 4 and Pi 5
-# (RP1), so the Pi 5 can drive it jitter-free via /sys/class/pwm. Moved here
-# from GPIO 21 (which has no PWM peripheral on the RP1).
-SERVO_GPIO = 18
-LIGHT_GPIO = 13
-RELEASE_GPIO = 12
-FOCUS_GPIO = 20
-ZOOM_GPIO = 26
-PAN_GPIO = 16
-EXT_SERVO_GPIO = 19
 
-# Release-servo shaft rotation sensor (DropCam only).  The sensor produces an
-# analog 0 V -> 3.3 V ramp once per shaft rotation, snapping back to 0 V at
-# the end of each ramp.  Read as a Schmitt-triggered digital input with a
-# software glitch filter so each ramp resolves to a single rising edge.
-# Shares the GPIO with ZOOM_GPIO above; only one of the two roles is wired
-# on a given board (DropCam = sensor, RadCam = zoom output), so the rotation
-# sensor only initialises when the caller explicitly enables it.
-ROTATION_SENSOR_GPIO = 26
+# PCA9685 output channels — see wiring table in the module docstring.
+SERVO_GPIO = 0        # TILT     (camera tilt servo)
+LIGHT_GPIO = 1        # LUMEN    (lumen light PWM)
+RELEASE_GPIO = 2      # RELEASE  (continuous-rotation drive)
+EXT_SERVO_GPIO = 3    # EXTSERVO (external aux servo)
+FOCUS_GPIO = 4        # FOCUS    (RadCam focus)
+ZOOM_GPIO = 5         # ZOOM     (RadCam zoom)
+PAN_GPIO = 6          # PAN      (RadCam pan)
+SPARE_GPIO = 7        # SPARE    (unused / reserved)
+
+# PCA9685 output-enable pin on the Pi. Active low; a 10 k pull-up keeps
+# every channel tri-stated at reset, so init() must drive this LOW before
+# any servo will move.
+PCA9685_OE_GPIO = 4
+
+# Release-servo shaft rotation sensor input on the DeckHand PCB. The sensor
+# reaches the Pi via J104 pin 4 (WS2812 LED header) which is wired to
+# BCM GPIO 20. The sensor produces a slow 0 V -> 3.3 V ramp once per shaft
+# rotation and snaps sharply back to 0 V; falling on the snap-back gives one
+# clean, well-defined pulse per rotation instead of the noisy slow crossing
+# on the way up. On the old (direct-wired) prototype this was GPIO 26 and
+# shared a pin with the zoom aux output — the DeckHand PCB removes that
+# collision entirely because zoom now lives on PCA9685 channel 5.
+ROTATION_SENSOR_GPIO = 20
 # 100 ms glitch filter.  We trigger on the FAST snap-back (falling edge)
 # from ~3.3 V to ~0 V, not the slow ramp up through the input threshold.
 # Both rest levels are stable for the entire rotation period so a large
@@ -76,6 +89,7 @@ AUX_PWM_GPIOS = {
     "zoom": ZOOM_GPIO,
     "pan": PAN_GPIO,
     "ext_servo": EXT_SERVO_GPIO,
+    "spare": SPARE_GPIO,
 }
 
 # Servo PWM range (microseconds)
@@ -159,10 +173,10 @@ class HardwareController:
 
         # Release-servo rotation sensor (initialised lazily by
         # init_rotation_sensor() once the caller knows DropCam mode).
-        # _rotation_count is incremented from a pigpio callback thread; reads
-        # under _rotation_lock for atomicity with reset_rotation_count().
-        self._rotation_pi = None
-        self._rotation_cb = None
+        # _rotation_count is incremented from an lgpio alert-callback
+        # thread; reads take _rotation_lock for atomicity with
+        # reset_rotation_count().
+        self._rotation_gpio_line = None  # gpio_backend.GpioLine, shared
         self._rotation_count = 0
         self._rotation_lock = threading.Lock()
         self._rotation_last_tick = None     # pigpio tick (us, 32-bit)
@@ -199,6 +213,18 @@ class HardwareController:
 
     def _init_servo(self):
         self._servo = make_servo_backend()
+        # Enable the PCA9685 output stage on the DeckHand PCB. GPIO 4 is
+        # wired to the PCA9685 ~OE pin (10 k pull-up on-board), so unless
+        # we drive it LOW every servo channel stays high-Z and no motion
+        # happens. Safe no-op on legacy direct-PWM boards (no ~OE line)
+        # and on dev machines (get_gpio_line() returns None).
+        line = get_gpio_line()
+        if line is not None:
+            try:
+                line.claim_output(PCA9685_OE_GPIO, 0)
+                logger.info(f"PCA9685 ~OE (GPIO {PCA9685_OE_GPIO}) driven LOW (outputs enabled)")
+            except Exception as e:
+                logger.warning(f"Could not drive PCA9685 ~OE low: {e}")
         if not self._servo.available:
             return
         # Drive the Lumen light to its "off" pulse (1000 us) immediately,
@@ -214,7 +240,7 @@ class HardwareController:
             self._servo.set_pulse(RELEASE_GPIO, RELEASE_STOP_US)
         except Exception as e:
             logger.warning(f"Could not preset release servo stop: {e}")
-        # Center the camera tilt servo on boot. Without this, the GPIO
+        # Center the camera tilt servo on boot. Without this, the channel
         # produces no pulses until something calls set_servo(), so the
         # shaft is uncommanded and may sit at an arbitrary angle even
         # though telemetry reports the cached default of 1500 us.
@@ -655,58 +681,52 @@ class HardwareController:
 
     # ── Release-Shaft Rotation Sensor ──────────────────────────────────
     #
-    # Counts *falling* edges on ROTATION_SENSOR_GPIO via a pigpio callback.
-    # The sensor produces a slow 0 V -> 3.3 V ramp once per rotation and then
-    # snaps sharply back to 0 V; falling on the snap-back gives one clean,
-    # well-defined pulse per rotation instead of the noisy slow crossing on
-    # the way up.  Combined with a 100 ms hardware glitch filter and a
-    # 250 ms software min-inter-edge debounce, this is highly resistant to
-    # the threshold-band chatter that used to fire spurious "pause" edges
+    # Counts *falling* edges on ROTATION_SENSOR_GPIO (BCM GPIO 20 on the
+    # DeckHand PCB) via an lgpio alert callback. The sensor produces a slow
+    # 0 V -> 3.3 V ramp once per rotation and then snaps sharply back to
+    # 0 V; falling on the snap-back gives one clean, well-defined pulse per
+    # rotation instead of the noisy slow crossing on the way up. Combined
+    # with a 100 ms hardware glitch filter (lgpio debounce) and a 250 ms
+    # software min-inter-edge debounce, this is highly resistant to the
+    # threshold-band chatter that used to fire spurious "pause" edges
     # while the shaft was stationary.
     #
-    # The sensor and the ZOOM aux output share GPIO 26 — only one of the two
-    # roles is wired on a given board, so init_rotation_sensor() is opt-in
-    # and the caller is expected to skip it on RadCam-mode deployments.
+    # This runs on both Pi 4 and Pi 5 through the same lgpio API — no more
+    # pigpio dependency for input handling. init_rotation_sensor() is
+    # still opt-in (RadCam-mode boards may leave it unconfigured).
 
     def init_rotation_sensor(self, enable=True):
         """Set up the release-shaft rotation sensor on ROTATION_SENSOR_GPIO.
 
-        Idempotent.  When ``enable=False`` (e.g. RadCam mode where the pin is
-        used as a zoom-servo output instead) this is a no-op and any prior
-        callback is torn down so the pin can be driven as an output.
-        Returns True if the sensor is live afterwards.
+        Idempotent.  When ``enable=False`` (e.g. RadCam mode where the pin
+        is repurposed for something else) this is a no-op and any prior
+        alert callback is torn down.  Uses the shared lgpio GpioLine so
+        it works identically on Pi 4 and Pi 5. Returns True if the sensor
+        is live afterwards.
         """
         if not enable:
             self._teardown_rotation_sensor()
             return False
         if self._rotation_available:
             return True
-        try:
-            import pigpio
-        except ImportError:
-            logger.warning("Rotation sensor unavailable: pigpio not importable")
+        line = get_gpio_line()
+        if line is None:
+            logger.warning("Rotation sensor unavailable: lgpio not importable")
             return False
         try:
-            pi = pigpio.pi()
-            if not pi.connected:
-                logger.warning("Rotation sensor unavailable: pigpiod not reachable")
-                try: pi.stop()
-                except Exception: pass
-                return False
-            pi.set_mode(ROTATION_SENSOR_GPIO, pigpio.INPUT)
-            pi.set_pull_up_down(ROTATION_SENSOR_GPIO, pigpio.PUD_OFF)
-            pi.set_glitch_filter(ROTATION_SENSOR_GPIO, ROTATION_GLITCH_FILTER_US)
             # Trigger on the fast snap-back (3.3 V -> 0 V) rather than the
             # slow ramp up through the input threshold; both rest levels
             # are stable for the full rotation period so this is much
             # more noise-tolerant than RISING_EDGE.
-            cb = pi.callback(ROTATION_SENSOR_GPIO, pigpio.FALLING_EDGE,
-                             self._on_rotation_edge)
+            line.claim_alert_falling(
+                ROTATION_SENSOR_GPIO,
+                self._on_rotation_edge,
+                debounce_us=ROTATION_GLITCH_FILTER_US,
+            )
         except Exception as e:
             logger.warning(f"Rotation sensor init failed: {e}")
             return False
-        self._rotation_pi = pi
-        self._rotation_cb = cb
+        self._rotation_gpio_line = line
         self._rotation_available = True
         logger.info(
             f"Rotation sensor ready on GPIO {ROTATION_SENSOR_GPIO} "
@@ -716,41 +736,41 @@ class HardwareController:
         return True
 
     def _teardown_rotation_sensor(self):
-        try:
-            if self._rotation_cb is not None:
-                self._rotation_cb.cancel()
-        except Exception:
-            pass
-        try:
-            if self._rotation_pi is not None:
-                self._rotation_pi.stop()
-        except Exception:
-            pass
-        self._rotation_cb = None
-        self._rotation_pi = None
+        if self._rotation_gpio_line is not None:
+            try:
+                self._rotation_gpio_line.release(ROTATION_SENSOR_GPIO)
+            except Exception:
+                pass
+        self._rotation_gpio_line = None
         self._rotation_available = False
 
-    def _on_rotation_edge(self, gpio, level, tick):
-        # Runs in a pigpio callback thread.  Keep this short.
-        # tick is a uint32 microsecond counter; use tickDiff to handle wrap.
-        import pigpio
+    def _on_rotation_edge(self, chip, gpio, level, tick_ns):
+        """lgpio alert callback (chip, gpio, level, tick_ns).
+
+        Keep this short — it runs on lgpio's callback thread. ``tick_ns``
+        is a monotonic nanosecond timestamp from the kernel, which we
+        convert to microseconds so the rest of the debounce / RPM logic
+        stays in the units it always used.
+        """
+        tick_us = int(tick_ns) // 1000
         with self._rotation_lock:
-            # Software min-inter-edge debounce.  Belt-and-suspenders on top
-            # of the pigpio glitch filter; catches any noise pair that
-            # cleared the hardware filter (eg two 100+ ms plateaus in a
-            # noisy threshold window).  Real rotations are always spaced
-            # >= 500 ms apart at our max operating RPM, so a 250 ms window
-            # rejects duplicates without ever discarding a valid edge.
+            # Software min-inter-edge debounce.  Belt-and-suspenders on
+            # top of the lgpio glitch filter; catches any noise pair
+            # that cleared the hardware filter (eg two 100+ ms plateaus
+            # in a noisy threshold window).  Real rotations are always
+            # spaced >= 500 ms apart at our max operating RPM, so a
+            # 250 ms window rejects duplicates without ever discarding
+            # a valid edge.
             if self._rotation_last_tick is not None:
-                interval_us = pigpio.tickDiff(self._rotation_last_tick, tick)
+                interval_us = tick_us - self._rotation_last_tick
                 if interval_us < int(ROTATION_MIN_INTER_EDGE_S * 1_000_000):
                     return
             self._rotation_count += 1
             if self._rotation_last_tick is not None:
-                interval = pigpio.tickDiff(self._rotation_last_tick, tick)
+                interval = tick_us - self._rotation_last_tick
                 if 0 < interval < 60_000_000:   # sanity cap (1 min between rotations)
                     self._rotation_intervals_us.append(interval)
-            self._rotation_last_tick = tick
+            self._rotation_last_tick = tick_us
             self._rotation_last_wall_s = time.monotonic()
             # Winch counter: signed turns, direction-aware.  Edges seen while
             # the scheduler thinks we're paused indicate the shaft moved
@@ -862,9 +882,9 @@ class HardwareController:
             poll_s = 0.02
             # Same sensor-stall guard as the winch path.  At fast release
             # (~112 RPM) the first edge should arrive within ~0.5 s, so
-            # 2.5 s of zero edges almost certainly means the input is
-            # being clobbered (eg GPIO 26 collision with the zoom aux
-            # output).  Abort instead of running the full safety cap.
+            # 2.5 s of zero edges almost certainly means the sensor
+            # signal has been lost (wiring, connector, or a wedged lgpio
+            # alert).  Abort instead of running the full safety cap.
             stall_threshold_s = 2.5
             while True:
                 if self._release_run_cancel.is_set():
@@ -1028,12 +1048,12 @@ class HardwareController:
                     outcome = "no_sensor_timeout"
                 return None  # populated below in finally
             # Sensor-stall guard.  If the rotation sensor reports zero
-            # edges within this many seconds of starting the leg the input
-            # is almost certainly being clobbered (the GPIO 26 / "zoom"
-            # collision that turned 3-rev legs into 9-rev runaways).
-            # Abort early instead of running the full leg_cap_s budget.
-            # 2.5 s is generous enough for healthy operation at every RPM
-            # the winch supports (>= ~24 RPM -> first edge by 2.5 s).
+            # edges within this many seconds of starting the leg the
+            # signal has almost certainly been lost (unplugged sensor,
+            # wedged lgpio alert, etc.). Abort early instead of running
+            # the full leg_cap_s budget. 2.5 s is generous enough for
+            # healthy operation at every RPM the winch supports (>= ~24
+            # RPM -> first edge by 2.5 s).
             stall_threshold_s = 2.5
             poll_s = 0.02
             while True:
@@ -1050,8 +1070,8 @@ class HardwareController:
                     logger.error(
                         f"Winch leg aborted: no rotation edges in "
                         f"{stall_threshold_s:.1f}s at {position_us} us "
-                        f"(target {target_rotations} rev) — sensor input "
-                        f"may be silenced (eg GPIO 26 collision with zoom)."
+                        f"(target {target_rotations} rev) — rotation "
+                        f"sensor signal appears to be lost."
                     )
                     break
                 if now >= deadline:
@@ -1082,17 +1102,18 @@ class HardwareController:
     # ── Auxiliary Servo PWM Outputs ────────────────────────────────────
 
     def _aux_pwm_conflicts_with_sensor(self, gpio):
-        """Return True if ``gpio`` is the active rotation-sensor input pin.
+        """Return True if ``gpio`` would collide with the rotation sensor.
 
-        GPIO 26 is dual-purpose (RadCam zoom servo output / DropCam release
-        rotation sensor input).  When the rotation sensor is initialised,
-        driving the pin as a servo would override the input and silence the
-        callback — which is exactly the bug that turned 3-rev winch legs
-        into 7-9 rev runaways.  This guard is consulted by every aux-PWM
-        write path so an over-eager recipe or stray API call cannot
-        re-clobber the pin while the sensor is active.
+        Historical: on the direct-wired prototype boards GPIO 26 was
+        dual-purpose (RadCam zoom output / DropCam rotation sensor input),
+        so every aux-PWM write consulted this guard to avoid clobbering
+        the sensor. On the DeckHand PCB the rotation sensor is on
+        BCM GPIO 20 and every aux channel is a PCA9685 output (channels
+        0-7), so the two namespaces cannot overlap and this always
+        returns False. Kept as a defensive shim so the aux_pwm write
+        paths and is_aux_pwm_available() continue to work unchanged.
         """
-        return gpio == ROTATION_SENSOR_GPIO and self._rotation_available
+        return False
 
     def set_aux_pwm(self, channel, position_us):
         """Set an auxiliary PWM channel. channel is one of: focus, zoom, pan, ext_servo.
