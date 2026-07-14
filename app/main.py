@@ -2517,6 +2517,23 @@ def _remux_orphaned_ts():
 def _boot():
     """Initialize hardware, default recipes, USB storage, and auto-start if configured."""
     logger.info("=== DropCam boot sequence starting ===")
+
+    # Defensive pin-mux recovery on Pi 4 (BCM2711). BlueOS's autopilot_manager
+    # service reprobes I2C bus 1 at host boot for compass/IMU auto-detection,
+    # which side-effect-flips GPIO 2 (SDA1) from ALT0 to plain OUTPUT LOW —
+    # shorting the bus and causing both the PCA9685 (0x40) and MCP7940N
+    # (0x6F) to fail with [Errno 5] Input/output error. Similarly, GPIO 11
+    # (RTS4) can get knocked out of ALT4 by other actors. Force both pins
+    # back to their DeckHand-required alt-function before any code opens
+    # /dev/i2c-1 or /dev/ttyAMA*. No-op on Pi 5 or dev laptops.
+    try:
+        from bcm_pinmux import set_alt
+        set_alt(2, "a0")   # SDA1 for PCA9685 + MCP7940N
+        set_alt(3, "a0")   # SCL1
+        set_alt(11, "a4")  # RTS4 so kernel PL011 can drive RS-485 DE
+    except Exception as e:
+        logger.debug(f"BCM pinmux recovery skipped: {e}")
+
     # Bring the system clock up from the DeckHand RTC before anything
     # timestamps a file — CSV filenames, event logs, and video segments
     # all key off wall-clock time. Safe no-op on legacy boards / dev

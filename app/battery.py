@@ -312,7 +312,13 @@ class BatteryMonitor:
         retries = int(cfg.get("request_retries", 3))
         mode = self._read_mode(cfg)
         window = float(cfg.get("broadcast_window_s", DEFAULT_CONFIG["broadcast_window_s"]))
-        de_toggle = self._make_de_toggle(cfg)
+        # NB: build a *lazy* DE-toggle factory rather than claiming GPIO 11
+        # up front. If the tty ends up being a PL011 that accepts TIOCSRS485
+        # (kernel-driven DE) we must NOT snatch GPIO 11 out of ALT4 RTS4 —
+        # claiming it as a lgpio OUTPUT would reconfigure the pinmux and
+        # silently break the kernel's DE control. The factory only fires
+        # inside the probe if kernel mode is refused.
+        de_toggle_factory = self._make_de_toggle_factory(cfg)
         de_release_delay_s = float(
             cfg.get("rs485_de_release_delay_s",
                     DEFAULT_CONFIG["rs485_de_release_delay_s"])
@@ -322,7 +328,7 @@ class BatteryMonitor:
         for device in candidates:
             reader = self._probe_device(
                 device, board, baud, timeout, retries, mode, window,
-                de_toggle, de_release_delay_s,
+                de_toggle_factory, de_release_delay_s,
             )
             if reader is None:
                 errors.append(f"{device}: no Daly response")
@@ -360,19 +366,22 @@ class BatteryMonitor:
     _kernel_rs485_logged: set[str] = set()
 
     @staticmethod
-    def _make_de_toggle(cfg: dict[str, Any]) -> Callable[[bool], None] | None:
-        """Build a callback that toggles the RS485 driver-enable GPIO.
+    def _make_de_toggle_factory(
+        cfg: dict[str, Any],
+    ) -> Callable[[], Callable[[bool], None] | None] | None:
+        """Return a *factory* that, when called, claims the RS485 DE GPIO
+        and returns a toggle callback. The claim only happens when the
+        factory is actually invoked — critical when the same GPIO doubles
+        as PL011 RTS4 for kernel-mode DE control (``dtoverlay=uart4,ctsrts``
+        on the DeckHand PCB puts GPIO 11 in ALT4 RTS4 at boot). If we
+        claim GPIO 11 as a lgpio OUTPUT before the probe decides between
+        kernel-mode and software-mode, the pinmux flip breaks the kernel
+        RTS control that ``TIOCSRS485`` relies on — silently, because the
+        ioctl itself still succeeds.
 
-        Returns a function ``f(transmit: bool) -> None`` that drives the
-        SN65HVD75 DE/~RE pin high before writes and low for receives. Runs
-        via the shared lgpio GpioLine so it works on Pi 4 and Pi 5 without
-        modification.
-
-        Returns None when direction control is disabled (``rs485_de_gpio``
-        set to null / <= 0), the GPIO helper isn't available (dev laptop,
-        missing lgpio), or the claim fails — in which case the reader
-        falls back to plain full-duplex behaviour, which is what USB
-        RS485 adapters with auto-direction transceivers rely on.
+        Returns None if direction control is fully disabled (``rs485_de_gpio``
+        <= 0 or null) or if the GPIO helper isn't importable (dev laptop,
+        missing lgpio). Otherwise returns a zero-arg factory.
         """
         de_gpio = cfg.get("rs485_de_gpio")
         if de_gpio is None:
@@ -383,26 +392,33 @@ class BatteryMonitor:
             return None
         if de_gpio_int < 0:
             return None
-        from gpio_backend import get_gpio_line
+        try:
+            from gpio_backend import get_gpio_line
+        except Exception:
+            return None
         line = get_gpio_line()
         if line is None:
             return None
-        try:
-            line.claim_output(de_gpio_int, 0)
-        except Exception as exc:
-            logger.warning("RS485 DE (GPIO %d) claim failed: %s", de_gpio_int, exc)
-            return None
-        if de_gpio_int not in BatteryMonitor._de_toggle_logged:
-            logger.info("RS485 half-duplex direction control on GPIO %d", de_gpio_int)
-            BatteryMonitor._de_toggle_logged.add(de_gpio_int)
 
-        def _toggle(transmit: bool) -> None:
+        def _factory() -> Callable[[bool], None] | None:
             try:
-                line.write(de_gpio_int, 1 if transmit else 0)
+                line.claim_output(de_gpio_int, 0)
             except Exception as exc:
-                logger.debug("RS485 DE write failed: %s", exc)
+                logger.warning("RS485 DE (GPIO %d) claim failed: %s", de_gpio_int, exc)
+                return None
+            if de_gpio_int not in BatteryMonitor._de_toggle_logged:
+                logger.info("RS485 half-duplex direction control on GPIO %d (software toggle)", de_gpio_int)
+                BatteryMonitor._de_toggle_logged.add(de_gpio_int)
 
-        return _toggle
+            def _toggle(transmit: bool) -> None:
+                try:
+                    line.write(de_gpio_int, 1 if transmit else 0)
+                except Exception as exc:
+                    logger.debug("RS485 DE write failed: %s", exc)
+
+            return _toggle
+
+        return _factory
 
     def _probe_device(
         self,
@@ -413,7 +429,7 @@ class BatteryMonitor:
         retries: int,
         mode: str = "auto",
         window: float = 3.0,
-        de_toggle: Callable[[bool], None] | None = None,
+        de_toggle_factory: Callable[[], Callable[[bool], None] | None] | None = None,
         de_release_delay_s: float = 0.001,
     ) -> Any | None:
         """Open `device`, send one quick BMS read, return the reader if it
@@ -467,18 +483,23 @@ class BatteryMonitor:
                 logger.debug("Probe %s: rs485_kernel_mode import/ioctl error: %s", device, exc)
 
         # Software DE toggle: only install when the kernel didn't take over.
-        # Skips the fallback for USB adapters (de_toggle is None) since
-        # their FT232 handles direction in hardware already.
-        if not used_kernel_rs485 and de_toggle is not None:
-            try:
-                reader._bms.set_direction_control(
-                    de_toggle,
-                    release_delay_s=de_release_delay_s,
-                )
-            except AttributeError:
-                logger.debug("Probe %s: reader has no set_direction_control()", device)
-            except Exception as exc:
-                logger.debug("Probe %s: set_direction_control failed: %s", device, exc)
+        # Skips the fallback for USB adapters (de_toggle_factory is None)
+        # since their FT232 handles direction in hardware already. NB: the
+        # factory is invoked *here* — that's the first moment we actually
+        # claim GPIO 11 as a lgpio OUTPUT, so if kernel mode won earlier we
+        # never touch its ALT4 RTS4 pinmux.
+        if not used_kernel_rs485 and de_toggle_factory is not None:
+            de_toggle = de_toggle_factory()
+            if de_toggle is not None:
+                try:
+                    reader._bms.set_direction_control(
+                        de_toggle,
+                        release_delay_s=de_release_delay_s,
+                    )
+                except AttributeError:
+                    logger.debug("Probe %s: reader has no set_direction_control()", device)
+                except Exception as exc:
+                    logger.debug("Probe %s: set_direction_control failed: %s", device, exc)
 
         # Keep the broadcast probe window short so scanning stays responsive;
         # solicited 0x90 frames normally arrive within a few hundred ms.
