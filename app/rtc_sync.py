@@ -9,7 +9,9 @@ and backed by a CR1220 (BT101). This module:
     (``VBATEN``) are enabled, so the RTC keeps ticking through power-off
   * Sets Pi/BlueOS system time from the RTC at container start (via
     ``settimeofday`` — works inside the privileged container because it
-    shares the host kernel)
+    shares the host kernel). Retries on boot and in a background thread
+    so a transient I2C failure can't leave an unsynced clock for a
+    whole no-NTP (underwater) dive
   * Runs a background thread that writes the (now correct) system time
     back to the RTC once the OS confirms NTP has synchronised, so a
     subsequent power-cycle boots with an accurate clock
@@ -224,15 +226,26 @@ class RtcSyncManager:
     Usage:
         rtc = RtcSyncManager(is_time_synced_fn=is_time_synced)
         rtc.sync_from_rtc_on_boot()   # once, early in _boot()
-        rtc.start_background_sync()   # start NTP-writeback watcher
+        rtc.start_background_sync()   # RTC→Pi retry + NTP→RTC writeback
 
     The manager is fully defensive — every operation catches its own
     exceptions and updates ``self.status.last_error`` so the /telemetry
     route can surface the diagnostic without ever failing the request.
+
+    Underwater / no-NTP path: if the first RTC read fails at boot (I2C
+    bus contention from ardupilot_manager is common), we keep retrying
+    RTC→system in the background until it succeeds. Without that, the
+    Pi clock can stay wrong for an entire dive and video/log filenames
+    would be timestamped incorrectly.
     """
 
     # Only accept RTC-sourced time when the year looks post-manufacture.
     MIN_PLAUSIBLE_YEAR = 2024
+
+    # Boot-time RTC→Pi retries (seconds between attempts). Covers the
+    # common ~1–3 s I2C busy window after container start without
+    # blocking boot for long when the chip is simply absent.
+    _BOOT_RETRY_DELAYS_S = (0.0, 0.25, 0.5, 1.0, 2.0, 3.0)
 
     def __init__(
         self,
@@ -250,6 +263,9 @@ class RtcSyncManager:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self.status = RtcStatus()
+        # True once we've successfully applied RTC→system this process,
+        # or decided NTP already owns the clock (so we stop retrying).
+        self._system_clock_from_rtc_done = False
 
     def _ensure_rtc(self) -> Mcp7940n | None:
         if self._rtc is not None:
@@ -269,6 +285,16 @@ class RtcSyncManager:
             self.status.last_error = None
         return rtc
 
+    def _drop_rtc(self) -> None:
+        """Drop a stale handle so the next ``_ensure_rtc`` re-opens I2C."""
+        rtc = self._rtc
+        self._rtc = None
+        if rtc is not None:
+            try:
+                rtc.close()
+            except Exception:
+                pass
+
     def refresh_status(self) -> bool:
         """Read RTC state (time + oscillator/battery/pwrfail flags) into status.
 
@@ -287,6 +313,9 @@ class RtcSyncManager:
             with self._lock:
                 self.status.last_error = f"read: {exc}"
             logger.debug("RTC read failed: %s", exc)
+            # Drop the handle so a later attempt re-opens cleanly (I2C
+            # bus can recover after ardupilot_manager finishes probing).
+            self._drop_rtc()
             return False
         with self._lock:
             self.status.last_read_utc = rtc_time
@@ -299,38 +328,62 @@ class RtcSyncManager:
     def sync_from_rtc_on_boot(self) -> bool:
         """Set the Pi system clock from the RTC at container startup.
 
+        Retries several times with short backoff so a transient I2C
+        failure (common while ardupilot_manager is still probing the
+        bus) doesn't leave an unsynced clock for a whole no-NTP dive.
+
         Returns True if the system clock was set. Skips (returns False)
         when the RTC is missing, the RTC year is implausible, the system
-        already reports a synced NTP clock, or the write fails. The
+        already reports a synced NTP clock, or all attempts fail. The
         no-op cases are logged at INFO so operators can see why.
 
         Always populates ``status`` with a fresh RTC read (if the chip is
         reachable) *before* deciding whether to skip, so /telemetry shows
         oscillator / battery-backup / power-fail state even when NTP wins.
         """
+        for attempt, delay in enumerate(self._BOOT_RETRY_DELAYS_S, 1):
+            if delay:
+                time.sleep(delay)
+            if self._try_sync_from_rtc(attempt=attempt):
+                return True
+            if self._system_clock_from_rtc_done:
+                # NTP already owns the clock — stop retrying.
+                return False
+        logger.warning(
+            "RTC sync-on-boot: all %d attempts failed; background thread "
+            "will keep retrying until RTC responds or NTP syncs "
+            "(critical for underwater / no-WiFi deployments)",
+            len(self._BOOT_RETRY_DELAYS_S),
+        )
+        return False
+
+    def _try_sync_from_rtc(self, attempt: int = 1) -> bool:
+        """Single RTC→system attempt. Returns True if the clock was set."""
+        if self._system_clock_from_rtc_done:
+            return False
+
         rtc = self._ensure_rtc()
         if rtc is None:
             return False
 
         # Always populate status so /telemetry has fresh flags regardless
         # of the NTP-precedence decision below.
-        self.refresh_status()
+        if not self.refresh_status():
+            return False
 
-        # If NTP has already brought the clock up to date (rare on this
-        # hardware, since we run before networking is guaranteed), don't
-        # regress it.
+        # If NTP has already brought the clock up to date, don't regress it.
         try:
             already_synced = self._is_time_synced()
         except Exception:
             already_synced = None
         if already_synced is True:
+            self._system_clock_from_rtc_done = True
             logger.info("RTC sync-on-boot skipped: system clock already NTP-synchronised")
             return False
 
         with self._lock:
             rtc_time = self.status.last_read_utc
         if rtc_time is None:
-            # refresh_status failed above; nothing more to do.
             return False
 
         if rtc_time.year < self.MIN_PLAUSIBLE_YEAR:
@@ -338,6 +391,8 @@ class RtcSyncManager:
                 "RTC time (%s) is implausible (< %d), leaving system clock alone",
                 rtc_time.isoformat(), self.MIN_PLAUSIBLE_YEAR,
             )
+            # Don't keep hammering an implausible RTC.
+            self._system_clock_from_rtc_done = True
             return False
 
         try:
@@ -351,7 +406,11 @@ class RtcSyncManager:
         with self._lock:
             self.status.last_synced_to_system_utc = rtc_time
             self.status.last_error = None
-        logger.info("System clock set from RTC: %s UTC", rtc_time.isoformat())
+        self._system_clock_from_rtc_done = True
+        logger.info(
+            "System clock set from RTC: %s UTC (attempt %d)",
+            rtc_time.isoformat(), attempt,
+        )
         # Best-effort: clear the PWRFAIL flag so we can observe future events.
         try:
             rtc.clear_power_failed()
@@ -371,6 +430,7 @@ class RtcSyncManager:
             with self._lock:
                 self.status.last_error = f"write: {exc}"
             logger.warning("RTC write failed: %s", exc)
+            self._drop_rtc()
             return False
         with self._lock:
             self.status.last_written_utc = now
@@ -379,12 +439,14 @@ class RtcSyncManager:
         return True
 
     def start_background_sync(self) -> None:
-        """Watch is_time_synced() and push time back to the RTC once true.
+        """Background: retry RTC→Pi until done, then NTP→RTC writeback.
 
-        Fires exactly once per False->True transition so we don't write
-        the RTC unnecessarily on every poll. The thread continues to
-        run so a re-sync (eg the browser bumps the clock forward) also
-        gets recorded.
+        Two jobs in one thread:
+          1. If boot didn't get RTC→system (I2C flaked) and NTP never
+             arrives (underwater), keep retrying RTC→Pi so video/logs
+             still get correct timestamps.
+          2. Once ``is_time_synced()`` flips True, push system time back
+             to the RTC (fires on each False→True transition).
         """
         if self._thread and self._thread.is_alive():
             return
@@ -404,21 +466,38 @@ class RtcSyncManager:
 
     def _run(self) -> None:
         last_synced = False
+        # Faster polls while we're still hunting for a successful RTC→Pi
+        # apply; drop back to the normal interval once that (or NTP) wins.
+        pending_poll_s = 2.0
         while not self._stop.is_set():
             try:
                 synced = self._is_time_synced()
             except Exception:
                 synced = None
+
+            # Underwater / late-I2C path: keep trying RTC→system until we
+            # succeed or NTP takes ownership of the clock.
+            if not self._system_clock_from_rtc_done and synced is not True:
+                self._try_sync_from_rtc(attempt=0)
+
             # Write on any transition into "synced" (False/None -> True).
             if synced is True and not last_synced:
                 self.write_system_time_to_rtc()
+                # NTP owns the clock now — stop RTC→Pi retries.
+                self._system_clock_from_rtc_done = True
             if synced is True:
                 last_synced = True
             elif synced is False:
                 last_synced = False
+
             # Keep telemetry fresh (oscillator/battery/pwrfail flags + drift).
             self.refresh_status()
-            self._stop.wait(self._poll_interval_s)
+            wait_s = (
+                pending_poll_s
+                if not self._system_clock_from_rtc_done
+                else self._poll_interval_s
+            )
+            self._stop.wait(wait_s)
 
     def get_status(self) -> dict[str, Any]:
         """Return a JSON-friendly snapshot for /telemetry."""
