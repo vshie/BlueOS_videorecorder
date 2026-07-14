@@ -5,3 +5,5 @@
 **/__pycache__
 # Local image build artifacts
 *.tar
+# Scratch space for verifying recording pipelines against a live Pi
+recordings_test/

@@ -46,6 +46,7 @@ import usb_storage
 from battery import BatteryMonitor
 from rtc_sync import RtcSyncManager
 import deckhand_host_setup
+import audio
 
 # ── Constants ────────────────────────────────────────────────────────────
 VIDEO_DIR = "/app/videorecordings"
@@ -388,6 +389,10 @@ def load_config():
         "active_recipe_id": None,
         "rotation_degrees": 0,
         "storage_preference": "usb",
+        # DropCam-only: mux the USB camera's built-in mic into the video
+        # MP4. The RadCam pipeline is video-only regardless of this flag
+        # since a bare external RTSP camera has no local mic.
+        "audio_enabled": True,
         "radcam_focus_us": 900,
         "radcam_zoom_us": 900,
         "radcam_pan_us": 1500,
@@ -450,6 +455,7 @@ def save_config(cfg):
 _cfg = load_config()
 image_rotation = _cfg.get("rotation_degrees", 0)
 storage_preference = _cfg.get("storage_preference", "usb")
+audio_enabled = bool(_cfg.get("audio_enabled", True))
 
 # ── ASS subtitle generation (system telemetry) ──────────────────────────
 
@@ -1046,18 +1052,58 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
             filename = basename + ".mp4"
             filepath = os.path.join(rec_dir, filename)
             current_video_file = filepath
+
+            # Try to add the USB camera's built-in mic. BlueOS's
+            # mavlink-camera-manager owns /dev/video* but leaves the ALSA
+            # capture side alone, so we can open hw:Camera,0 in parallel
+            # and mux both into the same fragmented MP4. Any failure here
+            # (mic muted at driver level, no camera plugged in, alsasrc
+            # missing) is non-fatal: we fall back to video-only so the
+            # dive doesn't get lost over an audio glitch.
+            audio_snippet = ""
+            audio_added = False
+            if audio_enabled:
+                dev = audio.find_capture_device()
+                if dev is not None:
+                    audio.ensure_mic_unmuted(dev)
+                    audio_snippet = audio.build_alsa_source_snippet(dev)
+                    audio_added = True
+                    logger.info(
+                        f"Recording with audio from {dev.gst_device} "
+                        f"({dev.human_name})"
+                    )
+                else:
+                    logger.info(
+                        "audio_enabled but no USB-camera capture device found; "
+                        "recording video-only"
+                    )
+
             # Record straight to a fragmented MP4 (a moof/mdat fragment every 5 s)
             # instead of MPEG-TS.  fragment-duration keeps the file power-cut-safe:
             # the moov header is written up front and every fragment is
             # self-contained, so a crash loses at most the final ~5 s fragment.
             # This yields a ready-to-play .mp4 with no slow TS→MP4 remux on stop
             # (the remux was pure USB I/O at ~9.5 MB/s, ~18 min for a 10 GiB file).
-            pipeline = (
-                f"rtspsrc location={url} protocols=tcp latency=200 "
-                "retry=10 timeout=5000000 ! "
-                f"{depay} ! queue ! mp4mux fragment-duration=5000 ! "
-                f"filesink location={filepath}"
-            )
+            if audio_added:
+                # Two-branch pipeline: RTSP video into m.video_0, ALSA mic
+                # into m.audio_0, both into a single fragmented mp4mux.
+                # rtspsrc gets `name=rtsp` so we can address its src pad
+                # (`rtsp.`) after declaring the audio branch first.
+                pipeline = (
+                    f"rtspsrc location={url} protocols=tcp latency=200 "
+                    "retry=10 timeout=5000000 name=rtsp "
+                    f"{audio_snippet} "
+                    f"rtsp. ! {depay} ! queue ! m.video_0 "
+                    f"mp4mux name=m fragment-duration=5000 "
+                    f"! filesink location={filepath}"
+                )
+            else:
+                pipeline = (
+                    f"rtspsrc location={url} protocols=tcp latency=200 "
+                    "retry=10 timeout=5000000 ! "
+                    f"{depay} ! queue ! mp4mux fragment-duration=5000 ! "
+                    f"filesink location={filepath}"
+                )
         command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
 
         try:
@@ -1887,10 +1933,69 @@ def route_telemetry():
         except Exception as e:
             logger.debug(f"Host setup status unavailable: {e}")
             data["host_setup"] = {"ran": False, "last_error": str(e)}
+        try:
+            data["audio_enabled"] = audio_enabled
+        except Exception:
+            pass
         return jsonify(data)
     except Exception as e:
         logger.error(f"Telemetry error: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ── Audio (USB-camera mic pipeline toggle) ──────────────────────────────
+
+@app.route("/audio", methods=["GET"])
+def route_audio_get():
+    """Report audio configuration + whether the USB camera's mic is
+    reachable right now. Consumed by the frontend to render an
+    "audio: enabled/disabled — mic detected: yes/no" line.
+    """
+    try:
+        dev = audio.find_capture_device()
+        return jsonify({
+            "success": True,
+            "audio_enabled": audio_enabled,
+            "mic_detected": dev is not None,
+            "mic_device": (
+                {
+                    "card_index": dev.card_index,
+                    "alsa_name": dev.alsa_name,
+                    "human_name": dev.human_name,
+                    "gst_device": dev.gst_device,
+                } if dev else None
+            ),
+            # RadCam never records audio (no local mic on an external
+            # RTSP camera), so surface that so the UI can gray out the
+            # toggle in RadCam mode instead of confusing the operator.
+            "supported_in_mode": not radcam_mode,
+        })
+    except Exception as e:
+        logger.error(f"Audio status error: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/audio", methods=["POST"])
+def route_audio_set():
+    """Enable or disable audio recording (persisted to config.json).
+    Takes effect on the next recording start — active recordings keep
+    their pipeline until stopped."""
+    global audio_enabled
+    data = request.get_json(silent=True) or {}
+    if "enabled" not in data:
+        return jsonify({"success": False, "message": "enabled required"}), 400
+    audio_enabled = bool(data["enabled"])
+    cfg = load_config()
+    cfg["audio_enabled"] = audio_enabled
+    save_config(cfg)
+    # If we're turning it on, opportunistically unmute so the first
+    # recording after this call actually captures signal.
+    if audio_enabled:
+        try:
+            audio.ensure_mic_unmuted()
+        except Exception as e:
+            logger.debug(f"Post-enable mic unmute skipped: {e}")
+    return jsonify({"success": True, "audio_enabled": audio_enabled})
 
 
 # ── Host setup (DeckHand config.txt + pinmux verification) ──────────────
@@ -2610,6 +2715,16 @@ def _boot():
             )
     except Exception as e:
         logger.warning(f"DeckHand host setup skipped: {e}")
+
+    # Unmute the USB camera's built-in mic once at startup. The Camera
+    # ALSA card boots with `Mic Capture Switch = off` even though
+    # `Mic Capture Volume` sits at 100% — recordings end up silent
+    # otherwise. Idempotent no-op if the camera isn't plugged in or if
+    # this isn't a DropCam (RadCam has no local mic). See app/audio.py.
+    try:
+        audio.ensure_mic_unmuted()
+    except Exception as e:
+        logger.debug(f"Boot-time mic unmute skipped: {e}")
 
     # Bring the system clock up from the DeckHand RTC before anything
     # timestamps a file — CSV filenames, event logs, and video segments
