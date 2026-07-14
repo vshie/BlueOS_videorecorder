@@ -1913,10 +1913,11 @@ def route_host_setup():
 @app.route("/host_setup/rerun", methods=["POST"])
 def route_host_setup_rerun():
     """Re-run the DeckHand host detection + config verify/patch pass.
-    Query param ``reboot=false`` skips the automatic reboot so the caller
-    can inspect the ``reboot_required`` flag and prompt the user first.
+    Reboot is opt-in via ``?reboot=true`` — by default we only detect,
+    verify, and patch, then surface ``reboot_required`` so the operator
+    triggers the reboot themselves via /host_setup/reboot when it's safe.
     """
-    auto_reboot = request.args.get("reboot", "true").lower() != "false"
+    auto_reboot = request.args.get("reboot", "false").lower() == "true"
     try:
         result = deckhand_host_setup.run_startup_setup(auto_reboot=auto_reboot)
         return jsonify({"success": True, **result})
@@ -2590,22 +2591,23 @@ def _boot():
     # DeckHand host bring-up: probe I2C for the PCA9685+RTC signature, and if
     # this is a DeckHand PCB verify /boot/firmware/config.txt has our required
     # overlay / gpio overrides. If anything's missing, patch it via the BlueOS
-    # commander HTTP API and reboot — we come back with a correct pin map.
-    # Safe no-op on Navigator boards (I2C scan says "not DeckHand") and on
-    # dev machines (commander unreachable, gracefully skipped).
+    # commander HTTP API and flag `reboot_required` in the status dict — we do
+    # NOT auto-reboot; the frontend banner surfaces the notice and the operator
+    # clicks "Reboot now" (POST /host_setup/reboot) when it's safe. Safe no-op
+    # on Navigator boards (I2C scan says "not DeckHand") and on dev machines
+    # (commander unreachable, gracefully skipped).
     try:
-        setup_result = deckhand_host_setup.run_startup_setup(auto_reboot=True)
-        if setup_result.get("reboot_triggered"):
+        setup_result = deckhand_host_setup.run_startup_setup(auto_reboot=False)
+        if setup_result.get("reboot_required"):
             logger.warning(
-                "DeckHand host config was updated; commander is rebooting the "
-                "Pi in ~5 s. Skipping the rest of boot — we'll come back on the "
-                "next start with the correct kernel pin map."
+                "=" * 72
+                + "\nDeckHand host config was patched — REBOOT REQUIRED to activate.\n"
+                f"detail: {setup_result.get('detail')}\n"
+                "The extension will keep serving HTTP with the *previous* pin map "
+                "so you can see this warning in the UI banner and click Reboot "
+                "when it's safe (e.g. not mid-recording).\n"
+                + "=" * 72
             )
-            # Give the log a moment to flush and let the reboot happen. Don't
-            # start the RTC / PCA9685 / camera / recording pipeline — those
-            # would all get torn down anyway.
-            time.sleep(30)
-            return
     except Exception as e:
         logger.warning(f"DeckHand host setup skipped: {e}")
 

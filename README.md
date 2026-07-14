@@ -63,11 +63,11 @@ The extension itself owns the DeckHand host bring-up. On every start `app/deckha
 
 1. **Detects the DeckHand PCB** by scanning I2C bus 1 for both PCA9685 (0x40) and MCP7940N RTC (0x6F). If either device is missing the extension concludes this isn't a DeckHand and **makes no host changes** — safe to install on a Navigator flight-controller board without side-effects.
 2. **Reads the active `/boot/firmware/config.txt`** (or `/boot/config.txt` on Bullseye) through BlueOS's commander HTTP API at `http://localhost/commander/v1.0/command/host`. No `/boot` bind mount is required — the extension runs with `NetworkMode: host` so `localhost` reaches the BlueOS core services directly.
-3. **Diffs the first `[pi4]` section** against the DeckHand override set (see below). If anything is missing or wrong, it patches the file (backup goes to `/boot/firmware/config.txt.bak-deckhand-<timestamp>`) and asks the commander to reboot the Pi in ~5 s so the new kernel pin map takes effect.
+3. **Diffs the first `[pi4]` section** against the DeckHand override set (see below). If anything is missing or wrong, it patches the file (backup goes to `/boot/firmware/config.txt.bak-deckhand-<timestamp>`) and sets `reboot_required=true` in its status dict. **It does not reboot on its own** — you might be mid-recording, mid-dive, or debugging over SSH. Instead the frontend shows a banner sourced from `GET /host_setup` (also mirrored under `telemetry.host_setup`) and the operator clicks "Reboot now" (which the UI turns into `POST /host_setup/reboot`) when it's safe.
 
-The extension polls `/host_setup` and exposes the same data under `telemetry.host_setup`, so the frontend can show a "Reboot required" banner if you disable auto-reboot (`POST /host_setup/rerun?reboot=false`).
+Opt-in auto-reboot is available for headless flows: `POST /host_setup/rerun?reboot=true`.
 
-Boot-loop protection: the extension tracks how many boots in a row it has applied the same set of changes. If it patches three times without the config sticking (something is undoing our writes), it stops rebooting and just logs the problem.
+Boot-loop protection: the extension tracks how many boots in a row it has applied the same set of changes. If it patches three times without the config sticking (something is undoing our writes), it gives up on further patch attempts and just logs, so a stuck config never turns into an infinite reboot loop.
 
 Manual one-shot alternative — `scripts/apply_deckhand_host_config.sh` still exists for headless / no-container-yet workflows:
 

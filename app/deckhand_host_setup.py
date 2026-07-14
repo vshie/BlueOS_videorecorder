@@ -410,8 +410,16 @@ def _trigger_reboot() -> None:
 
 # ----- top-level orchestrator -------------------------------------------
 
-def run_startup_setup(auto_reboot: bool = True) -> dict[str, Any]:
-    """One-shot startup pass. See module docstring for the full flow."""
+def run_startup_setup(auto_reboot: bool = False) -> dict[str, Any]:
+    """One-shot startup pass. See module docstring for the full flow.
+
+    ``auto_reboot`` defaults to False — when config changes are needed the
+    extension patches the file and sets ``reboot_required=True`` in the
+    status dict so the frontend can show a banner with an explicit
+    "Reboot now" button (POST /host_setup/reboot). We deliberately do
+    not reboot behind the operator's back: they may be in the middle of
+    a dive, saving a recording, or debugging over SSH.
+    """
     _STATUS["ran"] = True
     _STATUS["last_error"] = None
 
