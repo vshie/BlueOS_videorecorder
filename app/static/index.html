@@ -217,6 +217,19 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
 
 <div id="timeBanner" class="banner warn hidden">System clock may not be synchronized. Connect a device to the BlueOS WiFi AP and load this page to sync time.</div>
 
+<div id="hostSetupBanner" class="banner warn hidden">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+    <div>
+      <strong>Host reboot required.</strong>
+      <span id="hostSetupBannerDetail" style="margin-left:6px">The extension patched the BlueOS host config for the DeckHand PCB, but the changes only take effect after a reboot.</span>
+    </div>
+    <div style="display:flex;gap:6px">
+      <button class="btn-sm" id="btnHostSetupRerun" onclick="rerunHostSetup()" title="Re-check host config and runtime devices">Re-check</button>
+      <button class="btn-sm" id="btnHostSetupReboot" onclick="triggerHostReboot()" style="background:#dc3545;color:#fff;border-color:#dc3545" title="Reboot the BlueOS Pi now (5s grace period)">Reboot now</button>
+    </div>
+  </div>
+</div>
+
 <div class="tabs">
   <button class="tab active" data-tab="status">Status</button>
   <button class="tab" data-tab="recipes">Recipes</button>
@@ -1005,6 +1018,19 @@ async function pollTelemetry() {
     document.getElementById('timeBanner').classList.add('hidden');
   }
 
+  const hs = d.host_setup || {};
+  const hsBanner = document.getElementById('hostSetupBanner');
+  const hsDetail = document.getElementById('hostSetupBannerDetail');
+  if (hs.reboot_required) {
+    let msg = hs.detail || 'DeckHand host config changes require a reboot.';
+    const problems = Array.isArray(hs.problems) ? hs.problems : [];
+    if (problems.length) msg += ' Missing: ' + problems.join('; ') + '.';
+    hsDetail.textContent = msg;
+    hsBanner.classList.remove('hidden');
+  } else {
+    hsBanner.classList.add('hidden');
+  }
+
   if (d.radcam_mode && !isRadcamMode) {
     isRadcamMode = true;
     document.body.classList.add('radcam');
@@ -1342,6 +1368,46 @@ async function detectRadcam() {
     alert(d.message || 'RadCam not detected');
     btn.disabled = false;
     btn.textContent = 'Detect RadCam';
+  }
+}
+
+/* ── DeckHand host setup banner controls ──── */
+async function rerunHostSetup() {
+  const btn = document.getElementById('btnHostSetupRerun');
+  const prevText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Checking\u2026';
+  try {
+    await api('/host_setup/rerun', {method:'POST'});
+  } catch (e) {
+    console.warn('host_setup rerun failed:', e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevText;
+  }
+}
+async function triggerHostReboot() {
+  if (!confirm('Reboot the BlueOS Pi now?\n\nAny active recording will be stopped and the extension will be unreachable for ~60 seconds while the Pi restarts.')) return;
+  const btn = document.getElementById('btnHostSetupReboot');
+  btn.disabled = true;
+  btn.textContent = 'Rebooting\u2026';
+  try {
+    const d = await api('/host_setup/reboot', {method:'POST'});
+    if (d && d.success) {
+      const banner = document.getElementById('hostSetupBanner');
+      banner.classList.remove('warn');
+      banner.classList.add('info');
+      document.getElementById('hostSetupBannerDetail').textContent =
+        'Reboot scheduled. This page will lose connection for ~60 seconds while the Pi restarts.';
+    } else {
+      alert((d && d.message) || 'Reboot request failed');
+      btn.disabled = false;
+      btn.textContent = 'Reboot now';
+    }
+  } catch (e) {
+    alert('Reboot request failed: ' + e);
+    btn.disabled = false;
+    btn.textContent = 'Reboot now';
   }
 }
 
@@ -2102,7 +2168,7 @@ function loadSetup() {
 <h3>2. Hardware Wiring</h3>
 <table>
   <tr><th>Component</th><th>GPIO</th><th>Physical Pin</th><th>Notes</th></tr>
-  <tr><td>RGB Status LED (WS2812)</td><td>GPIO 20 (SPI1 MOSI)</td><td>Pin 38</td><td>Single NeoPixel data line to J104 pin 3; requires <code>dtoverlay=spi1-1cs</code></td></tr>
+  <tr><td>RGB Status LED (WS2812)</td><td>GPIO 20 (SPI1 MOSI)</td><td>Pin 38</td><td>Single NeoPixel data line to J104 pin 3; <code>/dev/spidev1.0</code> provided by BlueOS's default <code>dtoverlay=spi1-3cs</code></td></tr>
   <tr><td>Release rotation sensor</td><td>GPIO 10</td><td>Pin 19</td><td>Falling-edge alert via lgpio; J104 pin 4</td></tr>
   <tr><td>Lumen Light</td><td>GPIO 13 (PWM1)</td><td>Pin 33</td><td>1000-2000 &mu;s servo PWM. Modes: always on, pause points only, or snapshot only</td></tr>
   <tr><td>Camera Focus</td><td>PCA9685 ch 4</td><td>J105 pin 13</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
@@ -2166,7 +2232,7 @@ function loadSetup() {
 <ul>
   <li><strong>Camera not detected:</strong> Ensure the USB camera is connected and appears as <code>/dev/video2</code>. Replug and restart the extension.</li>
   <li><strong>Servo not moving:</strong> Verify wiring and that the pigpio daemon is running inside the container. Check extension logs.</li>
-  <li><strong>LED not lighting:</strong> Confirm the DeckHand host config has <code>dtoverlay=spi1-1cs</code> and that <code>/dev/spidev1.0</code> exists on the Pi. Ensure the WS2812 data line reaches J104 pin 3 (which routes to GPIO 20 = SPI1 MOSI) and that the LED shares a ground with the Pi. <code>/telemetry.gpio_backends.led</code> should read <code>ws2812-spi1</code>; <code>sim</code> means the extension couldn't open <code>/dev/spidev1.0</code>.</li>
+  <li><strong>LED not lighting:</strong> Confirm <code>/dev/spidev1.0</code> exists on the Pi (BlueOS's default <code>dtoverlay=spi1-3cs</code> creates it). Ensure the WS2812 data line reaches J104 pin 3 (which routes to GPIO 20 = SPI1 MOSI) and that the LED shares a ground with the Pi. <code>/telemetry.gpio_backends.led</code> should read <code>ws2812-spi1</code>; <code>sim</code> means the extension couldn't open <code>/dev/spidev1.0</code> (the host-setup banner will offer a rerun/reboot to recover).</li>
   <li><strong>Recordings empty or corrupt:</strong> Check disk space. If power was lost during recording, a .ts file may remain (not yet remuxed to .mp4) but is still playable.</li>
   <li><strong>Extension logs:</strong> View logs from the BlueOS Extension Manager or run <code>docker logs blueos-videorecorder</code>.</li>
 </ul>
