@@ -269,6 +269,33 @@ class RtcSyncManager:
             self.status.last_error = None
         return rtc
 
+    def refresh_status(self) -> bool:
+        """Read RTC state (time + oscillator/battery/pwrfail flags) into status.
+
+        Called from ``sync_from_rtc_on_boot`` and periodically from the
+        background thread so ``/telemetry`` always reflects the *current*
+        RTC state, not just the last time we decided to touch it.
+        Returns True on a successful read.
+        """
+        rtc = self._ensure_rtc()
+        if rtc is None:
+            return False
+        try:
+            status = rtc.read_status()
+            rtc_time = rtc.read_datetime()
+        except Exception as exc:
+            with self._lock:
+                self.status.last_error = f"read: {exc}"
+            logger.debug("RTC read failed: %s", exc)
+            return False
+        with self._lock:
+            self.status.last_read_utc = rtc_time
+            self.status.battery_backup = status.get("battery_backup")
+            self.status.oscillator_running = status.get("oscillator_running")
+            self.status.power_failed = status.get("power_failed")
+            self.status.last_error = None
+        return True
+
     def sync_from_rtc_on_boot(self) -> bool:
         """Set the Pi system clock from the RTC at container startup.
 
@@ -276,10 +303,18 @@ class RtcSyncManager:
         when the RTC is missing, the RTC year is implausible, the system
         already reports a synced NTP clock, or the write fails. The
         no-op cases are logged at INFO so operators can see why.
+
+        Always populates ``status`` with a fresh RTC read (if the chip is
+        reachable) *before* deciding whether to skip, so /telemetry shows
+        oscillator / battery-backup / power-fail state even when NTP wins.
         """
         rtc = self._ensure_rtc()
         if rtc is None:
             return False
+
+        # Always populate status so /telemetry has fresh flags regardless
+        # of the NTP-precedence decision below.
+        self.refresh_status()
 
         # If NTP has already brought the clock up to date (rare on this
         # hardware, since we run before networking is guaranteed), don't
@@ -292,20 +327,11 @@ class RtcSyncManager:
             logger.info("RTC sync-on-boot skipped: system clock already NTP-synchronised")
             return False
 
-        try:
-            status = rtc.read_status()
-            rtc_time = rtc.read_datetime()
-        except Exception as exc:
-            with self._lock:
-                self.status.last_error = f"read: {exc}"
-            logger.warning("RTC read failed at boot: %s", exc)
-            return False
-
         with self._lock:
-            self.status.last_read_utc = rtc_time
-            self.status.battery_backup = status.get("battery_backup")
-            self.status.oscillator_running = status.get("oscillator_running")
-            self.status.power_failed = status.get("power_failed")
+            rtc_time = self.status.last_read_utc
+        if rtc_time is None:
+            # refresh_status failed above; nothing more to do.
+            return False
 
         if rtc_time.year < self.MIN_PLAUSIBLE_YEAR:
             logger.info(
@@ -390,6 +416,8 @@ class RtcSyncManager:
                 last_synced = True
             elif synced is False:
                 last_synced = False
+            # Keep telemetry fresh (oscillator/battery/pwrfail flags + drift).
+            self.refresh_status()
             self._stop.wait(self._poll_interval_s)
 
     def get_status(self) -> dict[str, Any]:

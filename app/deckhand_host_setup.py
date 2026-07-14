@@ -221,9 +221,12 @@ def _detect_deckhand() -> bool | None:
         found: list[int] = []
         for addr in DECKHAND_I2C_ADDRS:
             try:
-                # read_byte is the cheapest ACK-check we can do without
-                # needing a specific register on the target.
-                bus.read_byte(addr)
+                # The PCA9685 doesn't ACK a bare `read_byte` (which sends
+                # START+ADDR+READ+STOP with no register offset) — it wants
+                # a register write first. Use ``read_byte_data(addr, 0)``
+                # instead, which reads register 0 (MODE1 on PCA9685,
+                # RTCSEC on MCP7940N — both valid on their target devices).
+                bus.read_byte_data(addr, 0x00)
                 found.append(addr)
             except OSError:
                 pass
