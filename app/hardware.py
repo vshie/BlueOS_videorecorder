@@ -2,8 +2,16 @@
 Hardware control for DropCam: RGB LED (WS2812), camera servo, lumen light,
 release servo, and auxiliary servo-style PWM outputs.
 
-Wiring (DeckHand PCB, BR-103953 Rev A):
-  - GPIO 10 (Pin 19, SPI MOSI): WS2812/NeoPixel RGB status LED
+Wiring (DeckHand PCB, BR-103953 Rev A — silkscreen labels updated with
+Rev A firmware to reflect the GPIO 10 / GPIO 20 role swap; PCB copper
+unchanged, only the silkscreen and this file's constants moved):
+  - GPIO 20 (Pin 38, SPI1 MOSI): WS2812/NeoPixel RGB status LED, driven
+                      via the SPI1 peripheral. Requires
+                      ``dtoverlay=spi1-1cs`` in the host config.txt so
+                      ``/dev/spidev1.0`` exists and MOSI is muxed to
+                      ALT4. Physically reaches the LED via J104 pin 3
+                      (which the Rev A silkscreen relabels as LED_DIN;
+                      earlier revs called it the rotation-sensor pin).
   - I2C1 GPIO 2/3 -> PCA9685 @ 0x40 drives all servo/PWM outputs. Channels
     are wired 1:1 to J105 header pins (silkscreen labels shown below), and
     the same driver code runs identically on Pi 4 and Pi 5:
@@ -19,10 +27,18 @@ Wiring (DeckHand PCB, BR-103953 Rev A):
   - GPIO 4  (Pin 7):  PCA9685 ~OE (active-low, 10 k pull-up; held HIGH by
                       default, so we must drive it LOW at init to enable
                       outputs. Otherwise every channel stays high-Z.)
-  - GPIO 20 (Pin 38): Release-shaft rotation sensor input. Produces an
+  - GPIO 10 (Pin 19): Release-shaft rotation sensor input. Produces an
                       analog 0 V -> 3.3 V ramp per rotation snapping back
                       to 0 V; read as a Schmitt-triggered digital input
-                      (falling edge = one rotation) via lgpio alert.
+                      (falling edge = one rotation) via lgpio alert. Free
+                      to use as a plain GPIO because the DeckHand host
+                      config uses ``dtoverlay=uart4`` (no ``ctsrts``) —
+                      so CTS4 does NOT claim GPIO 10 — with a targeted
+                      ``gpio=11=a4,pn`` override keeping RTS4 on GPIO 11
+                      for kernel-driven RS-485 DE. Physically reaches
+                      the sensor via J104 pin 4 (which the Rev A
+                      silkscreen relabels as ROT_SENSOR; earlier revs
+                      called this the LED pin).
 
 Note on constant naming: the ``*_GPIO`` names below were kept for backwards
 compatibility with earlier direct-PWM builds; their VALUES on the DeckHand
@@ -41,8 +57,13 @@ from gpio_backend import make_servo_backend, make_led_backend, get_gpio_line
 
 logger = logging.getLogger(__name__)
 
-# WS2812 status LED still lives on a real BCM GPIO (SPI MOSI / GPIO 10).
-LED_GPIO = 10
+# WS2812 status LED lives on GPIO 20 (SPI1 MOSI). The gpio_backend layer
+# routes this to /dev/spidev1.0 via Ws2812SpiLedBackend, which requires
+# ``dtoverlay=spi1-1cs`` on the host (managed by deckhand_host_setup.py).
+# The value is passed to make_led_backend() so it can pick the correct
+# SPI bus (GPIO 20 -> spidev1.0; legacy GPIO 10 -> spidev0.0 or
+# rpi_ws281x); once picked, actual bit-encoding is handled in-driver.
+LED_GPIO = 20
 
 # PCA9685 output channels — see wiring table in the module docstring.
 SERVO_GPIO = 0        # TILT     (camera tilt servo)
@@ -59,15 +80,21 @@ SPARE_GPIO = 7        # SPARE    (unused / reserved)
 # any servo will move.
 PCA9685_OE_GPIO = 4
 
-# Release-servo shaft rotation sensor input on the DeckHand PCB. The sensor
-# reaches the Pi via J104 pin 4 (WS2812 LED header) which is wired to
-# BCM GPIO 20. The sensor produces a slow 0 V -> 3.3 V ramp once per shaft
-# rotation and snaps sharply back to 0 V; falling on the snap-back gives one
-# clean, well-defined pulse per rotation instead of the noisy slow crossing
-# on the way up. On the old (direct-wired) prototype this was GPIO 26 and
-# shared a pin with the zoom aux output — the DeckHand PCB removes that
-# collision entirely because zoom now lives on PCA9685 channel 5.
-ROTATION_SENSOR_GPIO = 20
+# Release-servo shaft rotation sensor input on the DeckHand PCB. Reaches
+# the Pi via J104 pin 4 -> BCM GPIO 10. The sensor produces a slow 0 V ->
+# 3.3 V ramp once per shaft rotation and snaps sharply back to 0 V;
+# falling on the snap-back gives one clean, well-defined pulse per
+# rotation instead of the noisy slow crossing on the way up.
+#
+# History: on the direct-wired prototype this was GPIO 26 (shared with
+# the zoom aux output — the DeckHand PCB removed that collision by
+# routing zoom to PCA9685 channel 5). Rev A of the DeckHand PCB put the
+# sensor on GPIO 20 and the LED on GPIO 10. From the Rev A firmware
+# release (see silkscreen relabel on J104) we swapped: the sensor moved
+# to GPIO 10 (freed by dropping ``ctsrts`` from ``dtoverlay=uart4``),
+# and the LED moved to GPIO 20 (SPI1 MOSI). The physical PCB copper is
+# unchanged; only the silkscreen and these two constants moved.
+ROTATION_SENSOR_GPIO = 10
 # 100 ms glitch filter.  We trigger on the FAST snap-back (falling edge)
 # from ~3.3 V to ~0 V, not the slow ramp up through the input threshold.
 # Both rest levels are stable for the entire rotation period so a large
@@ -689,12 +716,13 @@ class HardwareController:
 
     # ── Release-Shaft Rotation Sensor ──────────────────────────────────
     #
-    # Counts *falling* edges on ROTATION_SENSOR_GPIO (BCM GPIO 20 on the
-    # DeckHand PCB) via an lgpio alert callback. The sensor produces a slow
-    # 0 V -> 3.3 V ramp once per rotation and then snaps sharply back to
-    # 0 V; falling on the snap-back gives one clean, well-defined pulse per
-    # rotation instead of the noisy slow crossing on the way up. Combined
-    # with a 100 ms hardware glitch filter (lgpio debounce) and a 250 ms
+    # Counts *falling* edges on ROTATION_SENSOR_GPIO (BCM GPIO 10 on the
+    # Rev-A DeckHand PCB after the silkscreen relabel; previously GPIO 20)
+    # via an lgpio alert callback. The sensor produces a slow 0 V -> 3.3 V
+    # ramp once per rotation and then snaps sharply back to 0 V; falling
+    # on the snap-back gives one clean, well-defined pulse per rotation
+    # instead of the noisy slow crossing on the way up. Combined with a
+    # 100 ms hardware glitch filter (lgpio debounce) and a 250 ms
     # software min-inter-edge debounce, this is highly resistant to the
     # threshold-band chatter that used to fire spurious "pause" edges
     # while the shaft was stationary.
@@ -1115,11 +1143,12 @@ class HardwareController:
         Historical: on the direct-wired prototype boards GPIO 26 was
         dual-purpose (RadCam zoom output / DropCam rotation sensor input),
         so every aux-PWM write consulted this guard to avoid clobbering
-        the sensor. On the DeckHand PCB the rotation sensor is on
-        BCM GPIO 20 and every aux channel is a PCA9685 output (channels
-        0-7), so the two namespaces cannot overlap and this always
-        returns False. Kept as a defensive shim so the aux_pwm write
-        paths and is_aux_pwm_available() continue to work unchanged.
+        the sensor. On the DeckHand PCB the rotation sensor is a Pi
+        header GPIO (10 on Rev-A) and every aux channel is a PCA9685
+        output (channels 0-7), so the two namespaces cannot overlap and
+        this always returns False. Kept as a defensive shim so the
+        aux_pwm write paths and is_aux_pwm_available() continue to work
+        unchanged.
         """
         return False
 

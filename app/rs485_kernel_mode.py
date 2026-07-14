@@ -8,9 +8,13 @@ the same auto-direction behaviour an FT232 gives to the BlueRobotics
 BLUART USB adapter, only routed through the SoC's UART controller instead
 of a USB serial chip.
 
-On the DeckHand PCB this means:
-    * ``dtoverlay=uart4,ctsrts`` in ``/boot/firmware/config.txt``
-      routes GPIO 11 to the PL011 RTS4 alt-function.
+On the DeckHand Rev-A firmware this means:
+    * ``dtoverlay=uart4`` (plain — NO ``,ctsrts``) enables TXD4/RXD4
+      only, so GPIO 10 stays free for the release-shaft rotation
+      sensor input. GPIO 11 stays a plain GPIO under this overlay.
+    * A ``gpio=11=a4,pn`` line in ``/boot/firmware/config.txt`` forces
+      GPIO 11 back into ALT4 (RTS4) at boot — this replaces what the
+      dropped ``,ctsrts`` suffix used to give us for free.
     * The SN65HVD75 DE/~RE pin (tied together on the board) is wired
       to GPIO 11, so RTS4 physically drives DE.
     * A ``TIOCSRS485`` ioctl on the open ``/dev/ttyAMA*`` fd tells the

@@ -10,7 +10,7 @@ A BlueOS extension that turns a Raspberry Pi 4 or Pi 5 into a standalone, deploy
 - **PCA9685-driven servo outputs** (tilt, lumen light, release, focus, zoom, pan, external, spare) — identical code path on Pi 4 and Pi 5
 - **RS-485 Daly BMS** on UART4 with GPIO-driven half-duplex direction control
 - **Battery-backed RTC** (MCP7940N) — system clock is set from the RTC at boot and written back once NTP syncs
-- **RGB LED** status indicator (WS2812 NeoPixel on GPIO 10)
+- **RGB LED** status indicator (WS2812 NeoPixel on GPIO 20 / SPI1 MOSI, DeckHand Rev-A firmware)
 - **System telemetry** subtitle overlay (CPU temp, voltage, clock, servo position, light level)
 - **Disk space guard** — stops recording when < 1 GB free
 - **Web interface** with Status, Recipes, and Setup tabs
@@ -30,18 +30,19 @@ Servo/PWM outputs on the PCA9685 (I2C 0x40, J105 header):
 | Pan | 6 (PAN) | 19 |
 | Spare | 7 (SPARE) | 22 |
 
-Direct Pi connections:
+Direct Pi connections (DeckHand Rev-A firmware — J104 silkscreen relabelled
+to match; the PCB copper is identical to earlier revisions):
 
 | Function | Pi GPIO | Pi Pin | Notes |
 |----------|---------|--------|-------|
-| RGB Status LED (WS2812) | GPIO 10 (SPI MOSI) | Pin 19 | Data line to J104 pin 3 |
+| RGB Status LED (WS2812) | GPIO 20 (SPI1 MOSI) | Pin 38 | Data line to J104 pin 3; needs `dtoverlay=spi1-1cs` for `/dev/spidev1.0` |
 | PCA9685 output enable (~OE) | GPIO 4 | Pin 7 | Active LOW; driven low at boot to enable outputs |
 | RS-485 UART TX | GPIO 8 (UART4 TX) | Pin 24 | To SN65HVD75 DI |
 | RS-485 UART RX | GPIO 9 (UART4 RX) | Pin 21 | From SN65HVD75 RO |
-| RS-485 DE / ~RE | GPIO 11 | Pin 23 | HIGH = transmit, LOW = receive |
+| RS-485 DE / ~RE | GPIO 11 (RTS4) | Pin 23 | Kernel drives via `TIOCSRS485`; forced to ALT4 by `gpio=11=a4,pn` in `config.txt` |
 | I2C-1 SDA | GPIO 2 | Pin 3 | PCA9685 (0x40) + MCP7940N RTC (0x6F) |
 | I2C-1 SCL | GPIO 3 | Pin 5 | Same bus |
-| Release-shaft rotation sensor | GPIO 20 | Pin 38 | Falling-edge alert, via J104 pin 4 |
+| Release-shaft rotation sensor | GPIO 10 | Pin 19 | Falling-edge alert via J104 pin 4; free because `dtoverlay=uart4` (no `,ctsrts`) doesn't claim CTS4 |
 | USB Camera | — | /dev/video2 | H264 USB camera |
 
 ## Host Prerequisites (BlueOS Pi)
@@ -82,8 +83,8 @@ Both paths produce the same result — the `[pi4]` block in `/boot/firmware/conf
 ```
 [pi4]
 dtoverlay=uart3-off       # custom - DeckHand: GPIO 4 needed for PCA9685 ~OE
-dtoverlay=spi1-3cs-off    # custom - DeckHand: GPIO 20 needed as rotation-sensor input
-dtoverlay=uart4,ctsrts    # custom - DeckHand: RTS4 on GPIO 11 for kernel TIOCSRS485 DE
+dtoverlay=uart4           # custom - DeckHand: TXD4/RXD4 only; GPIO 10 stays free for rotation sensor
+dtoverlay=spi1-1cs        # custom - DeckHand: enable /dev/spidev1.0 for WS2812 LED on GPIO 20
 gpio=11,24,25=op,pu,dh
 gpio=11=a4,pn             # custom - DeckHand: force GPIO 11 to ALT4 (RTS4)
 ...
@@ -99,9 +100,9 @@ enable_uart=1
 Rationale for the overrides applied by the script:
 
 - **`dtoverlay=uart3-off`** is a deliberate no-op overlay name. The Pi firmware silently skips it, so nothing claims GPIO 4/5. But `dtoverlay=uart3-off` still starts with the string `dtoverlay=uart3`, which is what BlueOS's reconciler prefix-matches on, so it never re-adds the real `dtoverlay=uart3` (which would put GPIO 4 into UART3 alt-function and fight the PCA9685 `~OE` line).
-- **`dtoverlay=spi1-3cs-off`** applies the same trick to SPI1's 3-chip-select overlay. The real overlay would claim GPIO 16–21 as SPI1 pins, and we need GPIO 20 as an input for the release-shaft rotation sensor.
-- **`dtoverlay=uart4,ctsrts`** is a **real** overlay variant: the `,ctsrts` parameter tells the PL011 driver to also grab CTS4 (GPIO 10) and RTS4 (GPIO 11) alongside TXD4/RXD4. This is what lets the kernel drive the SN65HVD75 DE/~RE line for us with hardware-precision timing via `TIOCSRS485` — no Python GPIO toggling, no missed head bytes. The `,ctsrts` suffix is what BlueOS's reconciler prefix-matches on when looking for `dtoverlay=uart4`, so this line satisfies the reconciler while adding what we need.
-- **`gpio=11=a4,pn`** is a per-pin override that runs *after* the reconciler's required `gpio=11,24,25=op,pu,dh` line. Pi firmware applies `gpio=` directives top-to-bottom and later per-pin settings override earlier list entries for the same pin, so GPIO 11 boots as ALT4 (RTS4, HIGH-when-idle isn't a concern because the PL011 driver takes ownership immediately after firmware) while 24 and 25 keep their required op,pu,dh state.
+- **`dtoverlay=uart4`** (plain — **no** `,ctsrts` suffix) enables TXD4/RXD4 on GPIO 8/9 only. The Rev-A firmware needs GPIO 10 to stay a plain input for the rotation sensor, so we deliberately do NOT let `,ctsrts` claim it as CTS4. RTS4 on GPIO 11 (which the SN65HVD75 uses as its DE/~RE line) is recovered by the `gpio=11=a4,pn` override below. This still satisfies BlueOS's reconciler because the reconciler prefix-matches `dtoverlay=uart4` and finds our line as-is.
+- **`dtoverlay=spi1-1cs`** is a **real** overlay: it enables the SPI1 peripheral with a single chip-select line, muxing GPIO 18/19/20/21 to ALT4 (SPI1 CE0/MISO/MOSI/SCLK) and creating `/dev/spidev1.0`. The WS2812 LED backend opens that device and clocks bit-encoded WS2812 data out MOSI (GPIO 20). GPIO 18/19/21 aren't wired to anything else on the DeckHand, so claiming them here is harmless.
+- **`gpio=11=a4,pn`** is a per-pin override that runs *after* the reconciler's required `gpio=11,24,25=op,pu,dh` line. Pi firmware applies `gpio=` directives top-to-bottom and later per-pin settings override earlier list entries for the same pin, so GPIO 11 boots as ALT4 (RTS4, no pull) — exactly what the PL011 driver needs to drive DE via `TIOCSRS485` — while 24 and 25 keep their required op,pu,dh state. On Rev-A firmware this line is **essential** (not decorative): dropping `,ctsrts` from the uart4 overlay means the overlay no longer mux GPIO 11 to RTS4, and this override is what puts it back.
 - The `# custom` inline comment on the four protected lines triggers `blueos_startup_update.CONFIG_USER_PROTECTION_WORD`, telling the reconciler's filter pass to leave them alone.
 
 The MCP7940N RTC is driven by the extension in Python (no `dtoverlay=i2c-rtc` needed).
@@ -178,12 +179,12 @@ The DeckHand PCB (BR-103953 Rev A) sits on the Pi's 40-pin header. All servo/lig
 
 | Function | Notes |
 |----------|-------|
-| RGB Status LED (WS2812) | GPIO 10 / SPI MOSI. Single NeoPixel data line to J104 pin 3. |
+| RGB Status LED (WS2812) | GPIO 20 / SPI1 MOSI. Single NeoPixel data line to J104 pin 3. Requires `dtoverlay=spi1-1cs` on the host so `/dev/spidev1.0` exists. |
 | Lumen Light | PCA9685 channel 1 (J105 pin 4). 1000-2000 µs servo PWM. Modes: always on, pause points only, or snapshot only. |
 | Camera Tilt Servo | PCA9685 channel 0 (J105 pin 1). 1000-2000 µs PWM. Centered at 1500 µs on boot. |
 | External Servo | PCA9685 channel 3 (J105 pin 10). 1000-2000 µs PWM. |
 | Release Servo | PCA9685 channel 2 (J105 pin 7). Continuous-rotation drive: 1500 µs = stop, 1000 µs = wind, 2000 µs = unwind (frees unit to surface). Held at 1500 µs from boot. |
-| Release rotation sensor | GPIO 20 (J104 pin 4). Falling-edge alert via lgpio; 100 ms glitch filter + 250 ms software debounce. |
+| Release rotation sensor | GPIO 10 (J104 pin 4). Falling-edge alert via lgpio; 100 ms glitch filter + 250 ms software debounce. Free because `dtoverlay=uart4` (no `,ctsrts`) doesn't claim CTS4. |
 | Camera Focus | PCA9685 channel 4 (J105 pin 13). 1000-2000 µs servo PWM. |
 | Zoom | PCA9685 channel 5 (J105 pin 16). 1000-2000 µs servo PWM. |
 | Pan | PCA9685 channel 6 (J105 pin 19). 1000-2000 µs servo PWM. |
@@ -254,8 +255,8 @@ If the RTC is missing (dev machine, legacy board) or the coin cell is dead the e
 
 - **Camera not detected:** Ensure the USB camera is connected and appears as `/dev/video2`. Replug and restart the extension.
 - **Servo not moving:** Confirm I2C is enabled on the host (`dtparam=i2c_arm=on`) and that `i2cdetect -y 1` shows both `0x40` (PCA9685) and `0x6f` (RTC). Check that `/telemetry` reports `"servo": "pca9685"`. If it shows `sim`, the extension could not open the I2C bus. GPIO 4 (~OE) must be pulled LOW at boot; if it is stuck HIGH, every channel stays high-Z and no servo moves.
-- **BMS not detected:** First confirm the kernel is new enough for hardware RS-485 (`uname -r` should start with `6.` — anything `5.10.x` means you're on the old Bullseye BlueOS image and the DE line can't be timed tightly enough). Then confirm `dtoverlay=uart4,ctsrts` is present in `/boot/config.txt` (or `/boot/firmware/config.txt`) — the `,ctsrts` suffix is what puts GPIO 11 in RTS4 alt-function so the kernel can drive DE. With `serial_port: "auto"` (the default) the extension resolves UART4 by MMIO address and logs `"BMS auto-scan: resolved UART4 hardware to /dev/ttyAMA<N>"` at startup, followed by `"RS485 direction control: kernel TIOCSRS485 on /dev/ttyAMA<N>"` once the ioctl is accepted; `/battery` should then report the same `serial_port`. If the TIOCSRS485 log is missing you'll see `"RS485 half-duplex direction control on GPIO 11"` instead — that's the software fallback (works, but drops the first byte of some responses). If you replaced the shield with a USB adapter, keep `serial_port: "auto"` and clear `rs485_de_gpio` to null (the FT232 handles DE itself).
+- **BMS not detected:** First confirm the kernel is new enough for hardware RS-485 (`uname -r` should start with `6.` — anything `5.10.x` means you're on the old Bullseye BlueOS image and the DE line can't be timed tightly enough). Then confirm both `dtoverlay=uart4` (plain, no `,ctsrts`) and `gpio=11=a4,pn` are present in the first `[pi4]` block of `/boot/firmware/config.txt` — together they put GPIO 11 in RTS4 alt-function so the kernel can drive DE while leaving GPIO 10 free for the rotation sensor. With `serial_port: "auto"` (the default) the extension resolves UART4 by MMIO address and logs `"BMS auto-scan: resolved UART4 hardware to /dev/ttyAMA<N>"` at startup, followed by `"RS485 direction control: kernel TIOCSRS485 on /dev/ttyAMA<N>"` once the ioctl is accepted; `/battery` should then report the same `serial_port`. If the TIOCSRS485 log is missing you'll see `"RS485 half-duplex direction control on GPIO 11"` instead — that's the software fallback (works, but drops the first byte of some responses). If you replaced the shield with a USB adapter, keep `serial_port: "auto"` and clear `rs485_de_gpio` to null (the FT232 handles DE itself).
 - **RTC time wrong on boot:** Check the CR1220 coin cell (BT101) and `rtc.battery_backup` / `rtc.oscillator_running` in `/telemetry`. `rtc.power_failed` = true means the RTC lost power since the last sync — the extension clears the flag once the system clock is set.
-- **LED not lighting:** Ensure the WS2812 data line is on GPIO 10 and shares a ground with the Pi.
+- **LED not lighting:** Confirm `/dev/spidev1.0` exists on the host (proves `dtoverlay=spi1-1cs` loaded — `ls /dev/spidev*` should show both `spidev0.0` for legacy and `spidev1.0` for the LED). Then confirm the WS2812 data line is on GPIO 20 (SPI1 MOSI, header pin 38 → J104 pin 3) and that both the LED VCC and the Pi share a ground. `/telemetry.gpio_backends.led` should read `"ws2812-spi1"` — if it shows `"sim"`, the extension couldn't open `/dev/spidev1.0`, which almost always means a config.txt regression (rerun `POST /host_setup/rerun` or reboot).
 - **Recordings empty or corrupt:** Check disk space. Recordings are fragmented .mp4 files that stay playable even if power was lost mid-recording (only the final ~5 s fragment is lost). Legacy .ts files from older builds are auto-remuxed to .mp4 on next start.
 - **Extension logs:** View logs from the BlueOS Extension Manager or run `docker logs blueos-videorecorder`.

@@ -20,9 +20,13 @@ selects an implementation that works on the detected board:
     DeckHand PCB     -> PCA9685 over I2C (Pi 4 + Pi 5, identical)
     Legacy fallback  -> pigpio (Pi 4 DMA) / lgpio / RP1 hardware-PWM (Pi 5)
 
-  WS2812 RGB LED (wired to GPIO 10 / SPI0 MOSI):
-    Pi 4 and earlier -> rpi_ws281x; fall back to rpi5-ws2812 (SPI)
-    Pi 5             -> rpi5-ws2812 (SPI, /dev/spidev0.0)
+  WS2812 RGB LED:
+    DeckHand Rev-A firmware -> GPIO 20 / SPI1 MOSI (/dev/spidev1.0)
+                               via Ws2812SpiLedBackend. Requires
+                               ``dtoverlay=spi1-1cs`` on the host.
+    Legacy (GPIO 10 wiring) -> Ws281xLedBackend on Pi 4 (rpi_ws281x);
+                               Ws2812SpiLedBackend on /dev/spidev0.0 on Pi 5.
+    Other PWM pins (12/13/18/19) -> Ws281xLedBackend if requested.
 
   Single-pin GPIO (OE / RS485 DE / rotation sensor input):
     Both boards      -> lgpio via GpioLine (chip auto-selected)
@@ -430,8 +434,11 @@ class GpioLine:
 
     Used by the DeckHand integration for:
       * PCA9685 ~OE   (GPIO 4, output, active-low)
-      * RS-485 DE/~RE (GPIO 11, output; HIGH=transmit, LOW=receive)
-      * Release-shaft rotation sensor (GPIO 20, alert input, falling edge)
+      * RS-485 DE/~RE (GPIO 11, output; HIGH=transmit, LOW=receive) —
+        only in the SW-toggle fallback path; the preferred path is
+        kernel TIOCSRS485 which drives RTS4 (GPIO 11) itself.
+      * Release-shaft rotation sensor (GPIO 10 on Rev-A silkscreen,
+        alert input, falling edge)
 
     lgpio works on both the Pi 4 SoC GPIO chip and the Pi 5 RP1 GPIO chip
     with the same API, so this replaces the legacy pigpio callback path for
@@ -586,7 +593,15 @@ class LedBackend:
 
 
 class Ws281xLedBackend(LedBackend):
-    """Pi 4 path: rpi_ws281x on GPIO 10 (SPI MOSI), RGB wire order."""
+    """Legacy path: rpi_ws281x on a PWM/PCM/SPI0 pin (10, 12, 13, 18, 19, 21).
+
+    Cannot drive GPIO 20 — the rpi_ws281x library is restricted to the
+    PWM/PCM peripherals plus SPI0 MOSI. On the DeckHand Rev-A wiring
+    the LED lives on GPIO 20 (SPI1 MOSI), so callers should use
+    :class:`Ws2812SpiLedBackend` there. This backend stays available
+    for legacy direct-wired boards and for developers experimenting
+    with alternative WS2812 pins on the same code base.
+    """
 
     name = "rpi_ws281x"
 
@@ -598,13 +613,20 @@ class Ws281xLedBackend(LedBackend):
             count, gpio, 800000, 10, False, brightness, 0, strip_type=ws.WS2811_STRIP_RGB
         )
         self._strip.begin()
+        self._gpio = int(gpio)
         self.available = True
 
     def set_color(self, r: int, g: int, b: int) -> None:
-        # SPI bit-boundary bleed workaround on GPIO 10: the LSB of each
-        # transmitted byte can leak into the MSB of the next, so clear the
-        # LSB of R and G (imperceptible, max 1/255 loss).
-        self._strip.setPixelColor(0, self._Color(r & 0xFE, g & 0xFE, b))
+        # SPI0 bit-boundary bleed workaround (GPIO 10 only): the LSB of
+        # each transmitted byte can leak into the MSB of the next when
+        # the library uses SPI to encode WS2812 bits. Clear the LSB of R
+        # and G on that pin only (imperceptible, max 1/255 loss). On the
+        # PWM/PCM pins the peripheral produces a clean waveform and
+        # doesn't need the workaround.
+        if self._gpio == 10:
+            r &= 0xFE
+            g &= 0xFE
+        self._strip.setPixelColor(0, self._Color(r, g, b))
         self._strip.show()
 
     def cleanup(self) -> None:
@@ -615,16 +637,19 @@ class Ws281xLedBackend(LedBackend):
 
 
 class Ws2812SpiLedBackend(LedBackend):
-    """Pi 5 (and universal) path: WS2812 over SPI (MOSI / GPIO 10).
+    """WS2812 driven by an SPI peripheral (MOSI produces the encoded stream).
 
-    Self-contained SPI bit-banging driver (no external NeoPixel library, so it
-    works on the image's Python 3.8). Each WS2812 data bit is encoded as one
-    SPI byte clocked at 6.5 MHz: 0 -> 0b11000000, 1 -> 0b11111100. A run of
-    zero bytes up front provides the >50 us reset/latch.
+    On the DeckHand Rev-A firmware the LED lives on **GPIO 20 = SPI1
+    MOSI**, so use ``spi_bus=1, spi_device=0`` (i.e. ``/dev/spidev1.0``)
+    — enabled on the host by ``dtoverlay=spi1-1cs``. Legacy boards that
+    still route the LED to GPIO 10 (SPI0 MOSI) use ``spi_bus=0``.
 
-    Bytes are sent in R,G,B order, which matches the Pi 4 (WS2811_STRIP_RGB)
-    behaviour for this physical LED. (The reset is the same encoding used by
-    the rpi5-ws2812 project, validated against the hardware.)
+    Self-contained SPI bit-banging driver (no external NeoPixel library,
+    so it works on the image's older Python). Each WS2812 data bit is
+    encoded as one SPI byte clocked at 6.5 MHz: 0 -> 0b11000000, 1 ->
+    0b11111100. A run of zero bytes up front provides the >50 us
+    reset/latch. Bytes are sent in R,G,B order to match the physical
+    LED's WS2811_STRIP_RGB wire order.
     """
 
     name = "ws2812-spi"
@@ -642,8 +667,14 @@ class Ws2812SpiLedBackend(LedBackend):
         self._spi.max_speed_hz = self.SPEED_HZ
         self._spi.mode = 0
         self._spi.lsbfirst = False
+        self._bus = spi_bus
+        self._device = spi_device
         # Precompute the per-bit -> SPI-byte lookup for speed.
         self._bit = (self.LED_ZERO, self.LED_ONE)
+        # Distinguish the two possible SPI buses in logs so operators can
+        # tell whether the DeckHand SPI1 path is active or the legacy
+        # SPI0 fallback kicked in.
+        self.name = f"ws2812-spi{spi_bus}"
         self.available = True
 
     def _encode_byte(self, value: int) -> list[int]:
@@ -670,18 +701,74 @@ class Ws2812SpiLedBackend(LedBackend):
             pass
 
 
+# GPIOs that the rpi_ws281x library can drive (PWM channels + PCM + SPI0
+# MOSI). Anything else must go through Ws2812SpiLedBackend.
+_WS281X_CAPABLE_PINS = {10, 12, 13, 18, 19, 21}
+
+
 def make_led_backend(gpio: int, count: int, brightness: int) -> LedBackend:
-    """Pick the best available WS2812 LED backend for this board."""
-    order = ["ws2812-spi"] if is_pi5() else ["rpi_ws281x", "ws2812-spi"]
-    for name in order:
+    """Pick the best available WS2812 LED backend for the requested pin.
+
+    Selection matrix:
+
+      * **GPIO 20** (DeckHand Rev-A): the WS2812 hangs off SPI1 MOSI, so
+        the only working driver is :class:`Ws2812SpiLedBackend` on
+        ``/dev/spidev1.0``. If the host hasn't enabled SPI1 yet (no
+        ``dtoverlay=spi1-1cs``) we fall back to sim so the rest of the
+        app keeps running.
+
+      * **GPIO 10** (legacy DeckHand wiring, SPI0 MOSI): prefer
+        :class:`Ws281xLedBackend` on Pi 4 (rpi_ws281x has better timing
+        via DMA), fall back to :class:`Ws2812SpiLedBackend` on
+        ``/dev/spidev0.0``. On Pi 5 rpi_ws281x doesn't work, so
+        Ws2812SpiLedBackend is the primary path.
+
+      * **PWM/PCM pins (12, 13, 18, 19, 21)**: use :class:`Ws281xLedBackend`
+        directly (rpi_ws281x picks the correct peripheral per pin).
+
+      * **Anything else**: sim backend.
+    """
+    if gpio == 20:
         try:
-            if name == "rpi_ws281x":
-                backend = Ws281xLedBackend(gpio, count, brightness)
-            else:
-                backend = Ws2812SpiLedBackend(count)
-            logger.info("LED backend: %s", backend.name)
+            backend = Ws2812SpiLedBackend(count, spi_bus=1, spi_device=0)
+            logger.info("LED backend: %s (SPI1 MOSI / GPIO 20)", backend.name)
             return backend
         except Exception as exc:
-            logger.warning("LED backend %s unavailable: %s", name, exc)
-    logger.warning("No LED backend available; LED will be simulated")
+            logger.warning(
+                "LED backend %s unavailable (is dtoverlay=spi1-1cs in config.txt?): %s",
+                "ws2812-spi1", exc,
+            )
+        logger.warning("No LED backend available for GPIO 20; LED will be simulated")
+        return LedBackend()
+
+    # Legacy: GPIO 10 (SPI0 MOSI) — prefer rpi_ws281x on Pi 4, SPI0 elsewhere.
+    if gpio == 10:
+        order = ["ws2812-spi0"] if is_pi5() else ["rpi_ws281x", "ws2812-spi0"]
+        for name in order:
+            try:
+                if name == "rpi_ws281x":
+                    backend = Ws281xLedBackend(gpio, count, brightness)
+                else:
+                    backend = Ws2812SpiLedBackend(count, spi_bus=0, spi_device=0)
+                logger.info("LED backend: %s (legacy GPIO 10)", backend.name)
+                return backend
+            except Exception as exc:
+                logger.warning("LED backend %s unavailable: %s", name, exc)
+        logger.warning("No LED backend available for GPIO 10; LED will be simulated")
+        return LedBackend()
+
+    # PWM/PCM pins that rpi_ws281x can drive directly.
+    if gpio in _WS281X_CAPABLE_PINS:
+        try:
+            backend = Ws281xLedBackend(gpio, count, brightness)
+            logger.info("LED backend: %s (GPIO %d)", backend.name, gpio)
+            return backend
+        except Exception as exc:
+            logger.warning("LED backend rpi_ws281x on GPIO %d unavailable: %s", gpio, exc)
+
+    logger.warning(
+        "No LED backend can drive GPIO %d; LED will be simulated "
+        "(supported pins: 10 (SPI0), 12/13/18/19 (PWM), 20 (SPI1), 21 (PCM))",
+        gpio,
+    )
     return LedBackend()

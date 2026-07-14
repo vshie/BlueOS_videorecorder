@@ -2682,14 +2682,19 @@ def _boot():
     # which side-effect-flips GPIO 2 (SDA1) from ALT0 to plain OUTPUT LOW —
     # shorting the bus and causing both the PCA9685 (0x40) and MCP7940N
     # (0x6F) to fail with [Errno 5] Input/output error. Similarly, GPIO 11
-    # (RTS4) can get knocked out of ALT4 by other actors. Force both pins
-    # back to their DeckHand-required alt-function before any code opens
-    # /dev/i2c-1 or /dev/ttyAMA*. No-op on Pi 5 or dev laptops.
+    # (RTS4) and GPIO 20 (SPI1 MOSI) can get knocked out of their alt-
+    # functions by other actors. Force all four pins back to their
+    # DeckHand-required alt-function before any code opens /dev/i2c-1,
+    # /dev/ttyAMA*, or /dev/spidev1.0. GPIO 10 stays in its default
+    # INPUT state (no alt) for the rotation sensor — lgpio's alert
+    # claim in init_rotation_sensor() will configure the input mode
+    # itself. No-op on Pi 5 or dev laptops (returns False silently).
     try:
         from bcm_pinmux import set_alt
         set_alt(2, "a0")   # SDA1 for PCA9685 + MCP7940N
         set_alt(3, "a0")   # SCL1
         set_alt(11, "a4")  # RTS4 so kernel PL011 can drive RS-485 DE
+        set_alt(20, "a4")  # SPI1 MOSI so /dev/spidev1.0 can drive WS2812 LED
     except Exception as e:
         logger.debug(f"BCM pinmux recovery skipped: {e}")
 

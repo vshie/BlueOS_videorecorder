@@ -9,18 +9,23 @@
 # Why this is needed:
 #   BlueOS ships blueos_startup_update.py which, on every Pi 4 boot,
 #   restores a Navigator flight-controller pin map into /boot/config.txt
-#   (adding lines and filtering user-modified variants). Four of the
-#   pins that Navigator claims collide with what the DeckHand PCB uses:
+#   (adding lines and filtering user-modified variants). Some of the
+#   pins that Navigator claims collide with what the DeckHand PCB uses,
+#   and some overlays we NEED aren't there by default:
 #
 #     dtoverlay=uart3          claims GPIO 4/5   -> collides with PCA9685 ~OE (GPIO 4)
-#     dtoverlay=spi1-3cs       claims GPIO 16-21 -> collides with the
-#                              release-shaft rotation sensor input (GPIO 20)
+#     dtoverlay=uart4          only enables TXD4/RXD4 (GPIO 8/9). GOOD
+#                              as-is for DeckHand Rev-A firmware: we
+#                              DO NOT want ,ctsrts because that would
+#                              claim GPIO 10 as CTS4 and steal the
+#                              rotation-sensor input pin.
+#     (no SPI1 by default)     -> we need it enabled (dtoverlay=spi1-1cs)
+#                              so /dev/spidev1.0 exists and the WS2812
+#                              LED backend can drive GPIO 20 = SPI1 MOSI
 #     gpio=11,24,25=op,pu,dh   drives GPIO 11 HIGH at boot -> that's the
-#                              RS-485 DE line, which asserts the transceiver
-#                              driver for the entire boot window
-#     dtoverlay=uart4          only enables TXD4/RXD4 (GPIO 8/9); we ALSO
-#                              want RTS4 on GPIO 11 so the kernel PL011
-#                              driver can flip DE for us in hardware
+#                              RS-485 DE line. We need it in ALT4 (RTS4)
+#                              so the kernel PL011 driver can flip DE
+#                              via TIOCSRS485 with hardware timing.
 #
 # The trick this script uses:
 #   The reconciler's "already exists" check is `re.match(config, line)`,
@@ -30,17 +35,20 @@
 #   comment as a protection marker on user lines. Combining the two:
 #
 #     dtoverlay=uart3-off       # custom - <reason>
-#     dtoverlay=spi1-3cs-off    # custom - <reason>
-#     dtoverlay=uart4,ctsrts    # custom - <reason>
+#     dtoverlay=uart4           # custom - <reason>
+#     dtoverlay=spi1-1cs        # custom - <reason>
 #
-#   For uart3 / spi1-3cs the `-off` suffix is not a real overlay, so the
-#   Pi firmware silently skips the load — nothing claims those pins.
+#   For uart3 the `-off` suffix is not a real overlay, so the Pi
+#   firmware silently skips the load — nothing claims GPIO 4/5.
 #
-#   For uart4 the `,ctsrts` parameter is a REAL overlay option: it
-#   enables CTS4 (GPIO 10) and RTS4 (GPIO 11) in addition to TXD4/RXD4,
-#   putting GPIO 11 into ALT4 (RTS4) mode from boot. That's exactly what
-#   the PL011 driver needs to drive the SN65HVD75 DE/~RE line via
-#   TIOCSRS485 in kernel space, with hardware-precision timing.
+#   For uart4 we use the bare overlay (no ,ctsrts) — this keeps GPIO 8/9
+#   as TXD4/RXD4 and leaves GPIO 10 alone for the rotation sensor. RTS4
+#   on GPIO 11 is recovered by the gpio=11=a4,pn override below.
+#
+#   For spi1-1cs the overlay is REAL: it enables SPI1 with a single
+#   chip-select line, muxing GPIO 18/19/20/21 to ALT4 (CE0/MISO/MOSI/
+#   SCLK) so /dev/spidev1.0 becomes available. The WS2812 LED backend
+#   opens that device and clocks bit-encoded WS2812 data out MOSI.
 #
 #   For the GPIO 11 line we can't use the prefix trick because we want
 #   GPIO 24 and 25 to keep their required op,pu,dh state. Instead we
@@ -109,21 +117,23 @@ for i in range(start + 1, len(lines)):
 # Rewrites applied to lines currently inside [start+1 .. end).
 # Each entry: (line-regex-to-match, replacement-line).
 REWRITES = [
-    # dtoverlay=uart4  ->  dtoverlay=uart4,ctsrts  (adds RTS4 on GPIO 11
-    # so the kernel can drive DE via TIOCSRS485 with hardware timing).
-    (r"^dtoverlay=uart4(?:,ctsrts)?(?:\s+#.*)?$",
-     "dtoverlay=uart4,ctsrts  # custom - DeckHand: RTS4 on GPIO 11 for kernel TIOCSRS485 DE"),
+    # dtoverlay=uart4[,ANYTHING] -> plain dtoverlay=uart4. We want TXD4/
+    # RXD4 only on GPIO 8/9. NO ,ctsrts, because CTS4 would claim GPIO 10
+    # which the Rev-A firmware needs as a plain input for the rotation
+    # sensor. RTS4 on GPIO 11 is recovered by the gpio=11=a4,pn override
+    # further down.
+    (r"^dtoverlay=uart4(?:,\S+)?(?:\s+#.*)?$",
+     "dtoverlay=uart4  # custom - DeckHand: TXD4/RXD4 only; GPIO 10 stays free for rotation sensor"),
     # dtoverlay=uart3  ->  no-op (frees GPIO 4 for PCA9685 ~OE).
     (r"^dtoverlay=uart3(?:-off)?(?:\s+#.*)?$",
      "dtoverlay=uart3-off  # custom - DeckHand: GPIO 4 needed for PCA9685 ~OE"),
-    # dtoverlay=spi0-led -> no-op (frees GPIO 10 which would otherwise
-    # be forced to SPI0_MOSI even without a WS281x device).
-    (r"^dtoverlay=spi0-led(?:-off)?(?:\s+#.*)?$",
-     "dtoverlay=spi0-led-off  # custom - DeckHand: GPIO 10 must not go to SPI0_MOSI"),
-    # dtoverlay=spi1-3cs -> no-op (frees GPIO 16..21 including
-    # GPIO 20 which the rotation-sensor input uses).
-    (r"^dtoverlay=spi1-3cs(?:-off)?(?:\s+#.*)?$",
-     "dtoverlay=spi1-3cs-off  # custom - DeckHand: GPIO 20 needed as rotation-sensor input"),
+    # dtoverlay=spi1[-Ncs][-off] -> enable spi1-1cs so /dev/spidev1.0 is
+    # available for the WS2812 LED backend to clock data out GPIO 20
+    # (SPI1 MOSI). Rev-A firmware requires this to be a REAL overlay
+    # (no -off suffix); earlier firmware used spi1-3cs-off to KEEP
+    # GPIO 20 free as a sensor input, but that role moved to GPIO 10.
+    (r"^dtoverlay=spi1(?:-\d+cs)?(?:-off)?(?:\s+#.*)?$",
+     "dtoverlay=spi1-1cs  # custom - DeckHand: enable /dev/spidev1.0 for WS2812 LED on GPIO 20"),
 ]
 
 def rewrite_or_none(line: str) -> str | None:
@@ -146,10 +156,9 @@ for i in range(start + 1, end):
 # order doesn't matter for correctness (each overlay claims its own
 # resources independently).
 APPEND_AT_TOP = [
-    "dtoverlay=uart4,ctsrts  # custom - DeckHand: RTS4 on GPIO 11 for kernel TIOCSRS485 DE",
+    "dtoverlay=uart4  # custom - DeckHand: TXD4/RXD4 only; GPIO 10 stays free for rotation sensor",
     "dtoverlay=uart3-off  # custom - DeckHand: GPIO 4 needed for PCA9685 ~OE",
-    "dtoverlay=spi0-led-off  # custom - DeckHand: GPIO 10 must not go to SPI0_MOSI",
-    "dtoverlay=spi1-3cs-off  # custom - DeckHand: GPIO 20 needed as rotation-sensor input",
+    "dtoverlay=spi1-1cs  # custom - DeckHand: enable /dev/spidev1.0 for WS2812 LED on GPIO 20",
 ]
 
 # Recompute section body after in-place rewrites. Drop any stale variants
@@ -219,16 +228,22 @@ Applied. Now reboot the Pi:
     sudo reboot
 
 After reboot verify the pins are in the expected state:
-    raspi-gpio get 4,8,9,10,11,20
-    # Expected (before the extension claims them):
+    raspi-gpio get 4,8,9,10,11,18,19,20,21
+    # Expected on Rev-A firmware (before the extension claims them):
     #   GPIO 4:  INPUT              (was ALT4/UART3-RXD; now free for PCA9685 ~OE)
     #   GPIO 8:  ALT4 TXD4          (UART4 TX)
     #   GPIO 9:  ALT4 RXD4          (UART4 RX)
-    #   GPIO 10: ALT4 CTS4          (unused on the PCB but comes with the ctsrts overlay)
+    #   GPIO 10: INPUT              (free for rotation sensor, lgpio claims it as alert-input)
     #   GPIO 11: ALT4 RTS4          (kernel-driven RS-485 DE via TIOCSRS485)
-    #   GPIO 20: INPUT pull=DOWN    (was ALT4/SPI1_MOSI; now free for rotation sensor)
+    #   GPIO 18: ALT4 SPI1 CE0      (claimed by spi1-1cs, unused otherwise)
+    #   GPIO 19: ALT4 SPI1 MISO     (claimed by spi1-1cs, unused otherwise)
+    #   GPIO 20: ALT4 SPI1 MOSI     (WS2812 LED data line via /dev/spidev1.0)
+    #   GPIO 21: ALT4 SPI1 SCLK     (claimed by spi1-1cs, unused otherwise)
     #
-    # Also confirm the kernel-mode RS-485 ioctl is supported (needs Linux >= 5.14,
+    # Also confirm /dev/spidev1.0 exists (proves spi1-1cs loaded):
+    #   ls /dev/spidev1.0
+    #
+    # And confirm the kernel-mode RS-485 ioctl is supported (needs Linux >= 5.14,
     # i.e. BlueOS 1.5.x on the Bookworm-based image or a Pi 5 install):
     #   uname -r     # should be 6.x, not 5.10.x
 MSG

@@ -372,11 +372,14 @@ class BatteryMonitor:
         """Return a *factory* that, when called, claims the RS485 DE GPIO
         and returns a toggle callback. The claim only happens when the
         factory is actually invoked — critical when the same GPIO doubles
-        as PL011 RTS4 for kernel-mode DE control (``dtoverlay=uart4,ctsrts``
-        on the DeckHand PCB puts GPIO 11 in ALT4 RTS4 at boot). If we
-        claim GPIO 11 as a lgpio OUTPUT before the probe decides between
-        kernel-mode and software-mode, the pinmux flip breaks the kernel
-        RTS control that ``TIOCSRS485`` relies on — silently, because the
+        as PL011 RTS4 for kernel-mode DE control. On the DeckHand Rev-A
+        firmware ``dtoverlay=uart4`` (no ``,ctsrts``) leaves GPIO 10 free
+        for the rotation sensor, and a targeted ``gpio=11=a4,pn`` line
+        in ``/boot/firmware/config.txt`` forces GPIO 11 into ALT4 RTS4
+        so the PL011 driver still owns the DE pin. If we claim GPIO 11
+        as a lgpio OUTPUT before the probe decides between kernel-mode
+        and software-mode, the pinmux flip breaks the kernel RTS control
+        that ``TIOCSRS485`` relies on — silently, because the
         ioctl itself still succeeds.
 
         Returns None if direction control is fully disabled (``rs485_de_gpio``

@@ -2102,9 +2102,10 @@ function loadSetup() {
 <h3>2. Hardware Wiring</h3>
 <table>
   <tr><th>Component</th><th>GPIO</th><th>Physical Pin</th><th>Notes</th></tr>
-  <tr><td>RGB Status LED (WS2812)</td><td>GPIO 10 (SPI MOSI)</td><td>Pin 19</td><td>Single NeoPixel data line</td></tr>
+  <tr><td>RGB Status LED (WS2812)</td><td>GPIO 20 (SPI1 MOSI)</td><td>Pin 38</td><td>Single NeoPixel data line to J104 pin 3; requires <code>dtoverlay=spi1-1cs</code></td></tr>
+  <tr><td>Release rotation sensor</td><td>GPIO 10</td><td>Pin 19</td><td>Falling-edge alert via lgpio; J104 pin 4</td></tr>
   <tr><td>Lumen Light</td><td>GPIO 13 (PWM1)</td><td>Pin 33</td><td>1000-2000 &mu;s servo PWM. Modes: always on, pause points only, or snapshot only</td></tr>
-  <tr><td>Camera Focus</td><td>GPIO 20</td><td>Pin 38</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
+  <tr><td>Camera Focus</td><td>PCA9685 ch 4</td><td>J105 pin 13</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
   <tr><td>Zoom</td><td>GPIO 26</td><td>Pin 37</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
   <tr><td>Pan</td><td>GPIO 16</td><td>Pin 36</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
   <tr><td>External Servo</td><td>GPIO 19</td><td>Pin 35</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
@@ -2165,7 +2166,7 @@ function loadSetup() {
 <ul>
   <li><strong>Camera not detected:</strong> Ensure the USB camera is connected and appears as <code>/dev/video2</code>. Replug and restart the extension.</li>
   <li><strong>Servo not moving:</strong> Verify wiring and that the pigpio daemon is running inside the container. Check extension logs.</li>
-  <li><strong>LED not lighting:</strong> Ensure the WS2812 data line is on GPIO 10 and shares a ground with the Pi.</li>
+  <li><strong>LED not lighting:</strong> Confirm the DeckHand host config has <code>dtoverlay=spi1-1cs</code> and that <code>/dev/spidev1.0</code> exists on the Pi. Ensure the WS2812 data line reaches J104 pin 3 (which routes to GPIO 20 = SPI1 MOSI) and that the LED shares a ground with the Pi. <code>/telemetry.gpio_backends.led</code> should read <code>ws2812-spi1</code>; <code>sim</code> means the extension couldn't open <code>/dev/spidev1.0</code>.</li>
   <li><strong>Recordings empty or corrupt:</strong> Check disk space. If power was lost during recording, a .ts file may remain (not yet remuxed to .mp4) but is still playable.</li>
   <li><strong>Extension logs:</strong> View logs from the BlueOS Extension Manager or run <code>docker logs blueos-videorecorder</code>.</li>
 </ul>

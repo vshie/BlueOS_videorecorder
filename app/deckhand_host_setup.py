@@ -10,12 +10,20 @@ Runs on every extension start. Non-destructive on non-DeckHand hardware:
 
   2. On a confirmed DeckHand, read the active /boot/firmware/config.txt
      (Bookworm) or /boot/config.txt (Bullseye) and check that the first
-     ``[pi4]`` section contains our required DeckHand overrides:
-        dtoverlay=uart4,ctsrts   (RTS4 on GPIO 11 for kernel TIOCSRS485)
+     ``[pi4]`` section contains our required DeckHand overrides. The
+     Rev-A firmware assumes the J104 silkscreen has been relabelled so
+     GPIO 10 = rotation sensor input and GPIO 20 = WS2812 LED (SPI1
+     MOSI); the required overrides encode that pinout:
+        dtoverlay=uart4          (TXD4/RXD4 only — DO NOT add ,ctsrts
+                                  because that would claim GPIO 10 for
+                                  CTS4 and steal the rotation-sensor pin)
         dtoverlay=uart3-off      (free GPIO 4 for PCA9685 ~OE)
-        dtoverlay=spi0-led-off   (free GPIO 10 which would otherwise be SPI0_MOSI)
-        dtoverlay=spi1-3cs-off   (free GPIO 20 for rotation-sensor input)
-        gpio=11=a4,pn            (force GPIO 11 to ALT4 RTS4)
+        dtoverlay=spi1-1cs       (enables SPI1 -> /dev/spidev1.0 so the
+                                  WS2812 LED backend can drive GPIO 20)
+        gpio=11=a4,pn            (force GPIO 11 to ALT4 RTS4 so the
+                                  kernel PL011 driver can flip RS-485 DE
+                                  via TIOCSRS485 — this is what the
+                                  dropped ``ctsrts`` used to give us)
      Each line carries a `# custom - DeckHand:` marker so BlueOS's
      ``blueos_startup_update`` reconciler leaves it alone.
 
@@ -72,15 +80,24 @@ MAX_PATCH_ATTEMPTS = 3
 #   (regex-that-matches-any-existing-variant, canonical-line-to-write).
 # The regex is deliberately permissive so we recognise both our own
 # previous writes and Navigator/reconciler-added variants.
+#
+# The uart4 line is DELIBERATELY plain (no ``,ctsrts``): the Rev-A
+# DeckHand firmware uses GPIO 10 for the rotation-sensor input, so we
+# can't let the CTS4 alt-function claim it. RTS4 on GPIO 11 is instead
+# recovered via the ``gpio=11=a4,pn`` override below.
+#
+# The spi1-1cs line ENABLES /dev/spidev1.0 so the WS2812 LED backend
+# (Ws2812SpiLedBackend, spi_bus=1) can drive the LED on GPIO 20.
+# ``spi1-1cs`` claims GPIO 18/19/20/21 (CE0/MISO/MOSI/SCLK) and leaves
+# GPIO 16/17 free — none of those collide with anything else the
+# DeckHand uses.
 WANTED_OVERLAYS: list[tuple[str, str]] = [
     (r"^dtoverlay=uart4(?:,\S+)?(?:\s+#.*)?$",
-     "dtoverlay=uart4,ctsrts  # custom - DeckHand: RTS4 on GPIO 11 for kernel TIOCSRS485 DE"),
+     "dtoverlay=uart4  # custom - DeckHand: TXD4/RXD4 only; GPIO 10 stays free for rotation sensor"),
     (r"^dtoverlay=uart3(?:-off)?(?:\s+#.*)?$",
      "dtoverlay=uart3-off  # custom - DeckHand: GPIO 4 needed for PCA9685 ~OE"),
-    (r"^dtoverlay=spi0-led(?:-off)?(?:\s+#.*)?$",
-     "dtoverlay=spi0-led-off  # custom - DeckHand: GPIO 10 must not go to SPI0_MOSI"),
-    (r"^dtoverlay=spi1-3cs(?:-off)?(?:\s+#.*)?$",
-     "dtoverlay=spi1-3cs-off  # custom - DeckHand: GPIO 20 needed as rotation-sensor input"),
+    (r"^dtoverlay=spi1(?:-\d+cs)?(?:-off)?(?:\s+#.*)?$",
+     "dtoverlay=spi1-1cs  # custom - DeckHand: enable /dev/spidev1.0 for WS2812 LED on GPIO 20"),
 ]
 
 # Reconciler always adds `gpio=11,24,25=op,pu,dh` to force those pins on
