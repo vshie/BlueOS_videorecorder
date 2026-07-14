@@ -46,7 +46,20 @@ Direct Pi connections:
 
 ## Host Prerequisites (BlueOS Pi)
 
-The extension itself runs as a privileged Docker container, but `/boot/config.txt` is owned by BlueOS (the host OS boots from it before Docker starts). Three DeckHand pin needs collide with defaults BlueOS's `blueos_startup_update` service re-applies on every boot, so hand-editing the file is not enough — the reconciler will revert plain edits on the next reboot.
+### BlueOS version — must be Bookworm-based (1.5.x or newer)
+
+The extension expects the Linux kernel to support hardware RS-485 direction control on the PL011 UART (the `TIOCSRS485` ioctl). That support landed in Linux 5.14, so the Bullseye-based BlueOS 1.4.x line (kernel 5.10) is **too old** — polls to the Daly BMS will fail because the kernel can't drive DE with tight enough timing and the software fallback can chop bytes off the pack's reply.
+
+Use one of these images from [bluerobotics/BlueOS releases](https://github.com/bluerobotics/BlueOS/releases):
+
+- **Pi 4:** `BlueOS-raspberry-linux-arm-v7-bookworm.zip` (**not** the `-bullseye-pi4` variant on the same release page)
+- **Pi 5:** `BlueOS-raspberry-linux-arm64-v8-bookworm-pi5.zip`
+
+Both ship kernel 6.x with full PL011 RS-485 support. After booting the new image run `uname -r` and confirm it starts with `6.` (`5.10.x` means you flashed the wrong variant).
+
+### /boot/config.txt overrides
+
+The extension itself runs as a privileged Docker container, but `/boot/config.txt` is owned by BlueOS (the host OS boots from it before Docker starts). Four DeckHand pin needs collide with defaults BlueOS's `blueos_startup_update` service re-applies on every boot, so hand-editing the file is not enough — the reconciler will revert plain edits on the next reboot.
 
 The repo ships a one-shot script that installs the required overrides **in a form that survives the reconciler**. Copy it to the Pi and run it once (as user `pi`, sudo is invoked internally):
 
@@ -60,27 +73,28 @@ After reboot the `[pi4]` block in `/boot/config.txt` will start with:
 
 ```
 [pi4]
-dtoverlay=uart3-off      # custom - DeckHand: GPIO 4 needed for PCA9685 ~OE
-dtoverlay=spi1-3cs-off   # custom - DeckHand: GPIO 20 needed as rotation-sensor input
+dtoverlay=uart3-off       # custom - DeckHand: GPIO 4 needed for PCA9685 ~OE
+dtoverlay=spi1-3cs-off    # custom - DeckHand: GPIO 20 needed as rotation-sensor input
+dtoverlay=uart4,ctsrts    # custom - DeckHand: RTS4 on GPIO 11 for kernel TIOCSRS485 DE
 gpio=11,24,25=op,pu,dh
-gpio=11=ip,pn,dl         # custom - DeckHand: RS-485 DE line must not boot HIGH
+gpio=11=a4,pn             # custom - DeckHand: force GPIO 11 to ALT4 (RTS4)
 ...
 ```
 
-You still need I2C bus 1 and UART4 enabled. On stock BlueOS images the `[all]` block already sets these; if not, add:
+You still need I2C bus 1 enabled. On stock BlueOS images the `[all]` block already sets it; if not, add:
 
 ```
-dtparam=i2c_arm=on                # /dev/i2c-1 for PCA9685 (0x40) + MCP7940N RTC (0x6F)
-dtoverlay=uart4                   # UART4 on GPIO 8/9 for the Daly BMS RS-485 link
+dtparam=i2c_arm=on        # /dev/i2c-1 for PCA9685 (0x40) + MCP7940N RTC (0x6F)
 enable_uart=1
 ```
 
-Rationale for the three overrides applied by the script:
+Rationale for the overrides applied by the script:
 
 - **`dtoverlay=uart3-off`** is a deliberate no-op overlay name. The Pi firmware silently skips it, so nothing claims GPIO 4/5. But `dtoverlay=uart3-off` still starts with the string `dtoverlay=uart3`, which is what BlueOS's reconciler prefix-matches on, so it never re-adds the real `dtoverlay=uart3` (which would put GPIO 4 into UART3 alt-function and fight the PCA9685 `~OE` line).
 - **`dtoverlay=spi1-3cs-off`** applies the same trick to SPI1's 3-chip-select overlay. The real overlay would claim GPIO 16–21 as SPI1 pins, and we need GPIO 20 as an input for the release-shaft rotation sensor.
-- **`gpio=11=ip,pn,dl`** is a per-pin override that runs *after* the reconciler's required `gpio=11,24,25=op,pu,dh` line. Pi firmware applies `gpio=` directives top-to-bottom and later per-pin settings override earlier list entries for the same pin, so GPIO 11 boots as input-no-pull-drive-low (safe for the RS-485 DE line) while 24 and 25 keep their required op,pu,dh state.
-- The `# custom` inline comment on the three protected lines triggers `blueos_startup_update.CONFIG_USER_PROTECTION_WORD`, telling the reconciler's filter pass to leave them alone.
+- **`dtoverlay=uart4,ctsrts`** is a **real** overlay variant: the `,ctsrts` parameter tells the PL011 driver to also grab CTS4 (GPIO 10) and RTS4 (GPIO 11) alongside TXD4/RXD4. This is what lets the kernel drive the SN65HVD75 DE/~RE line for us with hardware-precision timing via `TIOCSRS485` — no Python GPIO toggling, no missed head bytes. The `,ctsrts` suffix is what BlueOS's reconciler prefix-matches on when looking for `dtoverlay=uart4`, so this line satisfies the reconciler while adding what we need.
+- **`gpio=11=a4,pn`** is a per-pin override that runs *after* the reconciler's required `gpio=11,24,25=op,pu,dh` line. Pi firmware applies `gpio=` directives top-to-bottom and later per-pin settings override earlier list entries for the same pin, so GPIO 11 boots as ALT4 (RTS4, HIGH-when-idle isn't a concern because the PL011 driver takes ownership immediately after firmware) while 24 and 25 keep their required op,pu,dh state.
+- The `# custom` inline comment on the four protected lines triggers `blueos_startup_update.CONFIG_USER_PROTECTION_WORD`, telling the reconciler's filter pass to leave them alone.
 
 The MCP7940N RTC is driven by the extension in Python (no `dtoverlay=i2c-rtc` needed).
 
@@ -232,7 +246,7 @@ If the RTC is missing (dev machine, legacy board) or the coin cell is dead the e
 
 - **Camera not detected:** Ensure the USB camera is connected and appears as `/dev/video2`. Replug and restart the extension.
 - **Servo not moving:** Confirm I2C is enabled on the host (`dtparam=i2c_arm=on`) and that `i2cdetect -y 1` shows both `0x40` (PCA9685) and `0x6f` (RTC). Check that `/telemetry` reports `"servo": "pca9685"`. If it shows `sim`, the extension could not open the I2C bus. GPIO 4 (~OE) must be pulled LOW at boot; if it is stuck HIGH, every channel stays high-Z and no servo moves.
-- **BMS not detected:** Confirm `dtoverlay=uart4` is set in `/boot/config.txt` (or `/boot/firmware/config.txt`) and that a `/dev/ttyAMA<N>` corresponds to the UART4 hardware. With `serial_port: "auto"` (the default) the extension resolves UART4 by MMIO address and logs `"BMS auto-scan: resolved UART4 hardware to /dev/ttyAMA<N>"` at startup; `/battery` should then report the same `serial_port`. If UART4 is missing from `config.txt`, the extension logs a hint and falls back to scanning the other Pi UARTs. If you replaced the shield with a USB adapter, keep `serial_port: "auto"` and clear `rs485_de_gpio` to null.
+- **BMS not detected:** First confirm the kernel is new enough for hardware RS-485 (`uname -r` should start with `6.` — anything `5.10.x` means you're on the old Bullseye BlueOS image and the DE line can't be timed tightly enough). Then confirm `dtoverlay=uart4,ctsrts` is present in `/boot/config.txt` (or `/boot/firmware/config.txt`) — the `,ctsrts` suffix is what puts GPIO 11 in RTS4 alt-function so the kernel can drive DE. With `serial_port: "auto"` (the default) the extension resolves UART4 by MMIO address and logs `"BMS auto-scan: resolved UART4 hardware to /dev/ttyAMA<N>"` at startup, followed by `"RS485 direction control: kernel TIOCSRS485 on /dev/ttyAMA<N>"` once the ioctl is accepted; `/battery` should then report the same `serial_port`. If the TIOCSRS485 log is missing you'll see `"RS485 half-duplex direction control on GPIO 11"` instead — that's the software fallback (works, but drops the first byte of some responses). If you replaced the shield with a USB adapter, keep `serial_port: "auto"` and clear `rs485_de_gpio` to null (the FT232 handles DE itself).
 - **RTC time wrong on boot:** Check the CR1220 coin cell (BT101) and `rtc.battery_backup` / `rtc.oscillator_running` in `/telemetry`. `rtc.power_failed` = true means the RTC lost power since the last sync — the extension clears the flag once the system clock is set.
 - **LED not lighting:** Ensure the WS2812 data line is on GPIO 10 and shares a ground with the Pi.
 - **Recordings empty or corrupt:** Check disk space. Recordings are fragmented .mp4 files that stay playable even if power was lost mid-recording (only the final ~5 s fragment is lost). Legacy .ts files from older builds are auto-remuxed to .mp4 on next start.

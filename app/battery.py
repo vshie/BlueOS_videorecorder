@@ -15,13 +15,18 @@ Background polling thread that:
 
 Wiring: on the DeckHand PCB the Daly BMS is wired to UART4 on the Pi
 (GPIO 8 TX, GPIO 9 RX) through an SN65HVD75 RS485 transceiver. GPIO 11
-drives DE/~RE (tied together): HIGH before writing, LOW to receive. The
-direction line is toggled by a5_bus._read() via a callback injected by
-_connect(). The default serial_port is "auto" — the port scanner uses
-the sysfs of_node MMIO address to find whichever /dev/ttyAMA<N> is
-currently mapped to UART4 hardware (0x7e201800 on BCM2711), because
-the ttyAMA index depends on device-tree overlay load order and is not
-fixed across systems.
+drives DE/~RE (tied together): HIGH before writing, LOW to receive.
+GPIO 11 is also PL011's hardware RTS4 alt-function pin, so on a kernel
+new enough to support ``TIOCSRS485`` (Linux ≥ 5.14, i.e. Bookworm-based
+BlueOS 1.5.x) the driver handles DE with hardware-precision timing —
+same as an FT232's auto-direction in a BLUART adapter. _probe_device()
+opportunistically tries that ioctl first and only falls back to the
+software DE toggle (via lgpio + a5_bus.set_direction_control()) when
+the kernel doesn't support it. The default serial_port is "auto" — the
+port scanner uses the sysfs of_node MMIO address to find whichever
+/dev/ttyAMA<N> is currently mapped to UART4 hardware (0x7e201800 on
+BCM2711), because the ttyAMA index depends on device-tree overlay
+load order and is not fixed across systems.
 """
 
 from __future__ import annotations
@@ -350,6 +355,9 @@ class BatteryMonitor:
     # Same idea for the UART4 discovery message: log it once per resolved
     # tty path so a probe/reconnect loop doesn't spam the same info line.
     _uart4_logged: str | None = None
+    # And once per tty path for the "kernel is now doing RTS for us" log,
+    # so the probe loop doesn't repeat it on every reconnect.
+    _kernel_rs485_logged: set[str] = set()
 
     @staticmethod
     def _make_de_toggle(cfg: dict[str, Any]) -> Callable[[bool], None] | None:
@@ -434,10 +442,34 @@ class BatteryMonitor:
             logger.debug("Probe %s: open failed: %s", device, exc)
             return None
 
-        # Install the RS485 direction-control callback so writes push
-        # DE high and reads flip it back to receive. Safe no-op on USB
-        # adapters where de_toggle is None.
-        if de_toggle is not None:
+        # Prefer kernel-driven half-duplex (TIOCSRS485 on the PL011 driver)
+        # over the software DE toggle: the kernel flips RTS in hardware with
+        # sub-microsecond timing, whereas Python-side gpio_write() incurs
+        # milliseconds of jitter that can chop the head off the pack's
+        # reply. Only makes sense on Pi UARTs where RTS is wired to the
+        # transceiver DE (DeckHand PCB routes SN65HVD75 DE/~RE to GPIO 11,
+        # which is also PL011 RTS4 alt-function). On USB serial adapters the
+        # ioctl fails silently and we fall through to the software path.
+        used_kernel_rs485 = False
+        if device.startswith("/dev/ttyAMA") or device == "/dev/serial0":
+            try:
+                from rs485_kernel_mode import try_enable_rs485
+                if try_enable_rs485(reader._bms.serial):
+                    used_kernel_rs485 = True
+                    if device not in BatteryMonitor._kernel_rs485_logged:
+                        logger.info(
+                            "RS485 direction control: kernel TIOCSRS485 on %s "
+                            "(hardware RTS timing, no GPIO toggle needed)",
+                            device,
+                        )
+                        BatteryMonitor._kernel_rs485_logged.add(device)
+            except Exception as exc:
+                logger.debug("Probe %s: rs485_kernel_mode import/ioctl error: %s", device, exc)
+
+        # Software DE toggle: only install when the kernel didn't take over.
+        # Skips the fallback for USB adapters (de_toggle is None) since
+        # their FT232 handles direction in hardware already.
+        if not used_kernel_rs485 and de_toggle is not None:
             try:
                 reader._bms.set_direction_control(
                     de_toggle,
