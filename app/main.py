@@ -45,6 +45,7 @@ from recipes import (
 import usb_storage
 from battery import BatteryMonitor
 from rtc_sync import RtcSyncManager
+import deckhand_host_setup
 
 # ── Constants ────────────────────────────────────────────────────────────
 VIDEO_DIR = "/app/videorecordings"
@@ -1881,9 +1882,61 @@ def route_telemetry():
         except Exception as e:
             logger.debug(f"RTC status unavailable: {e}")
             data["rtc"] = {"present": False, "last_error": str(e)}
+        try:
+            data["host_setup"] = deckhand_host_setup.get_status()
+        except Exception as e:
+            logger.debug(f"Host setup status unavailable: {e}")
+            data["host_setup"] = {"ran": False, "last_error": str(e)}
         return jsonify(data)
     except Exception as e:
         logger.error(f"Telemetry error: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ── Host setup (DeckHand config.txt + pinmux verification) ──────────────
+
+@app.route("/host_setup", methods=["GET"])
+def route_host_setup():
+    """Snapshot of the DeckHand host bring-up status: whether the extension
+    detected a DeckHand PCB (I2C bus 1 scan for PCA9685 + MCP7940N), whether
+    /boot/firmware/config.txt has the required overlay/gpio overrides, and
+    whether a reboot is pending. Consumed by the frontend to show a banner
+    when the host needs a reboot to apply DeckHand-required kernel config.
+    """
+    try:
+        return jsonify({"success": True, **deckhand_host_setup.get_status()})
+    except Exception as e:
+        logger.error(f"Host setup status error: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/host_setup/rerun", methods=["POST"])
+def route_host_setup_rerun():
+    """Re-run the DeckHand host detection + config verify/patch pass.
+    Query param ``reboot=false`` skips the automatic reboot so the caller
+    can inspect the ``reboot_required`` flag and prompt the user first.
+    """
+    auto_reboot = request.args.get("reboot", "true").lower() != "false"
+    try:
+        result = deckhand_host_setup.run_startup_setup(auto_reboot=auto_reboot)
+        return jsonify({"success": True, **result})
+    except Exception as e:
+        logger.error(f"Host setup re-run failed: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/host_setup/reboot", methods=["POST"])
+def route_host_setup_reboot():
+    """Explicit user-triggered reboot via the BlueOS commander HTTP API.
+    Used by the frontend's "Reboot now" button after the host_setup pass
+    reported ``reboot_required`` without ``reboot_triggered``.
+    """
+    try:
+        # pylint: disable=protected-access
+        deckhand_host_setup._trigger_reboot()
+        return jsonify({"success": True, "message": "reboot scheduled by commander"})
+    except Exception as e:
+        logger.error(f"Reboot trigger failed: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 
@@ -2533,6 +2586,28 @@ def _boot():
         set_alt(11, "a4")  # RTS4 so kernel PL011 can drive RS-485 DE
     except Exception as e:
         logger.debug(f"BCM pinmux recovery skipped: {e}")
+
+    # DeckHand host bring-up: probe I2C for the PCA9685+RTC signature, and if
+    # this is a DeckHand PCB verify /boot/firmware/config.txt has our required
+    # overlay / gpio overrides. If anything's missing, patch it via the BlueOS
+    # commander HTTP API and reboot — we come back with a correct pin map.
+    # Safe no-op on Navigator boards (I2C scan says "not DeckHand") and on
+    # dev machines (commander unreachable, gracefully skipped).
+    try:
+        setup_result = deckhand_host_setup.run_startup_setup(auto_reboot=True)
+        if setup_result.get("reboot_triggered"):
+            logger.warning(
+                "DeckHand host config was updated; commander is rebooting the "
+                "Pi in ~5 s. Skipping the rest of boot — we'll come back on the "
+                "next start with the correct kernel pin map."
+            )
+            # Give the log a moment to flush and let the reboot happen. Don't
+            # start the RTC / PCA9685 / camera / recording pipeline — those
+            # would all get torn down anyway.
+            time.sleep(30)
+            return
+    except Exception as e:
+        logger.warning(f"DeckHand host setup skipped: {e}")
 
     # Bring the system clock up from the DeckHand RTC before anything
     # timestamps a file — CSV filenames, event logs, and video segments

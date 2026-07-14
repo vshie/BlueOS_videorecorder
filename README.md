@@ -57,11 +57,19 @@ Use one of these images from [bluerobotics/BlueOS releases](https://github.com/b
 
 Both ship kernel 6.x with full PL011 RS-485 support. After booting the new image run `uname -r` and confirm it starts with `6.` (`5.10.x` means you flashed the wrong variant).
 
-### /boot/config.txt overrides
+### /boot/firmware/config.txt overrides — applied automatically
 
-The extension itself runs as a privileged Docker container, but `/boot/config.txt` is owned by BlueOS (the host OS boots from it before Docker starts). Four DeckHand pin needs collide with defaults BlueOS's `blueos_startup_update` service re-applies on every boot, so hand-editing the file is not enough — the reconciler will revert plain edits on the next reboot.
+The extension itself owns the DeckHand host bring-up. On every start `app/deckhand_host_setup.py`:
 
-The repo ships a one-shot script that installs the required overrides **in a form that survives the reconciler**. Copy it to the Pi and run it once (as user `pi`, sudo is invoked internally):
+1. **Detects the DeckHand PCB** by scanning I2C bus 1 for both PCA9685 (0x40) and MCP7940N RTC (0x6F). If either device is missing the extension concludes this isn't a DeckHand and **makes no host changes** — safe to install on a Navigator flight-controller board without side-effects.
+2. **Reads the active `/boot/firmware/config.txt`** (or `/boot/config.txt` on Bullseye) through BlueOS's commander HTTP API at `http://localhost/commander/v1.0/command/host`. No `/boot` bind mount is required — the extension runs with `NetworkMode: host` so `localhost` reaches the BlueOS core services directly.
+3. **Diffs the first `[pi4]` section** against the DeckHand override set (see below). If anything is missing or wrong, it patches the file (backup goes to `/boot/firmware/config.txt.bak-deckhand-<timestamp>`) and asks the commander to reboot the Pi in ~5 s so the new kernel pin map takes effect.
+
+The extension polls `/host_setup` and exposes the same data under `telemetry.host_setup`, so the frontend can show a "Reboot required" banner if you disable auto-reboot (`POST /host_setup/rerun?reboot=false`).
+
+Boot-loop protection: the extension tracks how many boots in a row it has applied the same set of changes. If it patches three times without the config sticking (something is undoing our writes), it stops rebooting and just logs the problem.
+
+Manual one-shot alternative — `scripts/apply_deckhand_host_config.sh` still exists for headless / no-container-yet workflows:
 
 ```
 scp scripts/apply_deckhand_host_config.sh pi@<pi-ip>:/tmp/
@@ -69,7 +77,7 @@ ssh pi@<pi-ip> 'bash /tmp/apply_deckhand_host_config.sh'
 ssh pi@<pi-ip> 'sudo reboot'
 ```
 
-After reboot the `[pi4]` block in `/boot/config.txt` will start with:
+Both paths produce the same result — the `[pi4]` block in `/boot/firmware/config.txt` will contain:
 
 ```
 [pi4]
