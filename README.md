@@ -46,16 +46,45 @@ Direct Pi connections:
 
 ## Host Prerequisites (BlueOS Pi)
 
-Edit `/boot/firmware/config.txt` on the Pi and ensure the following lines exist, then reboot:
+The extension itself runs as a privileged Docker container, but `/boot/config.txt` is owned by BlueOS (the host OS boots from it before Docker starts). Three DeckHand pin needs collide with defaults BlueOS's `blueos_startup_update` service re-applies on every boot, so hand-editing the file is not enough — the reconciler will revert plain edits on the next reboot.
+
+The repo ships a one-shot script that installs the required overrides **in a form that survives the reconciler**. Copy it to the Pi and run it once (as user `pi`, sudo is invoked internally):
 
 ```
-dtparam=i2c_arm=on
-dtoverlay=uart4
+scp scripts/apply_deckhand_host_config.sh pi@<pi-ip>:/tmp/
+ssh pi@<pi-ip> 'bash /tmp/apply_deckhand_host_config.sh'
+ssh pi@<pi-ip> 'sudo reboot'
 ```
 
-`i2c_arm` exposes `/dev/i2c-1` (PCA9685 + RTC). `dtoverlay=uart4` maps UART4 to GPIO 8/9 and creates `/dev/ttyAMA4` for the Daly BMS. GPIO 11 stays available as a plain GPIO for RS-485 direction control.
+After reboot the `[pi4]` block in `/boot/config.txt` will start with:
 
-The MCP7940N is driven by the extension in Python (no `dtoverlay=i2c-rtc` needed).
+```
+[pi4]
+dtoverlay=uart3-off      # custom - DeckHand: GPIO 4 needed for PCA9685 ~OE
+dtoverlay=spi1-3cs-off   # custom - DeckHand: GPIO 20 needed as rotation-sensor input
+gpio=11,24,25=op,pu,dh
+gpio=11=ip,pn,dl         # custom - DeckHand: RS-485 DE line must not boot HIGH
+...
+```
+
+You still need I2C bus 1 and UART4 enabled. On stock BlueOS images the `[all]` block already sets these; if not, add:
+
+```
+dtparam=i2c_arm=on                # /dev/i2c-1 for PCA9685 (0x40) + MCP7940N RTC (0x6F)
+dtoverlay=uart4                   # UART4 on GPIO 8/9 for the Daly BMS RS-485 link
+enable_uart=1
+```
+
+Rationale for the three overrides applied by the script:
+
+- **`dtoverlay=uart3-off`** is a deliberate no-op overlay name. The Pi firmware silently skips it, so nothing claims GPIO 4/5. But `dtoverlay=uart3-off` still starts with the string `dtoverlay=uart3`, which is what BlueOS's reconciler prefix-matches on, so it never re-adds the real `dtoverlay=uart3` (which would put GPIO 4 into UART3 alt-function and fight the PCA9685 `~OE` line).
+- **`dtoverlay=spi1-3cs-off`** applies the same trick to SPI1's 3-chip-select overlay. The real overlay would claim GPIO 16–21 as SPI1 pins, and we need GPIO 20 as an input for the release-shaft rotation sensor.
+- **`gpio=11=ip,pn,dl`** is a per-pin override that runs *after* the reconciler's required `gpio=11,24,25=op,pu,dh` line. Pi firmware applies `gpio=` directives top-to-bottom and later per-pin settings override earlier list entries for the same pin, so GPIO 11 boots as input-no-pull-drive-low (safe for the RS-485 DE line) while 24 and 25 keep their required op,pu,dh state.
+- The `# custom` inline comment on the three protected lines triggers `blueos_startup_update.CONFIG_USER_PROTECTION_WORD`, telling the reconciler's filter pass to leave them alone.
+
+The MCP7940N RTC is driven by the extension in Python (no `dtoverlay=i2c-rtc` needed).
+
+Note on ttyAMA naming: the kernel assigns `/dev/ttyAMA<N>` in the order the `dtoverlay=uart<N>` lines load, **not** by hardware UART number. With this DeckHand host config UART4 typically ends up as `/dev/ttyAMA1` on Pi 4 (was `/dev/ttyAMA2` when UART3 was also loaded). The extension auto-discovers UART4 by MMIO address (`serial@7e201800`), so you don't have to guess — set `battery.serial_port` to `"auto"` (the default) and it will find the right tty on either layout.
 
 ## Quick Start
 
@@ -203,7 +232,7 @@ If the RTC is missing (dev machine, legacy board) or the coin cell is dead the e
 
 - **Camera not detected:** Ensure the USB camera is connected and appears as `/dev/video2`. Replug and restart the extension.
 - **Servo not moving:** Confirm I2C is enabled on the host (`dtparam=i2c_arm=on`) and that `i2cdetect -y 1` shows both `0x40` (PCA9685) and `0x6f` (RTC). Check that `/telemetry` reports `"servo": "pca9685"`. If it shows `sim`, the extension could not open the I2C bus. GPIO 4 (~OE) must be pulled LOW at boot; if it is stuck HIGH, every channel stays high-Z and no servo moves.
-- **BMS not detected:** Confirm `dtoverlay=uart4` is in `/boot/firmware/config.txt` and that `/dev/ttyAMA4` exists. `/battery` should report `serial_port: "/dev/ttyAMA4"`. If you replaced the shield with a USB adapter, set `serial_port` to `"auto"` in `dropcam_config.json` and clear `rs485_de_gpio` to null.
+- **BMS not detected:** Confirm `dtoverlay=uart4` is set in `/boot/config.txt` (or `/boot/firmware/config.txt`) and that a `/dev/ttyAMA<N>` corresponds to the UART4 hardware. With `serial_port: "auto"` (the default) the extension resolves UART4 by MMIO address and logs `"BMS auto-scan: resolved UART4 hardware to /dev/ttyAMA<N>"` at startup; `/battery` should then report the same `serial_port`. If UART4 is missing from `config.txt`, the extension logs a hint and falls back to scanning the other Pi UARTs. If you replaced the shield with a USB adapter, keep `serial_port: "auto"` and clear `rs485_de_gpio` to null.
 - **RTC time wrong on boot:** Check the CR1220 coin cell (BT101) and `rtc.battery_backup` / `rtc.oscillator_running` in `/telemetry`. `rtc.power_failed` = true means the RTC lost power since the last sync — the extension clears the flag once the system clock is set.
 - **LED not lighting:** Ensure the WS2812 data line is on GPIO 10 and shares a ground with the Pi.
 - **Recordings empty or corrupt:** Check disk space. Recordings are fragmented .mp4 files that stay playable even if power was lost mid-recording (only the final ~5 s fragment is lost). Legacy .ts files from older builds are auto-remuxed to .mp4 on next start.
