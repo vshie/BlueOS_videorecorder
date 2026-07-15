@@ -451,6 +451,7 @@ class GpioLine:
         self._lg = lgpio
         self._handle = self._open_header_chip()
         self._outputs: set[int] = set()
+        self._inputs: set[int] = set()
         self._alerts: dict[int, tuple[Any, Any]] = {}  # type: ignore[name-defined]
 
     def _open_header_chip(self) -> int:
@@ -505,6 +506,40 @@ class GpioLine:
             return
         self._lg.gpio_write(self._handle, gpio, 1 if level else 0)
 
+    def claim_input(self, gpio: int, pull: str = "down") -> None:
+        """Claim ``gpio`` as a plain digital input for *polled* reads.
+
+        Unlike :meth:`claim_alert_falling` this registers **no** edge alert
+        and therefore no kernel GPIO interrupt, so a noisy / floating line
+        can never trigger an IRQ storm (``irq/NN-lg`` pegging a core). The
+        caller is expected to sample the level with :meth:`read` at a fixed
+        rate and do its own edge detection / debouncing.
+
+        ``pull`` selects the internal bias: ``"down"`` (default) parks a
+        disconnected line LOW, ``"up"`` parks it HIGH, ``"none"`` leaves it
+        floating. Idempotent: a re-claim frees the line first so the pull
+        can change.
+        """
+        pull = (pull or "none").lower()
+        if pull == "up":
+            flags = getattr(self._lg, "SET_PULL_UP", 0)
+        elif pull == "down":
+            flags = getattr(self._lg, "SET_PULL_DOWN", 0)
+        else:
+            flags = getattr(self._lg, "SET_PULL_NONE", 0)
+        if gpio in self._inputs:
+            try:
+                self._lg.gpio_free(self._handle, gpio)
+            except Exception:
+                pass
+            self._inputs.discard(gpio)
+        self._lg.gpio_claim_input(self._handle, gpio, flags)
+        self._inputs.add(gpio)
+
+    def read(self, gpio: int) -> int:
+        """Return the current level (0/1) of an input claimed via claim_input."""
+        return int(self._lg.gpio_read(self._handle, gpio))
+
     def claim_alert_falling(self, gpio: int, callback, debounce_us: int = 0) -> None:
         """Watch ``gpio`` for falling edges and invoke ``callback(tick_ns)``.
 
@@ -532,6 +567,8 @@ class GpioLine:
                 pass
         if gpio in self._outputs:
             self._outputs.remove(gpio)
+        if gpio in self._inputs:
+            self._inputs.remove(gpio)
         try:
             self._lg.gpio_free(self._handle, gpio)
         except Exception:
@@ -540,7 +577,7 @@ class GpioLine:
     def close(self) -> None:
         for gpio in list(self._alerts.keys()):
             self.release(gpio)
-        for gpio in list(self._outputs):
+        for gpio in list(self._outputs) + list(self._inputs):
             try:
                 self._lg.gpio_free(self._handle, gpio)
             except Exception:

@@ -95,18 +95,44 @@ PCA9685_OE_GPIO = 4
 # and the LED moved to GPIO 20 (SPI1 MOSI). The physical PCB copper is
 # unchanged; only the silkscreen and these two constants moved.
 ROTATION_SENSOR_GPIO = 10
-# 100 ms glitch filter.  We trigger on the FAST snap-back (falling edge)
-# from ~3.3 V to ~0 V, not the slow ramp up through the input threshold.
-# Both rest levels are stable for the entire rotation period so a large
-# filter is fine — it just kills threshold-band noise while the shaft is
-# stationary.  Fastest real signal is the 112 RPM fast release (535 ms
-# per rev), so 100 ms leaves ~50 ms of margin before we start clipping
-# real edges.
-ROTATION_GLITCH_FILTER_US = 100000
+#
+# IMPORTANT — why this pin is *polled*, not interrupt/alert driven:
+#   The sensor output is a slow 0 V -> 3.3 V analog ramp that snaps back to
+#   0 V once per rotation. When the shaft is stationary (or the sensor is
+#   floating) the line can park in the input's threshold band and chatter
+#   at high frequency.  An lgpio edge *alert* raises a kernel GPIO
+#   interrupt on EVERY physical edge — the ``debounce_us`` glitch filter
+#   only suppresses which edges reach our Python callback, it does NOT stop
+#   the interrupt.  So threshold-band chatter produced a runaway IRQ storm
+#   (``irq/NN-lg`` pegging a core, lgpio daemon burning CPU) that starved
+#   the whole Pi and forced reboots — invisible to any Python-side rate
+#   guard because it happened below our callback.
+#
+#   The polled path below registers NO edge alert and therefore NO GPIO
+#   interrupt.  A fixed-rate sampling thread reads the level and does edge
+#   detection in software with temporal hysteresis.  CPU cost is constant
+#   regardless of how noisy the line is, so an IRQ storm is structurally
+#   impossible.  This is the guard against the instability we hit.
+#
+# Sampling rate for the polling thread.  The digital HIGH/LOW phases of the
+# sawtooth are each a large fraction of the rotation period (hundreds of ms
+# at operating RPM), so 500 Hz oversamples every real transition heavily
+# while costing well under ~2 % of one core.
+ROTATION_POLL_HZ = 500
+# Internal bias for the input.  "down" parks a disconnected/failed sensor
+# LOW (reads as "no rotations") rather than floating.  The live sensor
+# actively drives the line so the weak pull does not affect normal reads.
+ROTATION_INPUT_PULL = "down"
+# Temporal-hysteresis debounce (software Schmitt trigger).  A candidate new
+# level must persist for this many consecutive samples before we accept the
+# transition, so brief threshold-band wobble on the slow ramp can never be
+# mistaken for the clean fast snap-back.  4 samples @ 500 Hz = 8 ms stable,
+# far shorter than any real HIGH/LOW dwell but far longer than chatter.
+ROTATION_CONFIRM_SAMPLES = 4
 # Software min-inter-edge debounce, belt-and-suspenders on top of the
-# hardware filter.  At the max real RPM (~120) two rotations can arrive
-# no closer than ~500 ms apart, so 250 ms rejects any duplicate/noise
-# edge pair without ever discarding a real rotation.
+# hysteresis.  At the max real RPM (~120) two rotations can arrive no
+# closer than ~500 ms apart, so 250 ms rejects any duplicate/noise edge
+# pair without ever discarding a real rotation.
 ROTATION_MIN_INTER_EDGE_S = 0.25
 ROTATION_RPM_WINDOW = 5               # smooth RPM over the last N rotations
 ROTATION_RPM_STALE_S = 3.0            # no rotation in this long -> RPM = 0
@@ -141,19 +167,25 @@ RELEASE_ROTATION_CAP = 52
 RELEASE_MAX_DURATION_S = 60
 
 # PWM values for manual rotation-counted jogs + recipe winch oscillation.
-# Re-calibrated 2026-06 because the original 1516/1453 pair (~24 RPM) was
-# too close to the deadband edge to deliver useful torque under spool load
-# — the wind direction stalled against tension.  Sweep at this PWM range
-# now shows a clean step at 1555/1410 (~45 RPM) and a higher plateau at
-# 1560/1400 (~52 RPM each).  We pick the 1560/1400 pair: well past the
-# torque-starved deadband, well matched both directions (drift minimised),
-# and roughly double the previous speed.  WINCH_*_RPM is shown in the UI
-# and used by the scheduler's stationary-time preview; future closed-loop
-# calibration may refine these without rewriting callers.
-WINCH_UNWIND_US = 1560
-WINCH_WIND_US = 1400
-WINCH_UNWIND_RPM = 52
-WINCH_WIND_RPM = 52
+# Calibrated 2026-07-15 via scripts/calibrate_winch_pwm.py: fixed 4 s
+# open-loop legs + falling-edge counts + MCM snaps of the W-disc.
+# Earlier 1560/1400 was past the deadband but wind (−100 µs) was much
+# faster than unwind (+60 µs).  Matched pair (±50 µs) ≈ 60 RPM both ways
+# (verify: 4 edges / 4 s each direction).
+WINCH_UNWIND_US = 1550
+WINCH_WIND_US = 1450
+WINCH_UNWIND_RPM = 60
+WINCH_WIND_RPM = 60
+
+# After an unwind-direction rotation-counted move, reverse and creep in
+# the WIND direction until one falling edge so every move ends on the
+# same electrical stop angle (canonical approach).  Without this, unwind
+# and wind park ~½ turn apart because the analog-ramp→GPIO threshold
+# crossing is direction-dependent.  See scripts/rotation_ab_strategies.py.
+ROTATION_CANONICAL_FINISH = True
+ROTATION_CANONICAL_PWM_US = None  # filled to WINCH_WIND_US at use site
+ROTATION_CANONICAL_TIMEOUT_S = 5.0
+ROTATION_CANONICAL_SETTLE_S = 0.15
 
 # Recipe cap on user-selected revolutions per profile leg.
 WINCH_ROTATIONS_MAX = 30
@@ -200,16 +232,20 @@ class HardwareController:
 
         # Release-servo rotation sensor (initialised lazily by
         # init_rotation_sensor() once the caller knows DropCam mode).
-        # _rotation_count is incremented from an lgpio alert-callback
-        # thread; reads take _rotation_lock for atomicity with
-        # reset_rotation_count().
+        # _rotation_count is incremented from the polling thread; reads take
+        # _rotation_lock for atomicity with reset_rotation_count().
         self._rotation_gpio_line = None  # gpio_backend.GpioLine, shared
         self._rotation_count = 0
         self._rotation_lock = threading.Lock()
-        self._rotation_last_tick = None     # pigpio tick (us, 32-bit)
+        self._rotation_last_tick = None     # monotonic us of last accepted edge
         self._rotation_last_wall_s = 0.0
         self._rotation_intervals_us = deque(maxlen=ROTATION_RPM_WINDOW)
         self._rotation_available = False
+        # Polling thread (replaces the old lgpio edge alert; see the block
+        # comment on ROTATION_SENSOR_GPIO for why we no longer use an IRQ).
+        self._rotation_poll_thread = None
+        self._rotation_poll_stop = None       # threading.Event
+        self._rotation_debounced_level = None  # last confirmed 0/1 level
 
         # Recipe winch state.  All reads/writes share _rotation_lock so the
         # pigpio edge callback can update _winch_turns / _winch_state without
@@ -228,6 +264,9 @@ class HardwareController:
         self._winch_turns = 0
         self._winch_state = "idle"
         self._winch_error = False
+        # When True, rotation edges do not update signed winch turns
+        # (used during the post-unwind canonical wind-finish home).
+        self._winch_suppress_edges = False
 
     def init(self):
         if self._initialized:
@@ -717,28 +756,32 @@ class HardwareController:
     # ── Release-Shaft Rotation Sensor ──────────────────────────────────
     #
     # Counts *falling* edges on ROTATION_SENSOR_GPIO (BCM GPIO 10 on the
-    # Rev-A DeckHand PCB after the silkscreen relabel; previously GPIO 20)
-    # via an lgpio alert callback. The sensor produces a slow 0 V -> 3.3 V
-    # ramp once per rotation and then snaps sharply back to 0 V; falling
-    # on the snap-back gives one clean, well-defined pulse per rotation
-    # instead of the noisy slow crossing on the way up. Combined with a
-    # 100 ms hardware glitch filter (lgpio debounce) and a 250 ms
-    # software min-inter-edge debounce, this is highly resistant to the
-    # threshold-band chatter that used to fire spurious "pause" edges
-    # while the shaft was stationary.
+    # Rev-A DeckHand PCB after the silkscreen relabel; previously GPIO 20).
+    # The sensor produces a slow 0 V -> 3.3 V ramp once per rotation and
+    # then snaps sharply back to 0 V; the fast snap-back (HIGH -> LOW) gives
+    # one clean, well-defined pulse per rotation, whereas the slow ramp up
+    # through the input threshold is noisy.
     #
-    # This runs on both Pi 4 and Pi 5 through the same lgpio API — no more
-    # pigpio dependency for input handling. init_rotation_sensor() is
-    # still opt-in (RadCam-mode boards may leave it unconfigured).
+    # We *poll* the line rather than arm an lgpio edge alert.  See the block
+    # comment on ROTATION_SENSOR_GPIO: an edge alert raises a kernel GPIO
+    # interrupt on every physical edge (the debounce_us glitch filter does
+    # not suppress the interrupt, only the reported callback), so a noisy /
+    # floating line caused a runaway ``irq/NN-lg`` storm that starved the Pi
+    # and forced reboots.  A fixed-rate polling thread with temporal
+    # hysteresis registers no interrupt at all, so its CPU cost is constant
+    # no matter how noisy the line gets — the storm is structurally
+    # impossible.  This runs identically on Pi 4 and Pi 5 through lgpio.
+    # init_rotation_sensor() is still opt-in (RadCam-mode boards may leave
+    # the pin unconfigured).
 
     def init_rotation_sensor(self, enable=True):
         """Set up the release-shaft rotation sensor on ROTATION_SENSOR_GPIO.
 
         Idempotent.  When ``enable=False`` (e.g. RadCam mode where the pin
-        is repurposed for something else) this is a no-op and any prior
-        alert callback is torn down.  Uses the shared lgpio GpioLine so
-        it works identically on Pi 4 and Pi 5. Returns True if the sensor
-        is live afterwards.
+        is repurposed for something else) this is a no-op and any running
+        polling thread is torn down.  Uses the shared lgpio GpioLine so it
+        works identically on Pi 4 and Pi 5. Returns True if the sensor is
+        live afterwards.
         """
         if not enable:
             self._teardown_rotation_sensor()
@@ -750,28 +793,45 @@ class HardwareController:
             logger.warning("Rotation sensor unavailable: lgpio not importable")
             return False
         try:
-            # Trigger on the fast snap-back (3.3 V -> 0 V) rather than the
-            # slow ramp up through the input threshold; both rest levels
-            # are stable for the full rotation period so this is much
-            # more noise-tolerant than RISING_EDGE.
-            line.claim_alert_falling(
-                ROTATION_SENSOR_GPIO,
-                self._on_rotation_edge,
-                debounce_us=ROTATION_GLITCH_FILTER_US,
-            )
+            # Plain input (NO edge alert -> NO GPIO interrupt).  A weak pull
+            # keeps a disconnected line from floating; the live sensor drives
+            # the line hard enough that the pull is irrelevant in normal use.
+            line.claim_input(ROTATION_SENSOR_GPIO, pull=ROTATION_INPUT_PULL)
         except Exception as e:
             logger.warning(f"Rotation sensor init failed: {e}")
             return False
         self._rotation_gpio_line = line
+        stop_event = threading.Event()
+        self._rotation_poll_stop = stop_event
+        thread = threading.Thread(
+            target=self._rotation_poll_loop,
+            args=(line, stop_event),
+            name="rotation-poll",
+            daemon=True,
+        )
+        self._rotation_poll_thread = thread
         self._rotation_available = True
+        thread.start()
+        confirm_ms = ROTATION_CONFIRM_SAMPLES * 1000.0 / ROTATION_POLL_HZ
         logger.info(
             f"Rotation sensor ready on GPIO {ROTATION_SENSOR_GPIO} "
-            f"(falling-edge, glitch filter {ROTATION_GLITCH_FILTER_US/1000:.0f} ms, "
-            f"sw debounce {ROTATION_MIN_INTER_EDGE_S*1000:.0f} ms)"
+            f"(polled {ROTATION_POLL_HZ} Hz, pull={ROTATION_INPUT_PULL}, "
+            f"hysteresis {ROTATION_CONFIRM_SAMPLES} samples ~{confirm_ms:.0f} ms, "
+            f"sw debounce {ROTATION_MIN_INTER_EDGE_S*1000:.0f} ms). "
+            f"No GPIO interrupt armed — IRQ-storm-proof."
         )
         return True
 
     def _teardown_rotation_sensor(self):
+        stop_event = self._rotation_poll_stop
+        if stop_event is not None:
+            stop_event.set()
+        thread = self._rotation_poll_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+        self._rotation_poll_thread = None
+        self._rotation_poll_stop = None
+        self._rotation_debounced_level = None
         if self._rotation_gpio_line is not None:
             try:
                 self._rotation_gpio_line.release(ROTATION_SENSOR_GPIO)
@@ -780,23 +840,76 @@ class HardwareController:
         self._rotation_gpio_line = None
         self._rotation_available = False
 
-    def _on_rotation_edge(self, chip, gpio, level, tick_ns):
-        """lgpio alert callback (chip, gpio, level, tick_ns).
+    def _rotation_poll_loop(self, line, stop_event):
+        """Sample GPIO at ROTATION_POLL_HZ and detect debounced falling edges.
 
-        Keep this short — it runs on lgpio's callback thread. ``tick_ns``
-        is a monotonic nanosecond timestamp from the kernel, which we
-        convert to microseconds so the rest of the debounce / RPM logic
-        stays in the units it always used.
+        Temporal hysteresis (software Schmitt): a candidate new level must
+        be read ROTATION_CONFIRM_SAMPLES times in a row before we accept the
+        transition, so threshold-band wobble on the slow ramp can never be
+        mistaken for the clean fast snap-back.  A confirmed HIGH -> LOW
+        transition is one rotation.  No interrupts are involved, so this
+        loop's CPU cost is fixed regardless of line noise.
         """
-        tick_us = int(tick_ns) // 1000
+        gpio = ROTATION_SENSOR_GPIO
+        period = 1.0 / float(ROTATION_POLL_HZ)
+        confirm = int(ROTATION_CONFIRM_SAMPLES)
+        try:
+            level = line.read(gpio)
+        except Exception:
+            level = 0
+        self._rotation_debounced_level = level
+        candidate = None
+        candidate_run = 0
+        next_t = time.monotonic()
+        while not stop_event.is_set():
+            next_t += period
+            try:
+                raw = line.read(gpio)
+            except Exception:
+                # Transient read failure: don't busy-spin, don't crash.
+                if stop_event.wait(period):
+                    break
+                continue
+            if raw == level:
+                candidate = None
+                candidate_run = 0
+            else:
+                if raw == candidate:
+                    candidate_run += 1
+                else:
+                    candidate = raw
+                    candidate_run = 1
+                if candidate_run >= confirm:
+                    prev_level = level
+                    level = raw
+                    self._rotation_debounced_level = level
+                    candidate = None
+                    candidate_run = 0
+                    if prev_level == 1 and level == 0:
+                        # Confirmed fast snap-back = one shaft rotation.
+                        self._register_rotation_edge(
+                            int(time.monotonic() * 1_000_000)
+                        )
+            sleep_s = next_t - time.monotonic()
+            if sleep_s > 0:
+                if stop_event.wait(sleep_s):
+                    break
+            else:
+                # Fell behind (scheduler hiccup); resync to avoid drift.
+                next_t = time.monotonic()
+
+    def _register_rotation_edge(self, tick_us):
+        """Record one accepted rotation edge at monotonic-us ``tick_us``.
+
+        Called from the polling thread.  Applies the software min-inter-edge
+        debounce and updates the rotation count, RPM window, and (when a
+        winch leg is active) the signed winch-turn counter.
+        """
         with self._rotation_lock:
-            # Software min-inter-edge debounce.  Belt-and-suspenders on
-            # top of the lgpio glitch filter; catches any noise pair
-            # that cleared the hardware filter (eg two 100+ ms plateaus
-            # in a noisy threshold window).  Real rotations are always
-            # spaced >= 500 ms apart at our max operating RPM, so a
-            # 250 ms window rejects duplicates without ever discarding
-            # a valid edge.
+            # Software min-inter-edge debounce.  Belt-and-suspenders on top
+            # of the polling hysteresis.  Real rotations are always spaced
+            # >= 500 ms apart at our max operating RPM, so a 250 ms window
+            # rejects any duplicate/noise edge without discarding a valid one.
             if self._rotation_last_tick is not None:
                 interval_us = tick_us - self._rotation_last_tick
                 if interval_us < int(ROTATION_MIN_INTER_EDGE_S * 1_000_000):
@@ -815,7 +928,7 @@ class HardwareController:
             # error flag so the scheduler can log it.  We DO NOT abort: the
             # recipe keeps stepping through its pause->wind->pause->unwind
             # sequence as if nothing had happened.
-            if self._winch_active:
+            if self._winch_active and not self._winch_suppress_edges:
                 if self._winch_direction > 0:
                     self._winch_turns += 1
                 elif self._winch_direction < 0:
@@ -855,11 +968,104 @@ class HardwareController:
             return 0.0
         return 60_000_000.0 / mean_us
 
+    def _pwm_is_unwind(self, position_us: int) -> bool:
+        """True if ``position_us`` is on the unwind side of the stop band."""
+        return int(position_us) > RELEASE_STOP_US
+
+    def _pwm_is_wind(self, position_us: int) -> bool:
+        return int(position_us) < RELEASE_STOP_US
+
+    def _wait_rotation_edges(self, target_edges, max_duration_s,
+                             cancel_event=None, stop_event=None,
+                             stall_threshold_s=2.5):
+        """Block until ``target_edges`` more sensor edges arrive (from now).
+
+        Returns ``(outcome, delivered)`` where outcome is one of
+        ``target_reached``, ``cancelled``, ``sensor_stalled``, ``timed_out``.
+        """
+        start_count = self.get_rotation_count()
+        t_start = time.monotonic()
+        deadline = t_start + float(max_duration_s)
+        poll_s = 0.02
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                return "cancelled", self.get_rotation_count() - start_count
+            if stop_event is not None and stop_event.is_set():
+                return "cancelled", self.get_rotation_count() - start_count
+            delivered = self.get_rotation_count() - start_count
+            if delivered >= target_edges:
+                return "target_reached", delivered
+            now = time.monotonic()
+            if delivered == 0 and (now - t_start) >= stall_threshold_s:
+                return "sensor_stalled", delivered
+            if now >= deadline:
+                return "timed_out", delivered
+            if cancel_event is not None:
+                if cancel_event.wait(poll_s):
+                    return "cancelled", self.get_rotation_count() - start_count
+            elif stop_event is not None:
+                if stop_event.wait(poll_s):
+                    return "cancelled", self.get_rotation_count() - start_count
+            else:
+                time.sleep(poll_s)
+
+    def _canonical_wind_finish(self, cancel_event=None, stop_event=None) -> dict:
+        """Creep in the wind direction until one falling edge, then stop.
+
+        Brings the shaft to the wind-side threshold angle so unwind and
+        wind moves share a common stop pose.  Winch signed-turns are not
+        updated during this home (``_winch_suppress_edges``).
+        """
+        if not ROTATION_CANONICAL_FINISH:
+            return {"needed": False, "outcome": "disabled", "delivered": 0}
+        if not self.is_rotation_sensor_available():
+            return {"needed": False, "outcome": "no_sensor", "delivered": 0}
+
+        pwm = WINCH_WIND_US if ROTATION_CANONICAL_PWM_US is None else int(
+            ROTATION_CANONICAL_PWM_US
+        )
+        time.sleep(ROTATION_CANONICAL_SETTLE_S)
+        with self._rotation_lock:
+            self._winch_suppress_edges = True
+        t0 = time.monotonic()
+        outcome = "started"
+        delivered = 0
+        try:
+            self.set_release(pwm)
+            outcome, delivered = self._wait_rotation_edges(
+                1, ROTATION_CANONICAL_TIMEOUT_S,
+                cancel_event=cancel_event, stop_event=stop_event,
+                stall_threshold_s=ROTATION_CANONICAL_TIMEOUT_S,
+            )
+        finally:
+            try:
+                self.set_release(RELEASE_STOP_US)
+            except Exception:
+                pass
+            with self._rotation_lock:
+                self._winch_suppress_edges = False
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Canonical wind-finish: outcome=%s delivered=%d in %.2fs (pwm=%d)",
+            outcome, delivered, elapsed, pwm,
+        )
+        return {
+            "needed": True,
+            "outcome": outcome,
+            "delivered": delivered,
+            "elapsed_s": round(elapsed, 2),
+            "pwm_us": pwm,
+        }
+
     def release_run_for_rotations(self, position_us, target_rotations,
                                   max_duration_s, on_complete=None):
-        """Hold ``position_us`` until ``target_rotations`` rising edges of the
+        """Hold ``position_us`` until ``target_rotations`` falling edges of the
         rotation sensor have been observed, or ``max_duration_s`` elapses,
         whichever comes first.  Then return the shaft to stop.
+
+        If the commanded PWM is unwind-side and ``ROTATION_CANONICAL_FINISH``
+        is enabled, a short wind-direction creep follows so the shaft always
+        parks on the wind threshold angle (matched stop pose both ways).
 
         Uses a count *delta* captured at start so the global rotation counter
         (used by /status and the subtitle overlay) is not disturbed.  Spawns
@@ -893,12 +1099,12 @@ class HardwareController:
         """Worker for release_run_for_rotations.  Emits structured info-logs
         at start and end that callers (main.py) can forward to events.ndjson.
         """
-        start_count = self.get_rotation_count()
         sensor_ok = self.is_rotation_sensor_available()
         outcome = "started"
         t_start = time.monotonic()
-        deadline = t_start + max_duration_s
         delivered = 0
+        main_delivered = 0
+        canonical = {"needed": False}
         try:
             if not sensor_ok:
                 logger.warning(
@@ -914,37 +1120,25 @@ class HardwareController:
                 f"{position_us} us, safety cap {max_duration_s:.1f}s"
             )
             self.set_release(position_us)
-            # Poll every 20 ms — gives ~0.04 rotation precision at 112 RPM.
-            poll_s = 0.02
-            # Same sensor-stall guard as the winch path.  At fast release
-            # (~112 RPM) the first edge should arrive within ~0.5 s, so
-            # 2.5 s of zero edges almost certainly means the sensor
-            # signal has been lost (wiring, connector, or a wedged lgpio
-            # alert).  Abort instead of running the full safety cap.
-            stall_threshold_s = 2.5
-            while True:
-                if self._release_run_cancel.is_set():
-                    outcome = "cancelled"
-                    break
-                delivered = self.get_rotation_count() - start_count
-                if delivered >= target:
-                    outcome = "target_reached"
-                    break
-                now = time.monotonic()
-                if delivered == 0 and (now - t_start) >= stall_threshold_s:
-                    outcome = "sensor_stalled"
-                    logger.error(
-                        f"Release-by-rotations aborted: no rotation edges "
-                        f"in {stall_threshold_s:.1f}s at {position_us} us "
-                        f"— sensor input may be silenced."
-                    )
-                    break
-                if now >= deadline:
-                    outcome = "timed_out"
-                    break
-                if self._release_run_cancel.wait(poll_s):
-                    outcome = "cancelled"
-                    break
+            outcome, delivered = self._wait_rotation_edges(
+                target, max_duration_s,
+                cancel_event=self._release_run_cancel,
+            )
+            main_delivered = delivered
+            if outcome == "sensor_stalled":
+                logger.error(
+                    f"Release-by-rotations aborted: no rotation edges "
+                    f"in 2.5s at {position_us} us — sensor input may be silenced."
+                )
+            # Canonical finish: only after a successful unwind-side move.
+            if (
+                outcome == "target_reached"
+                and self._pwm_is_unwind(position_us)
+                and not self._release_run_cancel.is_set()
+            ):
+                canonical = self._canonical_wind_finish(
+                    cancel_event=self._release_run_cancel,
+                )
         finally:
             try:
                 self.set_release(RELEASE_STOP_US)
@@ -953,20 +1147,20 @@ class HardwareController:
             with self._lock:
                 self._release_run_active = False
             elapsed = time.monotonic() - t_start
-            delivered = self.get_rotation_count() - start_count
             logger.info(
                 f"Release-by-rotations done: outcome={outcome} "
-                f"delivered={delivered}/{target} rotations in {elapsed:.1f}s"
+                f"delivered={main_delivered}/{target} rotations in {elapsed:.1f}s"
+                f"{' +canonical' if canonical.get('needed') else ''}"
             )
-            # Stash the last-run result for callers to surface in events.ndjson.
             result = {
                 "outcome": outcome,
-                "delivered": delivered,
+                "delivered": main_delivered,
                 "target": target,
                 "elapsed_s": round(elapsed, 2),
                 "position_us": position_us,
                 "max_duration_s": max_duration_s,
                 "sensor_available": sensor_ok,
+                "canonical_finish": canonical,
             }
             self._last_release_rotation_result = result
             if on_complete is not None:
@@ -1066,8 +1260,9 @@ class HardwareController:
         start_count = self.get_rotation_count()
         sensor_ok = self.is_rotation_sensor_available()
         t_start = time.monotonic()
-        deadline = t_start + max_duration_s
         outcome = "timeout"
+        main_delivered = 0
+        canonical = {"needed": False}
         try:
             self.set_release(position_us)
             if not sensor_ok:
@@ -1080,59 +1275,46 @@ class HardwareController:
                 if stop_event is not None and stop_event.wait(max_duration_s):
                     outcome = "cancelled"
                 else:
-                    time.sleep(max(0.0, deadline - time.monotonic()))
+                    time.sleep(max(0.0, (t_start + max_duration_s) - time.monotonic()))
                     outcome = "no_sensor_timeout"
                 return None  # populated below in finally
-            # Sensor-stall guard.  If the rotation sensor reports zero
-            # edges within this many seconds of starting the leg the
-            # signal has almost certainly been lost (unplugged sensor,
-            # wedged lgpio alert, etc.). Abort early instead of running
-            # the full leg_cap_s budget. 2.5 s is generous enough for
-            # healthy operation at every RPM the winch supports (>= ~24
-            # RPM -> first edge by 2.5 s).
-            stall_threshold_s = 2.5
-            poll_s = 0.02
-            while True:
-                if stop_event is not None and stop_event.is_set():
-                    outcome = "cancelled"
-                    break
-                delivered = self.get_rotation_count() - start_count
-                if delivered >= target_rotations:
-                    outcome = "target"
-                    break
-                now = time.monotonic()
-                if delivered == 0 and (now - t_start) >= stall_threshold_s:
-                    outcome = "sensor_stalled"
-                    logger.error(
-                        f"Winch leg aborted: no rotation edges in "
-                        f"{stall_threshold_s:.1f}s at {position_us} us "
-                        f"(target {target_rotations} rev) — rotation "
-                        f"sensor signal appears to be lost."
-                    )
-                    break
-                if now >= deadline:
-                    outcome = "timeout"
-                    break
-                if stop_event is not None:
-                    if stop_event.wait(poll_s):
-                        outcome = "cancelled"
-                        break
-                else:
-                    time.sleep(poll_s)
+            out, main_delivered = self._wait_rotation_edges(
+                target_rotations, max_duration_s, stop_event=stop_event,
+            )
+            # Map helper outcomes onto the winch leg vocabulary.
+            outcome = {
+                "target_reached": "target",
+                "cancelled": "cancelled",
+                "sensor_stalled": "sensor_stalled",
+                "timed_out": "timeout",
+            }.get(out, out)
+            if outcome == "sensor_stalled":
+                logger.error(
+                    f"Winch leg aborted: no rotation edges in "
+                    f"2.5s at {position_us} us "
+                    f"(target {target_rotations} rev) — rotation "
+                    f"sensor signal appears to be lost."
+                )
+            if (
+                outcome == "target"
+                and self._pwm_is_unwind(position_us)
+                and not (stop_event is not None and stop_event.is_set())
+            ):
+                canonical = self._canonical_wind_finish(stop_event=stop_event)
         finally:
             try:
                 self.set_release(RELEASE_STOP_US)
             except Exception:
                 pass
-        delivered = self.get_rotation_count() - start_count
         elapsed = time.monotonic() - t_start
         return {
             "outcome": outcome,
-            "delivered": delivered,
+            "delivered": main_delivered,
             "target": target_rotations,
             "elapsed_s": round(elapsed, 2),
             "position_us": position_us,
             "sensor_available": sensor_ok,
+            "canonical_finish": canonical,
         }
 
     # ── Auxiliary Servo PWM Outputs ────────────────────────────────────
