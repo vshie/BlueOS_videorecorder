@@ -182,12 +182,17 @@ WINCH_WIND_US = 1415
 WINCH_UNWIND_RPM = 55
 WINCH_WIND_RPM = 56
 
-# After an unwind-direction rotation-counted move, reverse and creep in
-# the WIND direction until one falling edge so every move ends on the
-# same electrical stop angle (canonical approach).  Without this, unwind
-# and wind park ~½ turn apart because the analog-ramp→GPIO threshold
-# crossing is direction-dependent.  See scripts/rotation_ab_strategies.py.
-ROTATION_CANONICAL_FINISH = True
+# Canonical wind-finish (legacy): after an unwind move, creep in the WIND
+# direction until one edge so every move ends on the same electrical stop
+# angle.  This existed only to paper over the ~½ turn direction offset caused
+# by counting FALLING edges in both directions (falling = clean snap when
+# unwinding, but the fuzzy slow-ramp crossing when winding).  The
+# direction-dependent snap detector (_rotation_snap_polarity) now keys on the
+# fast snap in BOTH directions, which lands at the SAME mechanical angle, so
+# unwind and wind already stop together.  The creep is therefore redundant —
+# and worse, with snap-based counting it would wind a nearly full extra rev to
+# reach the next wind snap — so it is disabled.
+ROTATION_CANONICAL_FINISH = False
 ROTATION_CANONICAL_PWM_US = None  # filled to WINCH_WIND_US at use site
 ROTATION_CANONICAL_TIMEOUT_S = 5.0
 ROTATION_CANONICAL_SETTLE_S = 0.15
@@ -261,6 +266,18 @@ class HardwareController:
         self._rotation_poll_thread = None
         self._rotation_poll_stop = None       # threading.Event
         self._rotation_debounced_level = None  # last confirmed 0/1 level
+        # Which GPIO transition is the clean "snap-back" for the CURRENT motor
+        # direction.  The sensor is a 1:1 sawtooth (slow ramp + fast snap across
+        # the dead-zone gap once per rev); the snap is a FALLING edge when
+        # unwinding but a RISING edge when winding, and it always occurs at the
+        # SAME mechanical angle (the gap).  Keying on the snap for each direction
+        # gives an equally clean edge both ways AND makes unwind/wind stop at the
+        # same angle (which is why the canonical wind-finish is no longer needed).
+        #   +1 -> count FALLING edges (unwind snap)
+        #   -1 -> count RISING  edges (wind snap)
+        # Updated by set_release(); on stop we keep the last direction so coast
+        # edges are still attributed to the correct snap polarity.
+        self._rotation_snap_polarity = 1
 
         # Recipe winch state.  All reads/writes share _rotation_lock so the
         # pigpio edge callback can update _winch_turns / _winch_state without
@@ -675,6 +692,14 @@ class HardwareController:
         position_us = max(SERVO_MIN_US, min(SERVO_MAX_US, int(position_us)))
         with self._lock:
             self._release_position = position_us
+        # Select the snap-back edge polarity for the commanded direction so the
+        # poll loop counts the clean fast edge (falling when unwinding, rising
+        # when winding).  Neutral (stop) leaves the last polarity so the shaft's
+        # brief coast in the same direction is still counted correctly.
+        if position_us > RELEASE_STOP_US:
+            self._rotation_snap_polarity = 1
+        elif position_us < RELEASE_STOP_US:
+            self._rotation_snap_polarity = -1
         if self._servo and self._servo.available:
             self._servo.set_pulse(RELEASE_GPIO, position_us)
         else:
@@ -856,14 +881,16 @@ class HardwareController:
         self._rotation_available = False
 
     def _rotation_poll_loop(self, line, stop_event):
-        """Sample GPIO at ROTATION_POLL_HZ and detect debounced falling edges.
+        """Sample GPIO at ROTATION_POLL_HZ and detect the debounced snap-back.
 
         Temporal hysteresis (software Schmitt): a candidate new level must
         be read ROTATION_CONFIRM_SAMPLES times in a row before we accept the
         transition, so threshold-band wobble on the slow ramp can never be
-        mistaken for the clean fast snap-back.  A confirmed HIGH -> LOW
-        transition is one rotation.  No interrupts are involved, so this
-        loop's CPU cost is fixed regardless of line noise.
+        mistaken for the clean fast snap-back.  The snap is a FALLING edge
+        when unwinding and a RISING edge when winding (see
+        _rotation_snap_polarity); we count only that transition, so the slow
+        ramp crossing is ignored entirely.  No interrupts are involved, so
+        this loop's CPU cost is fixed regardless of line noise.
         """
         gpio = ROTATION_SENSOR_GPIO
         period = 1.0 / float(ROTATION_POLL_HZ)
@@ -900,8 +927,15 @@ class HardwareController:
                     self._rotation_debounced_level = level
                     candidate = None
                     candidate_run = 0
-                    if prev_level == 1 and level == 0:
-                        # Confirmed fast snap-back = one shaft rotation.
+                    # Count the confirmed snap-back for the current direction:
+                    # falling when unwinding (+1), rising when winding (-1).
+                    # The opposite transition is the slow ramp crossing and is
+                    # deliberately ignored, so it can never be double-counted.
+                    if self._rotation_snap_polarity >= 0:
+                        snapped = (prev_level == 1 and level == 0)
+                    else:
+                        snapped = (prev_level == 0 and level == 1)
+                    if snapped:
                         self._register_rotation_edge(
                             int(time.monotonic() * 1_000_000)
                         )
