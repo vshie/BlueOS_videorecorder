@@ -167,15 +167,20 @@ RELEASE_ROTATION_CAP = 52
 RELEASE_MAX_DURATION_S = 60
 
 # PWM values for manual rotation-counted jogs + recipe winch oscillation.
-# Calibrated 2026-07-15 via scripts/calibrate_winch_pwm.py: fixed 4 s
-# open-loop legs + falling-edge counts + MCM snaps of the W-disc.
-# Earlier 1560/1400 was past the deadband but wind (−100 µs) was much
-# faster than unwind (+60 µs).  Matched pair (±50 µs) ≈ 60 RPM both ways
-# (verify: 4 edges / 4 s each direction).
+# Re-calibrated 2026-07-15 via scripts/rotation_dir_waveform.py: GPIO10 level
+# sampled at 2 kHz while driving each direction, counting falling edges.
+# The winch deadband is ASYMMETRIC — unwind reaches speed much sooner than
+# wind, so a symmetric ±50 µs pair is badly mismatched:
+#   unwind 1550 (+50 µs) -> 55.1 RPM (1.07 s/rev)
+#   wind   1450 (−50 µs) -> 21.6 RPM (2.77 s/rev)   <-- far too slow
+#   wind   1425 (−75 µs) -> 47.0 RPM (1.26 s/rev)
+# Wind needs a larger offset from 1500 to match unwind.  Confirmed by a PWM
+# sweep: wind 1415 (−85 µs) -> 55.8 RPM, matching unwind 55.1 RPM (both
+# ~1.08 s/rev, comfortably under ROTATION_STALL_THRESHOLD_S).
 WINCH_UNWIND_US = 1550
-WINCH_WIND_US = 1450
-WINCH_UNWIND_RPM = 60
-WINCH_WIND_RPM = 60
+WINCH_WIND_US = 1415
+WINCH_UNWIND_RPM = 55
+WINCH_WIND_RPM = 56
 
 # After an unwind-direction rotation-counted move, reverse and creep in
 # the WIND direction until one falling edge so every move ends on the
@@ -186,6 +191,16 @@ ROTATION_CANONICAL_FINISH = True
 ROTATION_CANONICAL_PWM_US = None  # filled to WINCH_WIND_US at use site
 ROTATION_CANONICAL_TIMEOUT_S = 5.0
 ROTATION_CANONICAL_SETTLE_S = 0.15
+
+# A rotation-counted move is only declared "stalled" (silenced sensor / jammed
+# spool) if NO edge arrives within this window.  It MUST exceed the worst-case
+# wait for the first legitimate edge — up to one full slow revolution when a
+# move starts just after an edge.  The old 2.5 s value was SHORTER than the
+# wind rev period at the mis-calibrated 1450 µs (2.77 s/rev), so wind moves
+# were aborted before their first edge ever arrived (counted 0, stopped after
+# ~1 coasted rev).  4.0 s clears one slow rev with margin while still catching
+# a truly dead sensor well inside RELEASE_MAX_DURATION_S.
+ROTATION_STALL_THRESHOLD_S = 4.0
 
 # Recipe cap on user-selected revolutions per profile leg.
 WINCH_ROTATIONS_MAX = 30
@@ -977,7 +992,7 @@ class HardwareController:
 
     def _wait_rotation_edges(self, target_edges, max_duration_s,
                              cancel_event=None, stop_event=None,
-                             stall_threshold_s=2.5):
+                             stall_threshold_s=ROTATION_STALL_THRESHOLD_S):
         """Block until ``target_edges`` more sensor edges arrive (from now).
 
         Returns ``(outcome, delivered)`` where outcome is one of
@@ -1127,8 +1142,9 @@ class HardwareController:
             main_delivered = delivered
             if outcome == "sensor_stalled":
                 logger.error(
-                    f"Release-by-rotations aborted: no rotation edges "
-                    f"in 2.5s at {position_us} us — sensor input may be silenced."
+                    f"Release-by-rotations aborted: no rotation edges in "
+                    f"{ROTATION_STALL_THRESHOLD_S:.1f}s at {position_us} us — "
+                    f"sensor input may be silenced."
                 )
             # Canonical finish: only after a successful unwind-side move.
             if (
@@ -1291,7 +1307,7 @@ class HardwareController:
             if outcome == "sensor_stalled":
                 logger.error(
                     f"Winch leg aborted: no rotation edges in "
-                    f"2.5s at {position_us} us "
+                    f"{ROTATION_STALL_THRESHOLD_S:.1f}s at {position_us} us "
                     f"(target {target_rotations} rev) — rotation "
                     f"sensor signal appears to be lost."
                 )
