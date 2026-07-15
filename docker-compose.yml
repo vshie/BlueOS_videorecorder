@@ -9,11 +9,18 @@ services:
       - "5423:5423"
     volumes:
       - /usr/blueos/extensions/videorecorder:/app/videorecordings
-      - /dev/video2:/dev/video2
       - /dev/snd:/dev/snd
       # Expose host /dev so USB block devices (e.g. /dev/sda1) appear in the
       # container when hot-plugged. Without this, USB storage only works if a
       # drive was present at container start.
+      #
+      # NOTE: do NOT add an explicit `- /dev/video2:/dev/video2` bind mount.
+      # This whole-/dev mount already exposes every video node to the
+      # container. A specific /dev/video2 mount makes Docker *create an empty
+      # directory* at /dev/video2 on the host whenever the node is briefly
+      # absent at container start, and that directory then squats on the node
+      # udev needs for the USB camera's H264 interface — leaving the camera
+      # stuck on the MJPG-only interface (video0) with no H264 stream.
       - /dev:/dev
       # rshared lets the container see mounts the host performs (and vice-versa).
       - /mnt:/mnt:rshared

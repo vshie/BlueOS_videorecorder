@@ -137,6 +137,19 @@ ROTATION_MIN_INTER_EDGE_S = 0.25
 ROTATION_RPM_WINDOW = 5               # smooth RPM over the last N rotations
 ROTATION_RPM_STALE_S = 3.0            # no rotation in this long -> RPM = 0
 
+# Direction-reversal phantom-edge guard.  A leg always parks the shaft the
+# instant it sees the snap, i.e. right on the mark.  The next leg in the
+# OPPOSITE direction re-crosses that same mark almost immediately (near-zero
+# net rotation), firing one spurious "phantom" snap before any real revolution.
+# That phantom lands within ~0.2 s of motion start at ANY drive speed (it is a
+# tiny fixed re-cross angle), whereas the first REAL revolution takes >= ~0.54 s
+# even at the fastest release (~112 RPM) and ~1.07 s at winch speed.  So on a
+# reversal (or the very first move after boot) we drop the first snap ONLY if it
+# arrives sooner than this guard.  A genuine first revolution — e.g. a cold
+# start where the shaft was NOT parked on the mark — arrives later and is kept,
+# so we never overshoot by counting one too few.
+ROTATION_REVERSAL_GUARD_S = 0.4
+
 AUX_PWM_GPIOS = {
     "focus": FOCUS_GPIO,
     "zoom": ZOOM_GPIO,
@@ -278,6 +291,33 @@ class HardwareController:
         # Updated by set_release(); on stop we keep the last direction so coast
         # edges are still attributed to the correct snap polarity.
         self._rotation_snap_polarity = 1
+
+        # Direction-reversal phantom-edge suppression.
+        #
+        # A rotation-counted leg always parks the shaft the instant it sees the
+        # snap, i.e. right ON the mark's dead-zone gap.  The very next leg in
+        # the OPPOSITE direction therefore re-crosses that same gap almost
+        # immediately (near-zero net rotation) and produces one spurious snap
+        # in the new polarity BEFORE any real revolution.  Left uncounted-for,
+        # that phantom edge makes the first reversed leg finish one physical
+        # revolution short (command 3 -> only 2 turns).  The same happens on the
+        # very first leg after boot because the shaft is parked on the mark from
+        # the previous session.
+        #
+        # We suppress it deterministically: when set_release() commands a
+        # direction that differs from the last commanded move direction (or on
+        # the first move, when _rotation_last_move_dir is still 0), we arm
+        # _rotation_skip_next_edge so _register_rotation_edge() drops exactly the
+        # next snap.  Same-direction repeats never re-cross the parked mark, so
+        # they are left untouched.
+        #   0  -> no move commanded yet (cold start; first move is skipped)
+        #  +1  -> last commanded move was unwind
+        #  -1  -> last commanded move was wind
+        self._rotation_last_move_dir = 0
+        self._rotation_skip_next_edge = False
+        # Monotonic-us timestamp of the last commanded move, used to time-guard
+        # the phantom skip (see ROTATION_REVERSAL_GUARD_S).
+        self._rotation_move_start_tick = None
 
         # Recipe winch state.  All reads/writes share _rotation_lock so the
         # pigpio edge callback can update _winch_turns / _winch_state without
@@ -696,10 +736,24 @@ class HardwareController:
         # poll loop counts the clean fast edge (falling when unwinding, rising
         # when winding).  Neutral (stop) leaves the last polarity so the shaft's
         # brief coast in the same direction is still counted correctly.
+        #
+        # Also arm the phantom-edge skip on a direction reversal (or the first
+        # move after boot): the shaft is parked on the mark, so reversing
+        # re-crosses it and fires one spurious snap before any real revolution.
+        # See _rotation_last_move_dir / _rotation_skip_next_edge in __init__.
         if position_us > RELEASE_STOP_US:
-            self._rotation_snap_polarity = 1
+            new_dir = 1
         elif position_us < RELEASE_STOP_US:
-            self._rotation_snap_polarity = -1
+            new_dir = -1
+        else:
+            new_dir = 0  # stop / neutral: leave direction + skip state untouched
+        if new_dir != 0:
+            self._rotation_snap_polarity = new_dir
+            with self._rotation_lock:
+                if new_dir != self._rotation_last_move_dir:
+                    self._rotation_skip_next_edge = True
+                self._rotation_last_move_dir = new_dir
+                self._rotation_move_start_tick = int(time.monotonic() * 1_000_000)
         if self._servo and self._servo.available:
             self._servo.set_pulse(RELEASE_GPIO, position_us)
         else:
@@ -955,6 +1009,20 @@ class HardwareController:
         winch leg is active) the signed winch-turn counter.
         """
         with self._rotation_lock:
+            # Direction-reversal phantom edge: the first snap after a change of
+            # commanded direction can be the shaft re-crossing the mark it was
+            # parked on (near-zero net rotation).  Drop it ONLY if it arrives
+            # within the guard window; a snap that late is a genuine first
+            # revolution (e.g. a cold start not parked on the mark) and must be
+            # counted, otherwise we would overshoot by one.  Either way the
+            # skip is disarmed after the first snap of the leg.
+            if self._rotation_skip_next_edge:
+                self._rotation_skip_next_edge = False
+                start = self._rotation_move_start_tick
+                guard_us = int(ROTATION_REVERSAL_GUARD_S * 1_000_000)
+                if start is not None and (tick_us - start) < guard_us:
+                    self._rotation_last_tick = tick_us
+                    return
             # Software min-inter-edge debounce.  Belt-and-suspenders on top
             # of the polling hysteresis.  Real rotations are always spaced
             # >= 500 ms apart at our max operating RPM, so a 250 ms window
