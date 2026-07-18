@@ -482,8 +482,16 @@ def create_ass_file(video_path):
     base = os.path.splitext(video_path)[0]
     ass_path = base + ".ass"
     title = "RadCam Telemetry" if radcam_mode else "DropCam Telemetry"
-    res_x = "3840" if radcam_mode else "1920"
-    res_y = "2160" if radcam_mode else "1080"
+    # ASS Fontsize/margins are in PlayRes pixels. 4K uses 2× the 1080p
+    # style so on-screen subtitle size matches DropCam footage.
+    if radcam_mode:
+        res_x, res_y = 3840, 2160
+        fontsize, outline, shadow = 40, 4, 2
+        margin_l, margin_r, margin_v = 20, 20, 40
+    else:
+        res_x, res_y = 1920, 1080
+        fontsize, outline, shadow = 20, 2, 1
+        margin_l, margin_r, margin_v = 10, 10, 20
     with open(ass_path, "w") as f:
         f.write("[Script Info]\n")
         f.write(f"Title: {title}\n")
@@ -498,8 +506,11 @@ def create_ass_file(video_path):
                 "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
                 "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
                 "Alignment, MarginL, MarginR, MarginV, Encoding\n")
-        f.write("Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,"
-                "&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,20,1\n\n")
+        f.write(
+            f"Style: Default,Arial,{fontsize},&H00FFFFFF,&H000000FF,&H00000000,"
+            f"&H00000000,0,0,0,0,100,100,0,0,1,{outline},{shadow},2,"
+            f"{margin_l},{margin_r},{margin_v},1\n\n"
+        )
         f.write("[Events]\n")
         f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     return ass_path
