@@ -7,15 +7,23 @@ active recipe from config and, after the configured delay, calls back
 into the main app to start recording and hardware control.
 """
 
+import json
 import logging
 import threading
 import time
+import urllib.error
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
 DISK_FREE_MINIMUM_MB = 1024  # 1 GB
 RECORDING_START_RETRIES = 5
 RECORDING_RETRY_INTERVAL_S = 5
+
+# Same POST radcam-manager / towfish use for one-push WB. The older
+# cgi_action GET path returns "error user/pwd" on current firmware.
+RADCAM_AWB_URL = "http://192.168.2.10/action/setImageAdjustmentEx"
+RADCAM_AWB_BODY = {"onceAWB": 1}
 
 LED_COLOR_MAP = {
     "red": (20, 0, 0),
@@ -51,9 +59,11 @@ class Scheduler:
         self._focus_sweep_thread = None
         self._release_thread = None
         self._winch_thread = None
+        self._awb_thread = None
+        self._radcam_mode = False
 
     def configure(self, *, start_fn, stop_fn, disk_free_fn, hw,
-                  capture_still_fn=None, log_event_fn=None):
+                  capture_still_fn=None, log_event_fn=None, radcam_mode=False):
         self._start_recording_fn = start_fn
         self._stop_recording_fn = stop_fn
         self._get_disk_free_fn = disk_free_fn
@@ -64,6 +74,11 @@ class Scheduler:
         # always None, silently dropping every winch/release event.
         self._log_event_fn = log_event_fn
         self._hw = hw
+        self._radcam_mode = bool(radcam_mode)
+
+    def set_radcam_mode(self, enabled):
+        """Update tilt-nod extents after a late RadCam detect."""
+        self._radcam_mode = bool(enabled)
 
     def _log(self, event, detail=""):
         """Best-effort event log via the injected main.log_event."""
@@ -96,6 +111,8 @@ class Scheduler:
         self._stop.set()
         if self._focus_sweep_thread and self._focus_sweep_thread.is_alive():
             self._focus_sweep_thread.join(timeout=5)
+        if self._awb_thread and self._awb_thread.is_alive():
+            self._awb_thread.join(timeout=5)
         if self._release_thread and self._release_thread.is_alive():
             self._release_thread.join(timeout=5)
         if self._winch_thread and self._winch_thread.is_alive():
@@ -144,6 +161,21 @@ class Scheduler:
         try:
             delay_s = recipe.get("auto_start_delay_minutes", 1) * 60
             self._countdown("delay", delay_s)
+            if self._stop.is_set():
+                return
+
+            # Visual "I'm about to start" cue before the recorder arms.
+            if self._hw:
+                try:
+                    start_us = int(recipe.get("servo_start_us", 1500))
+                    self._set_state("nodding")
+                    self._hw.nod_gesture(
+                        radcam=self._radcam_mode,
+                        return_us=start_us,
+                        stop_event=self._stop,
+                    )
+                except Exception as e:
+                    logger.warning("Pre-recipe tilt nod failed: %s", e)
             if self._stop.is_set():
                 return
 
@@ -202,6 +234,22 @@ class Scheduler:
                 self._focus_sweep_thread.start()
                 logger.info(f"Focus finder: sweeping {start_us}-{end_us} us over "
                             f"{duration_s}s at zoom {zoom_us} us")
+
+            # Default on (towfish behaviour) when the recipe omits the key.
+            if recipe.get("radcam_awb_enable", True):
+                interval_s = float(recipe.get("radcam_awb_interval_s", 120) or 120)
+                interval_s = max(10.0, min(3600.0, interval_s))
+                self._awb_thread = threading.Thread(
+                    target=self._awb_loop,
+                    args=(interval_s, duration_s),
+                    name="radcam-awb-loop",
+                    daemon=True,
+                )
+                self._awb_thread.start()
+                logger.info(
+                    "RadCam AWB loop started (onceAWB=1 every %.0fs for %.0fs)",
+                    interval_s, duration_s,
+                )
 
             if self._hw:
                 light_mode = recipe.get("light_mode", "off")
@@ -447,6 +495,56 @@ class Scheduler:
                 self._hw.winch_end()
             except Exception:
                 pass
+
+    def _trigger_awb_once(self) -> bool:
+        """POST onceAWB=1 to RadCam setImageAdjustmentEx. Never raises."""
+        try:
+            data = json.dumps(RADCAM_AWB_BODY).encode("utf-8")
+            req = urllib.request.Request(
+                RADCAM_AWB_URL,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                body_text = (resp.read() or b"").decode("utf-8", errors="replace").strip()
+                code = None
+                try:
+                    code = (json.loads(body_text) or {}).get("code")
+                except Exception:
+                    pass
+                if code is None or code == 0:
+                    logger.info("RadCam AWB (onceAWB=1) OK")
+                    self._log("radcam_awb_ok", "onceAWB=1")
+                    return True
+                err = f"code {code}: {body_text[:120]}"
+        except urllib.error.HTTPError as e:
+            err = f"HTTP {e.code}"
+        except Exception as e:
+            err = str(e)
+        logger.warning("RadCam AWB failed: %s", err)
+        self._log("radcam_awb_failed", err)
+        return False
+
+    def _awb_loop(self, interval_s, duration_s):
+        """Fire AWB once now, then every interval_s for the recording window.
+
+        Bounded by duration_s so a delayed release (which keeps ``_stop``
+        clear after the recording ends) does not keep retriggering AWB.
+        """
+        logger.info("AWB loop started (interval %.0fs)", interval_s)
+        self._trigger_awb_once()
+        deadline = time.monotonic() + float(duration_s)
+        while not self._stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if self._stop.wait(min(interval_s, remaining)):
+                break
+            if time.monotonic() >= deadline:
+                break
+            self._trigger_awb_once()
+        logger.info("AWB loop stopped")
 
     def _focus_sweep_loop(self, start_us, end_us, duration_s):
         """Linearly increment focus PWM from start to end over duration."""

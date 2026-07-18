@@ -71,6 +71,10 @@ RECIPE_SCHEMA_DEFAULTS = {
     "focus_finder_zoom_us": 935,
     "radcam_focus_us": 900,
     "radcam_zoom_us": 935,
+    # One-push AWB via RadCam setImageAdjustmentEx (same path as
+    # radcam-manager / towfish). Interval 0 with enable=False is a no-op.
+    "radcam_awb_enable": True,
+    "radcam_awb_interval_s": 120,
     "release_enable": False,
     "release_offset_s": 0,
     # Winch vertical profiling (oscillates the release servo during the
@@ -368,6 +372,20 @@ def validate_recipe(data):
 
     if "radcam_focus_finder" in data:
         clean["radcam_focus_finder"] = bool(data["radcam_focus_finder"])
+
+    if "radcam_awb_enable" in data:
+        clean["radcam_awb_enable"] = bool(data["radcam_awb_enable"])
+
+    if "radcam_awb_interval_s" in data:
+        try:
+            awb_iv = float(data["radcam_awb_interval_s"])
+        except (ValueError, TypeError):
+            errors.append("radcam_awb_interval_s must be a number")
+        else:
+            if awb_iv < 10 or awb_iv > 3600:
+                errors.append("radcam_awb_interval_s must be between 10 and 3600")
+            else:
+                clean["radcam_awb_interval_s"] = int(round(awb_iv))
 
     for fld, lo, hi in [
         ("focus_sweep_start_us", 870, 2130),

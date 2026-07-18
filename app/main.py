@@ -2193,6 +2193,21 @@ def route_servo():
     return jsonify({"success": True, "position_us": hw.get_servo_position()})
 
 
+@app.route("/nod", methods=["POST"])
+def route_nod():
+    """Demo / manual trigger for the boot & pre-recipe tilt nod."""
+    data = request.get_json(silent=True) or {}
+    return_us = data.get("return_us")
+    if return_us is not None:
+        return_us = int(return_us)
+    ok = hw.nod_gesture(radcam=radcam_mode, return_us=return_us)
+    return jsonify({
+        "success": bool(ok),
+        "radcam_mode": radcam_mode,
+        "position_us": hw.get_servo_position(),
+    })
+
+
 @app.route("/light", methods=["POST"])
 def route_light():
     data = request.get_json(silent=True) or {}
@@ -2515,6 +2530,10 @@ def route_detect_radcam():
     hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
     hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
     init_default_recipes(radcam=True)
+    try:
+        scheduler.set_radcam_mode(True)
+    except Exception:
+        pass
     register_service()
     return jsonify({"success": True, "message": "RadCam detected, mode switched"})
 
@@ -2923,6 +2942,7 @@ def _boot():
         hw=hw,
         capture_still_fn=_sweep_snapshot,
         log_event_fn=log_event,
+        radcam_mode=radcam_mode,
     )
 
     hw.led_idle()
@@ -2946,6 +2966,14 @@ def _boot():
         hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
         hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
         init_default_recipes(radcam=True)
+
+    # Boot nod — visible "alive" cue once hardware is ready, before any
+    # auto-start recipe countdown begins.
+    try:
+        logger.info("Boot tilt nod")
+        hw.nod_gesture(radcam=radcam_mode, return_us=1500)
+    except Exception as e:
+        logger.warning(f"Boot tilt nod failed: {e}")
 
     # Release-shaft rotation sensor lives on GPIO 26 (shared with the RadCam
     # zoom aux output), so only set it up in DropCam mode.  It's optional —

@@ -173,6 +173,27 @@ RADCAM_FOCUS_MAX_US = 2130
 RADCAM_ZOOM_MIN_US = 935
 RADCAM_ZOOM_MAX_US = 1850
 
+# Nod gesture tilt mapping (field-verified on DeckHand / RadCam): higher PWM
+# = camera nose-down. Sequence uses full extents both ways, then parks centre.
+TILT_DOWN_US_RADCAM = RADCAM_TILT_MAX_US     # 2250
+TILT_UP_US_RADCAM = RADCAM_TILT_MIN_US       # 865
+TILT_DOWN_US_DROPCAM = SERVO_MAX_US          # 2000
+TILT_UP_US_DROPCAM = SERVO_MIN_US            # 1000
+
+# Nod timing — quick dip, slightly slower lift, short holds (reads as a nod).
+NOD_DOWN_S = 0.38
+NOD_UP_S = 0.58
+NOD_BOTTOM_HOLD_S = 0.08
+NOD_TOP_HOLD_S = 0.12
+NOD_RETURN_S = 0.35
+
+
+def _nod_extents(radcam=False):
+    """Return (down_us, up_us) full tilt extents for the nod."""
+    if radcam:
+        return TILT_DOWN_US_RADCAM, TILT_UP_US_RADCAM
+    return TILT_DOWN_US_DROPCAM, TILT_UP_US_DROPCAM
+
 # Release servo positions (microseconds).  The release uses a continuous-
 # rotation drive: 1500 us holds the shaft still, 1000/2000 us spin it in
 # opposite directions.  Recipe-triggered "release" runs unwind for
@@ -577,6 +598,71 @@ class HardwareController:
     def get_servo_position(self):
         with self._lock:
             return self._servo_position
+
+    def _pwm_sweep(self, start_us, end_us, duration_s, stop_event=None):
+        """Blocking linear PWM sweep. Returns True if interrupted."""
+        duration_s = max(0.05, float(duration_s))
+        steps = max(int(duration_s * 50), 8)
+        step_delay = duration_s / steps
+        a, b = int(start_us), int(end_us)
+        for step in range(steps + 1):
+            if stop_event is not None and stop_event.is_set():
+                return True
+            t = step / steps
+            self.set_servo(int(a + (b - a) * t))
+            if stop_event is not None:
+                if stop_event.wait(step_delay):
+                    return True
+            else:
+                time.sleep(step_delay)
+        return False
+
+    def nod_gesture(self, *, radcam=False, return_us=None, stop_event=None):
+        """Tilt nod from current pose: down → up → down → centre.
+
+        Never pre-positions to the up extent (that looked like an upward
+        first move when starting from centre). Quicker descent, slightly
+        slower ascent. Blocking. Cancels any in-flight recipe sweep first.
+        ``return_us`` parks the tilt when done (default: centre). Returns
+        False if interrupted via ``stop_event``.
+        """
+        self.stop_sweep()
+        down_us, up_us = _nod_extents(radcam=radcam)
+        park = SERVO_MID_US if return_us is None else int(return_us)
+        start_us = self.get_servo_position()
+
+        logger.info(
+            "Tilt nod: %d → down=%d → up=%d → down=%d → park=%d "
+            "(down %.2fs / up %.2fs)",
+            start_us, down_us, up_us, down_us, park, NOD_DOWN_S, NOD_UP_S,
+        )
+
+        def _hold(seconds):
+            if stop_event is not None:
+                return stop_event.wait(seconds)
+            time.sleep(seconds)
+            return False
+
+        # 1) full down (first visible motion from wherever we are)
+        if self._pwm_sweep(start_us, down_us, NOD_DOWN_S, stop_event):
+            return False
+        if _hold(NOD_BOTTOM_HOLD_S):
+            return False
+        # 2) full up
+        if self._pwm_sweep(down_us, up_us, NOD_UP_S, stop_event):
+            return False
+        if _hold(NOD_TOP_HOLD_S):
+            return False
+        # 3) full down again
+        if self._pwm_sweep(up_us, down_us, NOD_DOWN_S, stop_event):
+            return False
+        if _hold(NOD_BOTTOM_HOLD_S):
+            return False
+        # 4) park centre (or caller-requested)
+        if self._pwm_sweep(down_us, park, NOD_RETURN_S, stop_event):
+            return False
+        logger.info("Tilt nod complete (parked at %d us)", park)
+        return True
 
     def stop_sweep(self):
         self._sweep_stop.set()
