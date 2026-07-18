@@ -1595,18 +1595,20 @@ def index():
 
 @app.route("/register_service")
 def register_service():
-    name = "RadCam" if radcam_mode else "DropCam"
+    # Keep the sidebar/product name stable as DropCam even when a RadCam is
+    # the active camera — only the UI theme and description change.
     desc = ("H265 4K RTSP recorder with servo, focus, and zoom control"
             if radcam_mode
             else "Standalone drop camera recorder with servo and light control")
     return jsonify({
-        "name": name,
+        "name": "DropCam",
         "description": desc,
         "icon": "mdi-video",
         "company": "Blue Robotics",
         "version": "1.0",
         "webpage": "https://github.com/vshie/BlueOS_videorecorder",
         "api": "",
+        "works_in_relative_paths": True,
     })
 
 

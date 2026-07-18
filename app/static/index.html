@@ -189,7 +189,8 @@ body.radcam .setup-content td{border-color:#2a1a5e;color:#c0b0e0}
 
 body.radcam::after{content:'';position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9999;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.03) 2px,rgba(0,0,0,.03) 4px)}
 
-.radcam-logo{height:32px;vertical-align:middle;filter:invert(1)}
+.radcam-logo{height:32px;width:auto;vertical-align:middle;margin-right:8px;border-radius:4px}
+#appTitle{display:flex;align-items:center;gap:0}
 .radcam-only{display:none}
 body.radcam .radcam-only{display:block}
 body.radcam #btnDetectRadcam{display:none}
@@ -221,6 +222,25 @@ body.radcam .preset-card h4{color:#ff6ec7}
 body.radcam .btn-jog:hover{box-shadow:0 0 8px rgba(255,110,199,.35)}
 .calib-hint{font-size:.8em;color:#888;margin-top:4px;line-height:1.4}
 body.radcam .calib-hint{color:#6a5a8f}
+.calib-layout{display:flex;flex-direction:column;gap:10px}
+.calib-preview-card{margin-bottom:0}
+.calib-preview-area{
+  width:100%;
+  min-height:min(70vh,720px);
+  height:min(70vh,720px);
+  background:#111;
+}
+.calib-preview-area .live-video{
+  max-width:100%;
+  max-height:100%;
+  width:100%;
+  height:100%;
+  object-fit:contain;
+  border:none;
+}
+.calib-controls{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start}
+@media(max-width:900px){.calib-controls{grid-template-columns:1fr}}
+body.calib-tab .file-manager-wrapper{display:none}
 </style>
 </head>
 <body>
@@ -728,21 +748,20 @@ body.radcam .calib-hint{color:#6a5a8f}
 
 <!-- ═══════════════ LENS CALIBRATION TAB (RadCam) ═══════════════ -->
 <div class="tab-content" id="tab-calibration">
-  <div class="status-grid">
-    <div class="status-col">
-      <div class="card card-grow">
-        <div class="flex-between mb-8">
-          <h3>Live Preview</h3>
-          <button class="btn-sm" onclick="cycleRotation()">Rotate <span id="calibRotLabel">0</span>&deg;</button>
-        </div>
-        <div class="snapshot-area" id="calibSnapArea" style="min-height:320px">
-          <div class="snapshot-placeholder" id="calibSnapPlaceholder">Open this tab after the Status preview is live…</div>
-          <video id="calibLiveVideo" class="live-video hidden" playsinline autoplay muted></video>
-        </div>
-        <p class="calib-hint">Watch sharpness here while jogging focus/zoom. Values are live on the lens; use Save Air / Save Water when you find a good pair.</p>
+  <div class="calib-layout">
+    <div class="card calib-preview-card">
+      <div class="flex-between mb-8">
+        <h3>Live Preview</h3>
+        <button class="btn-sm" onclick="cycleRotation()">Rotate <span id="calibRotLabel">0</span>&deg;</button>
       </div>
+      <div class="snapshot-area calib-preview-area" id="calibSnapArea">
+        <div class="snapshot-placeholder" id="calibSnapPlaceholder">Open this tab after the Status preview is live…</div>
+        <video id="calibLiveVideo" class="live-video hidden" playsinline autoplay muted></video>
+      </div>
+      <p class="calib-hint">Full-width preview for judging sharpness. Jog focus/zoom below, then Save the matching air/water min/max slot.</p>
     </div>
-    <div class="status-col">
+
+    <div class="calib-controls">
       <div class="card">
         <h3>Focus / Zoom</h3>
         <p class="calib-hint mt-8">On startup the last applied focus+zoom PWM is restored. Jog live below; save each zoom extreme for air and water (4 presets).</p>
@@ -848,6 +867,7 @@ document.querySelectorAll('.tab').forEach(t => {
     document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
     t.classList.add('active');
     document.getElementById('tab-' + t.dataset.tab).classList.add('active');
+    document.body.classList.toggle('calib-tab', t.dataset.tab === 'calibration');
     if (t.dataset.tab === 'recipes') loadRecipes();
     if (t.dataset.tab === 'calibration') {
       loadLensCalibration();
@@ -1150,9 +1170,7 @@ async function pollTelemetry() {
 
   if (d.radcam_mode && !isRadcamMode) {
     isRadcamMode = true;
-    document.body.classList.add('radcam');
-    document.getElementById('appTitle').innerHTML = '<img src="/static/radcam_logo.png" alt="RadCam" class="radcam-logo">';
-    document.title = 'RadCam';
+    enterRadcamUi();
     applyRadcamPwmRanges();
     switchSubtab(document.querySelector('[data-subtab="focuszoom"]'));
   }
@@ -1658,6 +1676,16 @@ function switchSubtab(btn) {
   parent.querySelector('#subtab-' + btn.dataset.subtab).classList.add('active');
 }
 
+/* ── RadCam UI theme (name stays DropCam) ─── */
+function enterRadcamUi() {
+  document.body.classList.add('radcam');
+  // Relative path so the logo loads under /extensionv2/dropcam/ as well as :5423/.
+  // Official RadCam Manager store icon (extension_logo.png from radcam-manager).
+  document.getElementById('appTitle').innerHTML =
+    '<img src="static/radcam_logo.png" alt="" class="radcam-logo">DropCam';
+  document.title = 'DropCam';
+}
+
 /* ── Detect RadCam (manual) ───────────────── */
 async function detectRadcam() {
   const btn = document.getElementById('btnDetectRadcam');
@@ -1666,9 +1694,7 @@ async function detectRadcam() {
   const d = await api('/detect_radcam', {method:'POST'});
   if (d.success) {
     isRadcamMode = true;
-    document.body.classList.add('radcam');
-    document.getElementById('appTitle').innerHTML = '<img src="/static/radcam_logo.png" alt="RadCam" class="radcam-logo">';
-    document.title = 'RadCam';
+    enterRadcamUi();
     btn.style.display = 'none';
     applyRadcamPwmRanges();
     const fz = document.querySelector('[data-subtab="focuszoom"]');
