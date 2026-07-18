@@ -58,6 +58,10 @@ VIDEO_DEVICE = "/dev/video2"
 AUDIO_DEVICE = "hw:Camera,0"
 RTSP_ENDPOINT = "rtsp://admin:blue@192.168.2.10:554/stream_0"
 RADCAM_IP = "192.168.2.10"
+# Cached encode for RadCam stream_0 ("H264" or "H265"). Probed via ffprobe
+# at recording start; defaults to H264 to match the current field camera
+# (towfish also reconfigured stream_0 from H.265 → H.264).
+radcam_encode = "H264"
 
 # BlueOS mavlink-camera-manager.  The DropCam no longer reads the USB camera
 # directly (BlueOS owns it); instead we consume the H264 RTSP stream that the
@@ -692,17 +696,84 @@ def _gst_startup_error(stderr_text):
 def _humanize_gst_error(msg):
     """Map a raw GStreamer error line to a short, operator-friendly hint."""
     low = msg.lower()
+    cam = ("RadCam RTSP stream"
+           if radcam_mode else
+           "USB camera connection/power")
     if ("could not read from resource" in low
             or "failed to allocate a buffer" in low
             or "internal data stream error" in low):
+        if radcam_mode:
+            return ("Camera stopped delivering video. Check the RadCam "
+                    "network link and that stream_0 is reachable "
+                    f"({RTSP_ENDPOINT}).")
         return ("Camera stopped delivering video. Check the USB camera "
                 "connection/power (it may have disconnected).")
     if "device has been disconnected" in low or "no such device" in low:
-        return ("Camera/audio device disconnected. Check the USB camera "
-                "connection/power.")
+        return (f"Camera/audio device disconnected. Check the {cam}.")
     if "could not open device" in low or "no such file or directory" in low:
-        return ("Camera device not found. Check the USB camera connection.")
+        return (f"Camera device not found. Check the {cam}.")
     return msg
+
+
+def probe_radcam_encode(url: str = RTSP_ENDPOINT, timeout_s: float = 5.0) -> str:
+    """Return ``H264`` or ``H265`` for the RadCam RTSP stream.
+
+    Uses ffprobe over TCP. On any failure, keeps the last known
+    ``radcam_encode`` (default H264) so a transient probe miss doesn't
+    flip the pipeline to the wrong depayloader.
+    """
+    global radcam_encode
+    try:
+        r = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-rtsp_transport", "tcp",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "csv=p=0",
+                url,
+            ],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        name = (r.stdout or "").strip().lower()
+        if "265" in name or "hevc" in name:
+            radcam_encode = "H265"
+        elif "264" in name or "avc" in name:
+            radcam_encode = "H264"
+        else:
+            logger.warning(
+                f"RadCam codec probe returned unexpected codec_name={name!r}; "
+                f"keeping {radcam_encode}"
+            )
+    except Exception as e:
+        logger.warning(f"RadCam codec probe failed ({e}); keeping {radcam_encode}")
+    return radcam_encode
+
+
+def _radcam_depay(encode: str) -> str:
+    """GStreamer depay/parse chain for a RadCam H264 or H265 RTSP stream."""
+    if encode == "H265":
+        return "rtph265depay ! h265parse config-interval=-1"
+    return "rtph264depay ! h264parse config-interval=-1"
+
+
+def _build_radcam_pipeline(filepath: str, encode: str) -> str:
+    """Remux RadCam RTSP into a fragmented MP4 (power-cut safe).
+
+    Soft-ports towfish latency/queue options into dropcam's existing
+    gst-launch + mp4mux path. Caps-filter to ``media=video`` so the
+    camera's secondary (audio) RTP stream does not break linking.
+    """
+    depay = _radcam_depay(encode)
+    return (
+        f"rtspsrc location={RTSP_ENDPOINT} is-live=true "
+        "protocols=tcp latency=5000 retry=5 timeout=5000000 "
+        "! application/x-rtp,media=video "
+        f"! {depay} "
+        "! queue max-size-time=30000000000 max-size-bytes=0 "
+        "max-size-buffers=0 leaky=downstream silent=true "
+        f"! mp4mux fragment-duration=5000 ! filesink location={filepath}"
+    )
 
 
 def gst_stderr_monitor(process):
@@ -839,9 +910,12 @@ def recording_health_watchdog():
                         hw.led_warning()
                     if file_stall_count >= STALL_ABORT_INTERVALS:
                         secs = file_stall_count * WATCHDOG_INTERVAL_S
+                        hint = ("RadCam RTSP link"
+                                if radcam_mode else
+                                "camera/USB connection")
                         _abort_recording(
                             f"Recording aborted: no video data written for ~{secs}s "
-                            f"({sz} bytes). Check the camera/USB connection."
+                            f"({sz} bytes). Check the {hint}."
                         )
                         return
                 last_size = sz
@@ -851,9 +925,12 @@ def recording_health_watchdog():
 
             if gst_process and gst_process.poll() is not None:
                 log_event("process_died", f"GStreamer exit code {gst_process.returncode}")
+                hint = ("RadCam RTSP link"
+                        if radcam_mode else
+                        "camera/USB connection")
                 _abort_recording(
                     f"Recording aborted: encoder process exited (code "
-                    f"{gst_process.returncode}). Check the camera/USB connection."
+                    f"{gst_process.returncode}). Check the {hint}."
                 )
                 return
 
@@ -1008,7 +1085,7 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     global watchdog_thread, stop_watchdog_thread, file_stall_count
     global stills_thread, stop_stills_thread, stills_dir, stills_count
     global usb_recording, recording_base_dir, recording_rotation
-    global recording_error
+    global recording_error, radcam_encode
 
     recording_error = ""
     recording_rotation = int(rotation) % 360
@@ -1048,12 +1125,9 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
             filename = basename + ".mp4"
             filepath = os.path.join(rec_dir, filename)
             current_video_file = filepath
-            pipeline = (
-                f"rtspsrc location={RTSP_ENDPOINT} "
-                "protocols=tcp latency=500 retry=5 timeout=5000000 "
-                "! rtph265depay ! h265parse ! "
-                f"mp4mux fragment-duration=5000 ! filesink location={filepath}"
-            )
+            encode = probe_radcam_encode()
+            pipeline = _build_radcam_pipeline(filepath, encode)
+            logger.info(f"RadCam recording pipeline encode={encode}")
         else:
             # DropCam: record the BlueOS camera-manager RTSP stream (BlueOS
             # owns the USB camera, so we no longer touch /dev/video* directly).
@@ -1136,37 +1210,55 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
                     f"{depay} ! queue ! mp4mux fragment-duration=5000 ! "
                     f"filesink location={filepath}"
                 )
-        command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
-
-        try:
-            gst_process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            start_time = datetime.now()
-            logger.info(f"GStreamer command: {' '.join(command)}")
-            if gst_process.poll() is not None:
-                out, err = gst_process.communicate()
-                err_text = err.decode(errors="replace")
-                logger.error(f"GStreamer failed: {err_text}")
-                recording_error = _gst_startup_error(err_text)
+        # RadCam: if the probed codec's pipeline dies immediately, retry once
+        # with the other codec (camera configs flip between H264/H265).
+        # Use a local ``proc`` during startup so a concurrent /status poll
+        # cannot clear ``gst_process`` mid-check (it sets the global to None
+        # when it sees a dead child).
+        radcam_retried = False
+        while True:
+            command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
+            try:
+                proc = subprocess.Popen(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                start_time = datetime.now()
+                logger.info(f"GStreamer command: {' '.join(command)}")
+                err_text = None
+                if proc.poll() is not None:
+                    _out, err = proc.communicate()
+                    err_text = err.decode(errors="replace")
+                    logger.error(f"GStreamer failed: {err_text}")
+                else:
+                    time.sleep(2)
+                    if proc.poll() is not None:
+                        _out, err = proc.communicate()
+                        err_text = err.decode(errors="replace")
+                        logger.error(f"GStreamer died during startup: {err_text}")
+                if err_text is not None:
+                    if radcam_mode and not radcam_retried:
+                        radcam_retried = True
+                        alt = "H265" if radcam_encode == "H264" else "H264"
+                        logger.warning(
+                            f"RadCam {radcam_encode} pipeline died at startup; "
+                            f"retrying with {alt}"
+                        )
+                        radcam_encode = alt
+                        pipeline = _build_radcam_pipeline(filepath, alt)
+                        start_time = None
+                        continue
+                    recording_error = _gst_startup_error(err_text)
+                    gst_process = None
+                    start_time = None
+                    return False
+                gst_process = proc
+                break
+            except Exception as e:
+                logger.error(f"Failed to start GStreamer: {e}")
+                recording_error = f"Failed to start recording: {e}"
                 gst_process = None
                 start_time = None
                 return False
-            time.sleep(2)
-            if gst_process.poll() is not None:
-                out, err = gst_process.communicate()
-                err_text = err.decode(errors="replace")
-                logger.error(f"GStreamer died during startup: {err_text}")
-                recording_error = _gst_startup_error(err_text)
-                gst_process = None
-                start_time = None
-                return False
-        except Exception as e:
-            logger.error(f"Failed to start GStreamer: {e}")
-            recording_error = f"Failed to start recording: {e}"
-            gst_process = None
-            start_time = None
-            return False
 
         current_ass_file = create_ass_file(filepath)
         current_events_file = create_events_file(filepath)
@@ -1615,7 +1707,7 @@ def index():
 def register_service():
     # Keep the sidebar/product name stable as DropCam even when a RadCam is
     # the active camera — only the UI theme and description change.
-    desc = ("H265 4K RTSP recorder with servo, focus, and zoom control"
+    desc = ("4K RTSP recorder (H264/H265) with servo, focus, and zoom control"
             if radcam_mode
             else "Standalone drop camera recorder with servo and light control")
     return jsonify({
@@ -2838,7 +2930,14 @@ def _wait_for_camera():
     logger.info(f"Checking for RadCam at {RADCAM_IP}...")
     if _ping_radcam():
         radcam_mode = True
-        logger.info(f"RadCam detected at {RADCAM_IP} — entering RadCam mode (H265 4K RTSP)")
+        try:
+            enc = probe_radcam_encode()
+        except Exception:
+            enc = radcam_encode
+        logger.info(
+            f"RadCam detected at {RADCAM_IP} — entering RadCam mode "
+            f"({enc} 4K RTSP)"
+        )
         return True
 
     radcam_mode = False
