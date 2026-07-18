@@ -193,6 +193,11 @@ body.radcam::after{content:'';position:fixed;top:0;left:0;width:100%;height:100%
 #appTitle{display:flex;align-items:center;gap:0}
 .radcam-only{display:none}
 body.radcam .radcam-only{display:block}
+.dropcam-only{display:block}
+body.radcam .dropcam-only{display:none}
+.preset-jump-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
+.preset-jump.active-slot{border-color:#1a73e8;font-weight:600}
+body.radcam .preset-jump.active-slot{border-color:#00fff7;color:#00fff7;box-shadow:0 0 8px rgba(0,255,247,.25)}
 body.radcam #btnDetectRadcam{display:none}
 
 /* Subtabs */
@@ -403,10 +408,11 @@ body.calib-tab .file-manager-wrapper{display:none}
       </div>
     </div>
 
-    <!-- Adjustments (LED + Focus/Zoom tabs) -->
+    <!-- RadCam control (LED + Focus/Zoom tabs); DropCam title stays Adjustments -->
     <div class="card">
       <div class="flex-between mb-8">
-        <h3>Adjustments</h3>
+        <h3 class="dropcam-only">Adjustments</h3>
+        <h3 class="radcam-only">RadCam control</h3>
         <div class="subtabs">
           <button class="subtab active" data-subtab="led" onclick="switchSubtab(this)">LED</button>
           <button class="subtab radcam-only" data-subtab="focuszoom" onclick="switchSubtab(this)">Focus / Zoom</button>
@@ -458,7 +464,30 @@ body.calib-tab .file-manager-wrapper{display:none}
             <span class="mono text-muted">us</span>
           </div>
         </div>
-        <p class="calib-hint">For single-digit PWM jogging and air/water min/max-zoom presets, use the <strong>Lens Cal</strong> tab.</p>
+        <div class="form-group mt-8">
+          <label>Lens presets</label>
+          <div class="preset-jump-grid" id="presetJumpGrid">
+            <button type="button" class="btn-sm preset-jump" data-slot="air_min" onclick="applyLensPreset('air_min')">Air · Min</button>
+            <button type="button" class="btn-sm preset-jump" data-slot="air_max" onclick="applyLensPreset('air_max')">Air · Max</button>
+            <button type="button" class="btn-sm preset-jump" data-slot="water_min" onclick="applyLensPreset('water_min')">Water · Min</button>
+            <button type="button" class="btn-sm preset-jump" data-slot="water_max" onclick="applyLensPreset('water_max')">Water · Max</button>
+          </div>
+          <div id="presetJumpStatus" class="text-muted" style="font-size:.8em;margin-top:6px"></div>
+        </div>
+        <p class="calib-hint">Fine PWM jogging and saving these four presets is on the <strong>Lens Cal</strong> tab.</p>
+      </div>
+    </div>
+
+    <!-- Environment sensors (Bar30 + Celsius/Celsius 2) — only shown when detected -->
+    <div class="card hidden" id="envCard">
+      <div class="flex-between mb-8">
+        <h3>Environment</h3>
+        <span id="envSensorLabel" class="text-muted" style="font-size:.8em"></span>
+      </div>
+      <div class="telem-grid mt-8">
+        <div class="telem-item hidden" id="envDepthItem"><div class="telem-label">Depth (salt)</div><div class="telem-value" id="tEnvDepth">--</div></div>
+        <div class="telem-item hidden" id="envPressItem"><div class="telem-label">Pressure</div><div class="telem-value" id="tEnvPress">--</div></div>
+        <div class="telem-item hidden" id="envTempItem"><div class="telem-label">Water Temp</div><div class="telem-value" id="tEnvTemp">--</div></div>
       </div>
     </div>
 
@@ -1172,6 +1201,10 @@ async function pollTelemetry() {
     battAgeEl.textContent = '--';
   }
 
+  // Environment sensors (Bar30 + Celsius/Celsius 2). Slow-path update
+  // from /telemetry; a faster pollEnv() loop drives the numbers at 2 Hz.
+  updateEnvCard(d.environment);
+
   if (d.time_synced === false) {
     document.getElementById('timeBanner').classList.remove('hidden');
   } else {
@@ -1644,6 +1677,9 @@ function _renderLensPresets(d) {
     }
     if (card) card.classList.toggle('active-slot', slot === _calibSlot);
   });
+  document.querySelectorAll('.preset-jump').forEach(btn => {
+    btn.classList.toggle('active-slot', btn.dataset.slot === _calibSlot);
+  });
 }
 
 async function loadLensCalibration() {
@@ -1674,7 +1710,10 @@ async function saveLensPreset(slot) {
 
 async function applyLensPreset(slot) {
   const status = document.getElementById('lensCalibStatus');
-  if (status) status.textContent = 'Applying ' + _slotLabel(slot) + '…';
+  const jumpStatus = document.getElementById('presetJumpStatus');
+  const msgBusy = 'Applying ' + _slotLabel(slot) + '…';
+  if (status) status.textContent = msgBusy;
+  if (jumpStatus) jumpStatus.textContent = msgBusy;
   const d = await api('/radcam_lens', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -1682,11 +1721,13 @@ async function applyLensPreset(slot) {
   });
   if (d && d.success) {
     _renderLensPresets(d);
-    if (status) {
-      status.textContent = `Applied ${_slotLabel(slot)}: focus ${d.current.focus_us} / zoom ${d.current.zoom_us}`;
-    }
-  } else if (status) {
-    status.textContent = (d && d.message) || 'Apply failed';
+    const msgOk = `Applied ${_slotLabel(slot)}: focus ${d.current.focus_us} / zoom ${d.current.zoom_us}`;
+    if (status) status.textContent = msgOk;
+    if (jumpStatus) jumpStatus.textContent = msgOk;
+  } else {
+    const msgFail = (d && d.message) || 'Apply failed';
+    if (status) status.textContent = msgFail;
+    if (jumpStatus) jumpStatus.textContent = msgFail;
   }
 }
 
@@ -2649,15 +2690,50 @@ async function ensureRtspStream() {
   }
 }
 
+/* ── Environment card (2 Hz refresh matches sensor sample rate) ─── */
+function updateEnvCard(env) {
+  const envCard = document.getElementById('envCard');
+  if (!envCard) return;
+  if (!env || !env.present) {
+    envCard.classList.add('hidden');
+    return;
+  }
+  envCard.classList.remove('hidden');
+  const bar30 = !!env.bar30_present;
+  const tempOn = !!env.temp_present;
+  document.getElementById('envDepthItem').classList.toggle('hidden', !bar30);
+  document.getElementById('envPressItem').classList.toggle('hidden', !bar30);
+  document.getElementById('envTempItem').classList.toggle('hidden', !tempOn);
+  if (bar30) {
+    document.getElementById('tEnvDepth').textContent =
+      env.depth_m != null ? env.depth_m.toFixed(2) + ' m' : '--';
+    document.getElementById('tEnvPress').textContent =
+      env.pressure_mbar != null ? env.pressure_mbar.toFixed(1) + ' mbar' : '--';
+  }
+  if (tempOn) {
+    document.getElementById('tEnvTemp').textContent =
+      env.temp_c != null ? env.temp_c.toFixed(2) + ' C' : '--';
+  }
+  document.getElementById('envSensorLabel').textContent =
+    env.temp_label ? 'Temp: ' + env.temp_label : (bar30 ? 'Bar30 only' : '');
+}
+
+async function pollEnv() {
+  const env = await api('/env');
+  if (env) updateEnvCard(env);
+}
+
 /* ── Init ──────────────────────────────────── */
 loadSetup();
 loadRecipes();
 loadVideoList();
 pollStatus();
 pollTelemetry();
+pollEnv();
 ensureLivePreview();
 setInterval(pollStatus, 2000);
 setInterval(pollTelemetry, 5000);
+setInterval(pollEnv, 500);
 setInterval(loadVideoList, 10000);
 document.getElementById('fileBrowserFrame').src =
   `http://${window.location.hostname}:7777/files/extensions/videorecorder`;

@@ -45,6 +45,7 @@ from recipes import (
 )
 import usb_storage
 from battery import BatteryMonitor
+from env_sensors import EnvSensorMonitor
 from rtc_sync import RtcSyncManager
 import deckhand_host_setup
 import audio
@@ -565,6 +566,23 @@ def update_ass_file():
                         )
                 except Exception:
                     pass
+                try:
+                    env_fields = env_monitor.get_log_fields()
+                except Exception:
+                    env_fields = {}
+                if env_fields:
+                    if "depth_m" in env_fields:
+                        parts.append(f"Depth:{env_fields['depth_m']:.2f}m")
+                    if "pressure_mbar" in env_fields:
+                        parts.append(f"Press:{env_fields['pressure_mbar']:.1f}mbar")
+                    if "temp_c" in env_fields:
+                        label = (env_fields.get("temp_sensor") or "").upper()
+                        suffix = f"({label})" if label else ""
+                        parts.append(f"Water:{env_fields['temp_c']:.2f}C{suffix}")
+                    # Emit the same reading into the events sidecar. Keep it
+                    # compact key=value so the file stays grep-friendly.
+                    detail = " ".join(f"{k}={v}" for k, v in env_fields.items())
+                    log_event("env_sample", detail)
                 parts.append(f"Recipe:{rname}")
                 parts.append(f"Rec:{ok}")
                 if cpu_t is not None:
@@ -1894,6 +1912,22 @@ def get_filesize():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+@app.route("/env", methods=["GET"])
+def route_env():
+    """Fast poll target for the Environment UI card.
+
+    Returns the same shape as ``/telemetry.environment`` but skips the
+    heavier telemetry aggregation so the browser can poll at the 2 Hz
+    sensor sample rate cheaply.
+    """
+    try:
+        env = env_monitor.get_summary()
+    except Exception as e:
+        env = {"present": False, "last_error": str(e)}
+    env["success"] = True
+    return jsonify(env)
+
+
 @app.route("/telemetry", methods=["GET"])
 def route_telemetry():
     try:
@@ -1939,6 +1973,11 @@ def route_telemetry():
         except Exception as e:
             logger.debug(f"Battery summary unavailable: {e}")
             data["battery"] = {"connected": False, "last_error": str(e)}
+        try:
+            data["environment"] = env_monitor.get_summary()
+        except Exception as e:
+            logger.debug(f"Env summary unavailable: {e}")
+            data["environment"] = {"present": False, "last_error": str(e)}
         try:
             data["rtc"] = rtc_manager.get_status()
         except Exception as e:
@@ -2098,6 +2137,10 @@ battery_monitor = BatteryMonitor(
 # — if the board or the I2C bus is missing, RtcSyncManager degrades to a
 # no-op with a diagnostic in its status snapshot rather than raising.
 rtc_manager = RtcSyncManager(is_time_synced_fn=is_time_synced)
+
+# Optional Blue Robotics environment sensors (Bar30 on i2c-6, Celsius/
+# Celsius 2 on i2c-1). Silent when nothing is detected.
+env_monitor = EnvSensorMonitor()
 
 
 @app.route("/streams", methods=["GET"])
@@ -2915,6 +2958,10 @@ def _boot():
         battery_monitor.start()
     except Exception as e:
         logger.warning(f"Battery monitor failed to start: {e}")
+    try:
+        env_monitor.start()
+    except Exception as e:
+        logger.warning(f"Env sensor monitor failed to start: {e}")
     init_default_recipes()
 
     # Mount USB in the background only.  A failing/unresponsive USB stick can
@@ -3017,6 +3064,10 @@ def _boot():
 def _shutdown_safely():
     try:
         battery_monitor.stop()
+    except Exception:
+        pass
+    try:
+        env_monitor.stop()
     except Exception:
         pass
     try:
