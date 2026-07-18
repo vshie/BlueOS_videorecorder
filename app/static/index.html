@@ -203,6 +203,24 @@ body.radcam #btnDetectRadcam{display:none}
 body.radcam .subtab{border-color:#5a3a8a;color:#8a6fad}
 body.radcam .subtab:hover{color:#ff6ec7}
 body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgba(20,10,50,.85);color:#00fff7;font-weight:600}
+
+/* Lens calibration */
+.pwm-jog{margin-bottom:14px}
+.pwm-jog label{margin-bottom:4px}
+.jog-row{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.jog-row .btn-jog{min-width:42px;font-family:"SF Mono","Fira Code",monospace;font-weight:600}
+.preset-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.preset-card{padding:10px;border:1px solid #e0e0e0;border-radius:6px;background:#fafafa}
+.preset-card.active-slot{border-color:#1a73e8;box-shadow:0 0 0 1px #1a73e8}
+.preset-card h4{font-size:.82em;margin:0 0 6px;color:#555;text-transform:uppercase;letter-spacing:.04em}
+.preset-card .preset-vals{font-size:.85em;margin-bottom:8px;line-height:1.45}
+.preset-card .btn-row{display:flex;gap:4px;flex-wrap:wrap}
+body.radcam .preset-card{background:rgba(20,10,50,.6);border-color:#2a1a5e}
+body.radcam .preset-card.active-slot{border-color:#00fff7;box-shadow:0 0 0 1px #00fff7,0 0 12px rgba(0,255,247,.25)}
+body.radcam .preset-card h4{color:#ff6ec7}
+body.radcam .btn-jog:hover{box-shadow:0 0 8px rgba(255,110,199,.35)}
+.calib-hint{font-size:.8em;color:#888;margin-top:4px;line-height:1.4}
+body.radcam .calib-hint{color:#6a5a8f}
 </style>
 </head>
 <body>
@@ -233,6 +251,7 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
 <div class="tabs">
   <button class="tab active" data-tab="status">Status</button>
   <button class="tab" data-tab="recipes">Recipes</button>
+  <button class="tab radcam-only" data-tab="calibration">Lens Cal</button>
   <button class="tab" data-tab="setup">Setup</button>
 </div>
 
@@ -406,19 +425,20 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
         <div class="form-group mt-8">
           <label>Focus</label>
           <div style="display:flex;gap:6px;align-items:center">
-            <input type="range" id="focusSlider" min="500" max="2500" step="10" value="900" oninput="syncAuxInput('focus',this.value)">
-            <input type="number" id="focusInput" min="500" max="2500" step="10" value="900" style="width:70px" oninput="syncAuxSlider('focus',this.value)">
+            <input type="range" id="focusSlider" min="500" max="2500" step="1" value="900" oninput="syncAuxInput('focus',this.value)">
+            <input type="number" id="focusInput" min="500" max="2500" step="1" value="900" style="width:70px" oninput="syncAuxSlider('focus',this.value)">
             <span class="mono text-muted">us</span>
           </div>
         </div>
         <div class="form-group mt-8">
           <label>Zoom</label>
           <div style="display:flex;gap:6px;align-items:center">
-            <input type="range" id="zoomSlider" min="500" max="2500" step="10" value="900" oninput="syncAuxInput('zoom',this.value)">
-            <input type="number" id="zoomInput" min="500" max="2500" step="10" value="900" style="width:70px" oninput="syncAuxSlider('zoom',this.value)">
+            <input type="range" id="zoomSlider" min="500" max="2500" step="1" value="900" oninput="syncAuxInput('zoom',this.value)">
+            <input type="number" id="zoomInput" min="500" max="2500" step="1" value="900" style="width:70px" oninput="syncAuxSlider('zoom',this.value)">
             <span class="mono text-muted">us</span>
           </div>
         </div>
+        <p class="calib-hint">For single-digit PWM jogging and air/water min/max-zoom presets, use the <strong>Lens Cal</strong> tab.</p>
       </div>
     </div>
 
@@ -706,6 +726,99 @@ body.radcam .subtab.active{background:rgba(20,10,50,.85);border-bottom-color:rgb
   </div>
 </div>
 
+<!-- ═══════════════ LENS CALIBRATION TAB (RadCam) ═══════════════ -->
+<div class="tab-content" id="tab-calibration">
+  <div class="status-grid">
+    <div class="status-col">
+      <div class="card card-grow">
+        <div class="flex-between mb-8">
+          <h3>Live Preview</h3>
+          <button class="btn-sm" onclick="cycleRotation()">Rotate <span id="calibRotLabel">0</span>&deg;</button>
+        </div>
+        <div class="snapshot-area" id="calibSnapArea" style="min-height:320px">
+          <div class="snapshot-placeholder" id="calibSnapPlaceholder">Open this tab after the Status preview is live…</div>
+          <video id="calibLiveVideo" class="live-video hidden" playsinline autoplay muted></video>
+        </div>
+        <p class="calib-hint">Watch sharpness here while jogging focus/zoom. Values are live on the lens; use Save Air / Save Water when you find a good pair.</p>
+      </div>
+    </div>
+    <div class="status-col">
+      <div class="card">
+        <h3>Focus / Zoom</h3>
+        <p class="calib-hint mt-8">On startup the last applied focus+zoom PWM is restored. Jog live below; save each zoom extreme for air and water (4 presets).</p>
+
+        <div class="pwm-jog mt-8">
+          <label>Focus: <span id="calibFocusVal" class="mono">900</span> <span class="text-muted">us</span></label>
+          <input type="range" id="calibFocusSlider" min="500" max="2500" step="1" value="900"
+                 oninput="syncCalibChannel('focus', this.value)">
+          <div class="jog-row">
+            <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('focus',-5)">−5</button>
+            <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('focus',-1)">−1</button>
+            <input type="number" id="calibFocusInput" min="500" max="2500" step="1" value="900" style="width:72px"
+                   oninput="syncCalibChannel('focus', this.value)">
+            <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('focus',1)">+1</button>
+            <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('focus',5)">+5</button>
+          </div>
+        </div>
+
+        <div class="pwm-jog">
+          <label>Zoom: <span id="calibZoomVal" class="mono">900</span> <span class="text-muted">us</span></label>
+          <input type="range" id="calibZoomSlider" min="500" max="2500" step="1" value="900"
+                 oninput="syncCalibChannel('zoom', this.value)">
+          <div class="jog-row">
+            <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('zoom',-5)">−5</button>
+            <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('zoom',-1)">−1</button>
+            <input type="number" id="calibZoomInput" min="500" max="2500" step="1" value="900" style="width:72px"
+                   oninput="syncCalibChannel('zoom', this.value)">
+            <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('zoom',1)">+1</button>
+            <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('zoom',5)">+5</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Presets (air/water × min/max zoom)</h3>
+        <p class="calib-hint mb-8">Park zoom at its minimum (or maximum), dial focus sharp, then Save that slot. Apply drives both PWM channels and updates the boot defaults.</p>
+        <div class="preset-grid">
+          <div class="preset-card" id="presetCard_air_min" data-slot="air_min">
+            <h4>Air · Min Zoom</h4>
+            <div class="preset-vals mono" id="presetVals_air_min">focus -- / zoom --</div>
+            <div class="btn-row">
+              <button type="button" class="btn-primary btn-sm" onclick="saveLensPreset('air_min')">Save</button>
+              <button type="button" class="btn-sm" onclick="applyLensPreset('air_min')">Apply</button>
+            </div>
+          </div>
+          <div class="preset-card" id="presetCard_air_max" data-slot="air_max">
+            <h4>Air · Max Zoom</h4>
+            <div class="preset-vals mono" id="presetVals_air_max">focus -- / zoom --</div>
+            <div class="btn-row">
+              <button type="button" class="btn-primary btn-sm" onclick="saveLensPreset('air_max')">Save</button>
+              <button type="button" class="btn-sm" onclick="applyLensPreset('air_max')">Apply</button>
+            </div>
+          </div>
+          <div class="preset-card" id="presetCard_water_min" data-slot="water_min">
+            <h4>Water · Min Zoom</h4>
+            <div class="preset-vals mono" id="presetVals_water_min">focus -- / zoom --</div>
+            <div class="btn-row">
+              <button type="button" class="btn-primary btn-sm" onclick="saveLensPreset('water_min')">Save</button>
+              <button type="button" class="btn-sm" onclick="applyLensPreset('water_min')">Apply</button>
+            </div>
+          </div>
+          <div class="preset-card" id="presetCard_water_max" data-slot="water_max">
+            <h4>Water · Max Zoom</h4>
+            <div class="preset-vals mono" id="presetVals_water_max">focus -- / zoom --</div>
+            <div class="btn-row">
+              <button type="button" class="btn-primary btn-sm" onclick="saveLensPreset('water_max')">Save</button>
+              <button type="button" class="btn-sm" onclick="applyLensPreset('water_max')">Apply</button>
+            </div>
+          </div>
+        </div>
+        <div class="text-muted mt-8" id="lensCalibStatus" style="font-size:.82em"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ═══════════════ SETUP TAB ═══════════════ -->
 <div class="tab-content" id="tab-setup">
   <div class="card setup-content" id="setupContent">
@@ -736,6 +849,10 @@ document.querySelectorAll('.tab').forEach(t => {
     t.classList.add('active');
     document.getElementById('tab-' + t.dataset.tab).classList.add('active');
     if (t.dataset.tab === 'recipes') loadRecipes();
+    if (t.dataset.tab === 'calibration') {
+      loadLensCalibration();
+      mirrorLivePreviewToCalib();
+    }
   });
 });
 
@@ -1042,13 +1159,15 @@ async function pollTelemetry() {
     document.getElementById('tFocus').textContent = d.aux_pwm.focus + ' us';
     document.getElementById('tZoom').textContent = d.aux_pwm.zoom + ' us';
     if (!document.getElementById('focusSlider')._userSet) {
-      document.getElementById('focusSlider').value = d.aux_pwm.focus;
-      document.getElementById('focusInput').value = d.aux_pwm.focus;
+      updateLensUi('focus', d.aux_pwm.focus, {markUserSet: false});
     }
     if (!document.getElementById('zoomSlider')._userSet) {
-      document.getElementById('zoomSlider').value = d.aux_pwm.zoom;
-      document.getElementById('zoomInput').value = d.aux_pwm.zoom;
+      updateLensUi('zoom', d.aux_pwm.zoom, {markUserSet: false});
     }
+  }
+  const calibTab = document.getElementById('tab-calibration');
+  if (calibTab && calibTab.classList.contains('active')) {
+    mirrorLivePreviewToCalib();
   }
 }
 
@@ -1124,16 +1243,41 @@ function applyPreviewRotation(deg) {
   const d = ((Number(deg) || 0) % 360 + 360) % 360;
   if (d === _liveLastRotation) return;
   _liveLastRotation = d;
-  const v = document.getElementById('liveVideo');
-  const area = document.getElementById('snapArea');
-  if (!v || !area) return;
-  v.classList.remove('rot-90', 'rot-180', 'rot-270');
-  area.classList.remove('rot-quarter');
-  if (d === 90) { v.classList.add('rot-90'); area.classList.add('rot-quarter'); }
-  else if (d === 180) { v.classList.add('rot-180'); }
-  else if (d === 270) { v.classList.add('rot-270'); area.classList.add('rot-quarter'); }
+  const targets = [
+    [document.getElementById('liveVideo'), document.getElementById('snapArea')],
+    [document.getElementById('calibLiveVideo'), document.getElementById('calibSnapArea')],
+  ];
+  for (const [v, area] of targets) {
+    if (!v || !area) continue;
+    v.classList.remove('rot-90', 'rot-180', 'rot-270');
+    area.classList.remove('rot-quarter');
+    if (d === 90) { v.classList.add('rot-90'); area.classList.add('rot-quarter'); }
+    else if (d === 180) { v.classList.add('rot-180'); }
+    else if (d === 270) { v.classList.add('rot-270'); area.classList.add('rot-quarter'); }
+  }
   const lbl = document.getElementById('rotLabel');
   if (lbl) lbl.textContent = d;
+  const calibLbl = document.getElementById('calibRotLabel');
+  if (calibLbl) calibLbl.textContent = d;
+}
+
+function mirrorLivePreviewToCalib() {
+  const src = document.getElementById('liveVideo');
+  const dst = document.getElementById('calibLiveVideo');
+  const ph = document.getElementById('calibSnapPlaceholder');
+  if (!src || !dst) return;
+  if (src.srcObject) {
+    dst.srcObject = src.srcObject;
+    dst.classList.remove('hidden');
+    if (ph) ph.classList.add('hidden');
+    dst.play().catch(() => {});
+  } else {
+    dst.classList.add('hidden');
+    if (ph) {
+      ph.classList.remove('hidden');
+      ph.textContent = 'Waiting for Status-tab live preview…';
+    }
+  }
 }
 
 async function _pickStream() {
@@ -1323,22 +1467,144 @@ function updateReleaseUi(positionUs, direction, running) {
 
 /* ── Aux PWM (RadCam focus/zoom) ──────────── */
 let auxDebounce = {};
-function setAuxPwm(channel, val) {
+const AUX_LENS_MIN = 500;
+const AUX_LENS_MAX = 2500;
+
+function _clampLensUs(val) {
+  const n = Math.round(Number(val));
+  if (!Number.isFinite(n)) return AUX_LENS_MIN;
+  return Math.max(AUX_LENS_MIN, Math.min(AUX_LENS_MAX, n));
+}
+
+function updateLensUi(channel, val, {markUserSet=true} = {}) {
+  const v = _clampLensUs(val);
+  const statusSlider = document.getElementById(channel + 'Slider');
+  const statusInput = document.getElementById(channel + 'Input');
+  const calibSlider = document.getElementById('calib' + channel.charAt(0).toUpperCase() + channel.slice(1) + 'Slider');
+  const calibInput = document.getElementById('calib' + channel.charAt(0).toUpperCase() + channel.slice(1) + 'Input');
+  const calibVal = document.getElementById('calib' + channel.charAt(0).toUpperCase() + channel.slice(1) + 'Val');
+  if (statusSlider) {
+    if (markUserSet) statusSlider._userSet = true;
+    statusSlider.value = v;
+  }
+  if (statusInput) statusInput.value = v;
+  if (calibSlider) calibSlider.value = v;
+  if (calibInput) calibInput.value = v;
+  if (calibVal) calibVal.textContent = v;
+  return v;
+}
+
+function setAuxPwm(channel, val, {persist=true} = {}) {
+  const v = updateLensUi(channel, val, {markUserSet: true});
   const slider = document.getElementById(channel + 'Slider');
-  slider._userSet = true;
   clearTimeout(auxDebounce[channel]);
   auxDebounce[channel] = setTimeout(async () => {
-    await api('/aux_pwm', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({channel, position_us:+val})});
-    slider._userSet = false;
-  }, 120);
+    const d = await api('/aux_pwm', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({channel, position_us:v, persist}),
+    });
+    if (d && d.position_us != null) updateLensUi(channel, d.position_us, {markUserSet: false});
+    if (slider) slider._userSet = false;
+  }, 80);
 }
 function syncAuxInput(channel, val) {
-  document.getElementById(channel + 'Input').value = val;
   setAuxPwm(channel, val);
 }
 function syncAuxSlider(channel, val) {
-  document.getElementById(channel + 'Slider').value = val;
   setAuxPwm(channel, val);
+}
+
+/* ── Lens calibration tab ─────────────────── */
+const LENS_PRESET_SLOTS = ['air_min', 'air_max', 'water_min', 'water_max'];
+let _calibSlot = 'air_min';
+
+function syncCalibChannel(channel, val) {
+  // Live on the lens; also persists as radcam_focus_us / radcam_zoom_us so
+  // boot restores the last dialled pair. Named min/max presets are only
+  // written by Save on each slot.
+  setAuxPwm(channel, val, {persist: true});
+}
+
+function nudgeCalib(channel, delta) {
+  const input = document.getElementById(
+    'calib' + channel.charAt(0).toUpperCase() + channel.slice(1) + 'Input'
+  );
+  const cur = input ? +input.value : 900;
+  syncCalibChannel(channel, cur + delta);
+}
+
+function _slotLabel(slot) {
+  const map = {
+    air_min: 'Air · Min Zoom',
+    air_max: 'Air · Max Zoom',
+    water_min: 'Water · Min Zoom',
+    water_max: 'Water · Max Zoom',
+  };
+  return map[slot] || slot;
+}
+
+function _renderLensPresets(d) {
+  if (!d) return;
+  if (d.slot) _calibSlot = d.slot;
+  if (d.current) {
+    updateLensUi('focus', d.current.focus_us, {markUserSet: false});
+    updateLensUi('zoom', d.current.zoom_us, {markUserSet: false});
+  }
+  const presets = d.presets || {};
+  LENS_PRESET_SLOTS.forEach(slot => {
+    const p = presets[slot];
+    const valsEl = document.getElementById('presetVals_' + slot);
+    const card = document.getElementById('presetCard_' + slot);
+    if (valsEl && p) {
+      valsEl.textContent = `focus ${p.focus_us} / zoom ${p.zoom_us}`;
+    }
+    if (card) card.classList.toggle('active-slot', slot === _calibSlot);
+  });
+}
+
+async function loadLensCalibration() {
+  const d = await api('/radcam_lens');
+  if (d && d.success) _renderLensPresets(d);
+  mirrorLivePreviewToCalib();
+}
+
+async function saveLensPreset(slot) {
+  const status = document.getElementById('lensCalibStatus');
+  if (status) status.textContent = 'Saving ' + _slotLabel(slot) + '…';
+  const focus = _clampLensUs(document.getElementById('calibFocusInput').value);
+  const zoom = _clampLensUs(document.getElementById('calibZoomInput').value);
+  const d = await api('/radcam_lens', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'save', slot, focus_us:focus, zoom_us:zoom}),
+  });
+  if (d && d.success) {
+    _renderLensPresets(d);
+    if (status) {
+      status.textContent = `Saved ${_slotLabel(slot)}: focus ${d.current.focus_us} / zoom ${d.current.zoom_us}`;
+    }
+  } else if (status) {
+    status.textContent = (d && d.message) || 'Save failed';
+  }
+}
+
+async function applyLensPreset(slot) {
+  const status = document.getElementById('lensCalibStatus');
+  if (status) status.textContent = 'Applying ' + _slotLabel(slot) + '…';
+  const d = await api('/radcam_lens', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'apply', slot}),
+  });
+  if (d && d.success) {
+    _renderLensPresets(d);
+    if (status) {
+      status.textContent = `Applied ${_slotLabel(slot)}: focus ${d.current.focus_us} / zoom ${d.current.zoom_us}`;
+    }
+  } else if (status) {
+    status.textContent = (d && d.message) || 'Apply failed';
+  }
 }
 
 /* ── Subtab switching ────────────────────── */
@@ -1362,8 +1628,10 @@ async function detectRadcam() {
     document.getElementById('appTitle').innerHTML = '<img src="/static/radcam_logo.png" alt="RadCam" class="radcam-logo">';
     document.title = 'RadCam';
     btn.style.display = 'none';
-    switchSubtab(document.querySelector('[data-subtab="focuszoom"]'));
+    const fz = document.querySelector('[data-subtab="focuszoom"]');
+    if (fz) switchSubtab(fz);
     loadRecipes();
+    loadLensCalibration();
   } else {
     alert(d.message || 'RadCam not detected');
     btn.disabled = false;

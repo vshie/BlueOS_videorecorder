@@ -20,8 +20,8 @@ unchanged, only the silkscreen and this file's constants moved):
         Ch 2 = RELEASE   (continuous-rotation release drive; 1500 = stop,
                           1000 = wind, 2000 = unwind)
         Ch 3 = EXTSERVO  (external / aux servo, 1000-2000 us)
-        Ch 4 = FOCUS     (RadCam focus, 1000-2000 us)
-        Ch 5 = ZOOM      (RadCam zoom, 1000-2000 us)
+        Ch 4 = FOCUS     (RadCam focus, 500-2500 us)
+        Ch 5 = ZOOM      (RadCam zoom, 500-2500 us)
         Ch 6 = PAN       (RadCam pan, 1000-2000 us)
         Ch 7 = SPARE     (unused header pin reserved for future actuators)
   - GPIO 4  (Pin 7):  PCA9685 ~OE (active-low, 10 k pull-up; held HIGH by
@@ -162,6 +162,11 @@ AUX_PWM_GPIOS = {
 SERVO_MIN_US = 1000
 SERVO_MAX_US = 2000
 SERVO_MID_US = 1500
+
+# RadCam focus/zoom lens actuators accept a wider pulse window than standard
+# hobby servos; recipes and the calibration UI use 500-2500 us.
+AUX_LENS_MIN_US = 500
+AUX_LENS_MAX_US = 2500
 
 # Release servo positions (microseconds).  The release uses a continuous-
 # rotation drive: 1500 us holds the shaft still, 1000/2000 us spin it in
@@ -1461,7 +1466,11 @@ class HardwareController:
         """
         if channel not in AUX_PWM_GPIOS:
             raise ValueError(f"Unknown aux PWM channel: {channel}")
-        position_us = max(SERVO_MIN_US, min(SERVO_MAX_US, int(position_us)))
+        if channel in ("focus", "zoom"):
+            lo, hi = AUX_LENS_MIN_US, AUX_LENS_MAX_US
+        else:
+            lo, hi = SERVO_MIN_US, SERVO_MAX_US
+        position_us = max(lo, min(hi, int(position_us)))
         gpio = AUX_PWM_GPIOS[channel]
         with self._lock:
             self._aux_positions[channel] = position_us

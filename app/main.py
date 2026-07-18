@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import socket
 import subprocess
 import shlex
 import shutil
@@ -393,10 +394,22 @@ def load_config():
         # MP4. The RadCam pipeline is video-only regardless of this flag
         # since a bare external RTSP camera has no local mic.
         "audio_enabled": True,
+        # Last-applied lens PWM — restored on RadCam boot / detect.
         "radcam_focus_us": 900,
         "radcam_zoom_us": 900,
         "radcam_pan_us": 1500,
         "radcam_ext_servo_us": 1500,
+        # Four named (medium × zoom-end) focus/zoom pairs from Lens Cal.
+        # Workflow: park zoom at min (or max), dial focus sharp, Save that slot.
+        "radcam_lens_slot": "air_min",
+        "radcam_air_min_focus_us": 900,
+        "radcam_air_min_zoom_us": 900,
+        "radcam_air_max_focus_us": 900,
+        "radcam_air_max_zoom_us": 900,
+        "radcam_water_min_focus_us": 900,
+        "radcam_water_min_zoom_us": 900,
+        "radcam_water_max_focus_us": 900,
+        "radcam_water_max_zoom_us": 900,
         "battery": {
             "enabled": True,
             "serial_port": "auto",
@@ -2345,11 +2358,141 @@ def route_aux_pwm_set():
         hw.set_aux_pwm(channel, int(position_us))
     except ValueError as e:
         return jsonify({"success": False, "message": str(e)}), 400
+    applied = hw.get_aux_pwm(channel)
+    # Default persist=True keeps Status-tab behaviour. Calibration can pass
+    # persist=false while jogging, then write named air/water presets explicitly.
+    if data.get("persist", True):
+        cfg = load_config()
+        config_key = f"radcam_{channel}_us"
+        cfg[config_key] = int(applied)
+        save_config(cfg)
+    return jsonify({"success": True, "channel": channel, "position_us": applied})
+
+
+LENS_PRESET_SLOTS = ("air_min", "air_max", "water_min", "water_max")
+
+
+def _lens_preset_from_cfg(cfg, slot):
+    """Return {focus_us, zoom_us} for an air_min|air_max|water_min|water_max slot.
+
+    Falls back to legacy single air/water keys, then to the last-applied PWM.
+    """
+    if slot not in LENS_PRESET_SLOTS:
+        raise ValueError(f"Unknown lens preset slot: {slot}")
+    medium, zoom_end = slot.split("_", 1)  # air|water, min|max
+    legacy_focus = cfg.get(f"radcam_{medium}_focus_us", cfg.get("radcam_focus_us", 900))
+    legacy_zoom = cfg.get(f"radcam_{medium}_zoom_us", cfg.get("radcam_zoom_us", 900))
+    return {
+        "focus_us": int(cfg.get(f"radcam_{medium}_{zoom_end}_focus_us", legacy_focus)),
+        "zoom_us": int(cfg.get(f"radcam_{medium}_{zoom_end}_zoom_us", legacy_zoom)),
+    }
+
+
+def _all_lens_presets(cfg):
+    return {slot: _lens_preset_from_cfg(cfg, slot) for slot in LENS_PRESET_SLOTS}
+
+
+def _normalize_lens_slot(raw):
+    """Accept slot ('air_min') or legacy medium ('air') → canonical slot name."""
+    if not raw:
+        return "air_min"
+    s = str(raw).strip().lower()
+    if s in LENS_PRESET_SLOTS:
+        return s
+    # Legacy: medium-only requests map to that medium's min zoom slot.
+    if s in ("air", "water"):
+        return f"{s}_min"
+    # Legacy medium + zoom_end as separate fields joined by caller.
+    return None
+
+
+@app.route("/radcam_lens", methods=["GET"])
+def route_radcam_lens_get():
     cfg = load_config()
-    config_key = f"radcam_{channel}_us"
-    cfg[config_key] = int(position_us)
-    save_config(cfg)
-    return jsonify({"success": True, "channel": channel, "position_us": hw.get_aux_pwm(channel)})
+    slot = _normalize_lens_slot(cfg.get("radcam_lens_slot") or cfg.get("radcam_lens_medium"))
+    if slot is None:
+        slot = "air_min"
+    return jsonify({
+        "success": True,
+        "slot": slot,
+        "current": {
+            "focus_us": hw.get_aux_pwm("focus"),
+            "zoom_us": hw.get_aux_pwm("zoom"),
+        },
+        "presets": _all_lens_presets(cfg),
+    })
+
+
+@app.route("/radcam_lens", methods=["POST"])
+def route_radcam_lens_set():
+    """Save or apply one of the four lens presets (air/water × min/max zoom).
+
+    Body:
+      action: "save" | "apply"
+      slot: "air_min" | "air_max" | "water_min" | "water_max"
+        (also accepts legacy medium="air"|"water", optional zoom_end="min"|"max")
+      focus_us / zoom_us: optional overrides for save (else use live PWM)
+    """
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "").strip().lower()
+    if action not in ("save", "apply"):
+        return jsonify({"success": False, "message": "action must be save or apply"}), 400
+
+    slot = _normalize_lens_slot(data.get("slot"))
+    if slot is None and data.get("medium"):
+        medium = str(data.get("medium")).strip().lower()
+        zoom_end = str(data.get("zoom_end") or "min").strip().lower()
+        if zoom_end not in ("min", "max"):
+            zoom_end = "min"
+        slot = _normalize_lens_slot(f"{medium}_{zoom_end}")
+    if slot is None:
+        return jsonify({
+            "success": False,
+            "message": "slot must be air_min, air_max, water_min, or water_max",
+        }), 400
+
+    cfg = load_config()
+    medium, zoom_end = slot.split("_", 1)
+
+    if action == "save":
+        focus_us = data.get("focus_us", hw.get_aux_pwm("focus"))
+        zoom_us = data.get("zoom_us", hw.get_aux_pwm("zoom"))
+        try:
+            hw.set_aux_pwm("focus", int(focus_us))
+            hw.set_aux_pwm("zoom", int(zoom_us))
+        except ValueError as e:
+            return jsonify({"success": False, "message": str(e)}), 400
+        focus_us = hw.get_aux_pwm("focus")
+        zoom_us = hw.get_aux_pwm("zoom")
+        cfg[f"radcam_{medium}_{zoom_end}_focus_us"] = focus_us
+        cfg[f"radcam_{medium}_{zoom_end}_zoom_us"] = zoom_us
+        cfg["radcam_focus_us"] = focus_us
+        cfg["radcam_zoom_us"] = zoom_us
+        cfg["radcam_lens_slot"] = slot
+        save_config(cfg)
+        logger.info(f"Saved RadCam lens preset {slot}: focus={focus_us} zoom={zoom_us}")
+    else:  # apply
+        preset = _lens_preset_from_cfg(cfg, slot)
+        try:
+            hw.set_aux_pwm("focus", preset["focus_us"])
+            hw.set_aux_pwm("zoom", preset["zoom_us"])
+        except ValueError as e:
+            return jsonify({"success": False, "message": str(e)}), 400
+        focus_us = hw.get_aux_pwm("focus")
+        zoom_us = hw.get_aux_pwm("zoom")
+        cfg["radcam_focus_us"] = focus_us
+        cfg["radcam_zoom_us"] = zoom_us
+        cfg["radcam_lens_slot"] = slot
+        save_config(cfg)
+        logger.info(f"Applied RadCam lens preset {slot}: focus={focus_us} zoom={zoom_us}")
+
+    return jsonify({
+        "success": True,
+        "action": action,
+        "slot": slot,
+        "current": {"focus_us": hw.get_aux_pwm("focus"), "zoom_us": hw.get_aux_pwm("zoom")},
+        "presets": _all_lens_presets(cfg),
+    })
 
 
 # ── RadCam detection (manual) ────────────────────────────────────────────
@@ -2605,15 +2748,17 @@ CAMERA_RETRY_INTERVAL_S = 3
 
 
 def _ping_radcam():
-    """Try to reach the RadCam at 192.168.2.10. Returns True if reachable."""
+    """Probe the RadCam RTSP port (TCP 554).
+
+    The container image has no ``ping`` binary, and ICMP is unrelated to what
+    recording/preview actually need. A short TCP connect to the RTSP port
+    matches the real consumers (GStreamer / camera-manager).
+    """
     try:
-        result = subprocess.run(
-            ["ping", "-c", "1", "-W", "2", RADCAM_IP],
-            capture_output=True, timeout=5,
-        )
-        return result.returncode == 0
-    except Exception as e:
-        logger.debug(f"RadCam ping failed: {e}")
+        with socket.create_connection((RADCAM_IP, 554), timeout=2.0):
+            return True
+    except OSError as e:
+        logger.debug(f"RadCam TCP probe {RADCAM_IP}:554 failed: {e}")
         return False
 
 
