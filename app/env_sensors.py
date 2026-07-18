@@ -280,7 +280,8 @@ class EnvSensorMonitor:
             "temp_label": None,
             "pressure_mbar": None,
             "depth_m": None,
-            "temp_c": None,
+            "bar30_temp_c": None,  # MS5837 onboard temp (slower / less accurate)
+            "temp_c": None,        # Celsius / Celsius 2 water temp
             "last_error": None,
             "sample_ts": None,
         }
@@ -418,10 +419,13 @@ class EnvSensorMonitor:
         if snap.get("bar30_present"):
             p = snap.get("pressure_mbar")
             d = snap.get("depth_m")
+            bt = snap.get("bar30_temp_c")
             if p is not None:
                 out["pressure_mbar"] = round(float(p), 2)
             if d is not None:
                 out["depth_m"] = round(float(d), 3)
+            if bt is not None:
+                out["bar30_temp_c"] = round(float(bt), 2)
         if snap.get("temp_present"):
             t = snap.get("temp_c")
             if t is not None:
@@ -444,7 +448,7 @@ class EnvSensorMonitor:
                     break
 
     def _sample_once(self) -> None:
-        pressure = depth = temp = None
+        pressure = depth = bar30_temp = temp = None
         last_error: str | None = None
 
         if self._bar30 is not None:
@@ -452,6 +456,7 @@ class EnvSensorMonitor:
                 self._bar30.read()
                 pressure = self._bar30.pressure_mbar
                 depth = self._bar30.depth_m
+                bar30_temp = self._bar30.temperature_c
                 self._bar30_errors = 0
             except Exception as e:
                 last_error = f"bar30: {e}"
@@ -489,6 +494,7 @@ class EnvSensorMonitor:
                     "temp_label": self._temp_label,
                     "pressure_mbar": pressure,
                     "depth_m": depth,
+                    "bar30_temp_c": bar30_temp,
                     "temp_c": temp,
                     "last_error": last_error,
                     "sample_ts": time.time(),

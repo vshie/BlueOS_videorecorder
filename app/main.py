@@ -605,6 +605,8 @@ def update_ass_file():
                         label = (env_fields.get("temp_sensor") or "").upper()
                         suffix = f"({label})" if label else ""
                         parts.append(f"Water:{env_fields['temp_c']:.2f}C{suffix}")
+                    if "bar30_temp_c" in env_fields:
+                        parts.append(f"Bar30:{env_fields['bar30_temp_c']:.2f}C")
                     # Emit the same reading into the events sidecar. Keep it
                     # compact key=value so the file stays grep-friendly.
                     detail = " ".join(f"{k}={v}" for k, v in env_fields.items())

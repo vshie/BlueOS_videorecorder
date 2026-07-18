@@ -488,6 +488,7 @@ body.calib-tab .file-manager-wrapper{display:none}
         <div class="telem-item hidden" id="envDepthItem"><div class="telem-label">Depth (salt)</div><div class="telem-value" id="tEnvDepth">--</div></div>
         <div class="telem-item hidden" id="envPressItem"><div class="telem-label">Pressure</div><div class="telem-value" id="tEnvPress">--</div></div>
         <div class="telem-item hidden" id="envTempItem"><div class="telem-label">Water Temp</div><div class="telem-value" id="tEnvTemp">--</div></div>
+        <div class="telem-item hidden" id="envBar30TempItem"><div class="telem-label">Bar30 Temp</div><div class="telem-value" id="tEnvBar30Temp">--</div></div>
       </div>
     </div>
 
@@ -2703,19 +2704,22 @@ function updateEnvCard(env) {
   const tempOn = !!env.temp_present;
   document.getElementById('envDepthItem').classList.toggle('hidden', !bar30);
   document.getElementById('envPressItem').classList.toggle('hidden', !bar30);
+  document.getElementById('envBar30TempItem').classList.toggle('hidden', !bar30);
   document.getElementById('envTempItem').classList.toggle('hidden', !tempOn);
   if (bar30) {
     document.getElementById('tEnvDepth').textContent =
       env.depth_m != null ? env.depth_m.toFixed(2) + ' m' : '--';
     document.getElementById('tEnvPress').textContent =
       env.pressure_mbar != null ? env.pressure_mbar.toFixed(1) + ' mbar' : '--';
+    document.getElementById('tEnvBar30Temp').textContent =
+      env.bar30_temp_c != null ? env.bar30_temp_c.toFixed(2) + ' C' : '--';
   }
   if (tempOn) {
     document.getElementById('tEnvTemp').textContent =
       env.temp_c != null ? env.temp_c.toFixed(2) + ' C' : '--';
   }
   document.getElementById('envSensorLabel').textContent =
-    env.temp_label ? 'Temp: ' + env.temp_label : (bar30 ? 'Bar30 only' : '');
+    env.temp_label ? 'Water: ' + env.temp_label : (bar30 ? 'Bar30 only' : '');
 }
 
 async function pollEnv() {
