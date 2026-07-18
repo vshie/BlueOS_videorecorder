@@ -68,9 +68,9 @@ RECIPE_SCHEMA_DEFAULTS = {
     "radcam_focus_finder": False,
     "focus_sweep_start_us": 870,
     "focus_sweep_end_us": 2130,
-    "focus_finder_zoom_us": 900,
+    "focus_finder_zoom_us": 935,
     "radcam_focus_us": 900,
-    "radcam_zoom_us": 900,
+    "radcam_zoom_us": 935,
     "release_enable": False,
     "release_offset_s": 0,
     # Winch vertical profiling (oscillates the release servo during the
@@ -201,7 +201,7 @@ RADCAM_DEFAULT_RECIPES = [
         "radcam_focus_finder": True,
         "focus_sweep_start_us": 870,
         "focus_sweep_end_us": 2130,
-        "focus_finder_zoom_us": 900,
+        "focus_finder_zoom_us": 935,
     },
 ]
 
@@ -257,8 +257,9 @@ def validate_recipe(data):
     for fld, lo, hi in [
         ("still_interval_s", 0.1, 3600),
         ("auto_start_delay_minutes", 0, 60),
-        ("servo_start_us", 1000, 2000),
-        ("servo_end_us", 1000, 2000),
+        # RadCam tilt travels 865-2250 µs; DropCam stays in the 1000-2000 subset.
+        ("servo_start_us", 865, 2250),
+        ("servo_end_us", 865, 2250),
         ("servo_pause_points", 0, 50),
         ("servo_loiter_time_s", 0, 3600),
         ("servo_oscillations", 0, 999),
@@ -369,11 +370,11 @@ def validate_recipe(data):
         clean["radcam_focus_finder"] = bool(data["radcam_focus_finder"])
 
     for fld, lo, hi in [
-        ("focus_sweep_start_us", 500, 2500),
-        ("focus_sweep_end_us", 500, 2500),
-        ("focus_finder_zoom_us", 500, 2500),
-        ("radcam_focus_us", 500, 2500),
-        ("radcam_zoom_us", 500, 2500),
+        ("focus_sweep_start_us", 870, 2130),
+        ("focus_sweep_end_us", 870, 2130),
+        ("focus_finder_zoom_us", 935, 1850),
+        ("radcam_focus_us", 870, 2130),
+        ("radcam_zoom_us", 935, 1850),
     ]:
         if fld in data:
             try:

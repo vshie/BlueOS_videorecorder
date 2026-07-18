@@ -189,7 +189,7 @@ class Scheduler:
                     logger.info(f"Recipe applied zoom={recipe['radcam_zoom_us']} us")
 
             if recipe.get("radcam_focus_finder") and self._hw:
-                zoom_us = recipe.get("focus_finder_zoom_us", 900)
+                zoom_us = recipe.get("focus_finder_zoom_us", 935)
                 self._hw.set_aux_pwm("zoom", zoom_us)
                 start_us = recipe.get("focus_sweep_start_us", 870)
                 end_us = recipe.get("focus_sweep_end_us", 2130)

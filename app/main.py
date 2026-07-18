@@ -395,21 +395,22 @@ def load_config():
         # since a bare external RTSP camera has no local mic.
         "audio_enabled": True,
         # Last-applied lens PWM — restored on RadCam boot / detect.
+        # Limits: focus 870-2130, zoom 935-1850, tilt 865-2250.
         "radcam_focus_us": 900,
-        "radcam_zoom_us": 900,
+        "radcam_zoom_us": 935,
         "radcam_pan_us": 1500,
         "radcam_ext_servo_us": 1500,
         # Four named (medium × zoom-end) focus/zoom pairs from Lens Cal.
         # Workflow: park zoom at min (or max), dial focus sharp, Save that slot.
         "radcam_lens_slot": "air_min",
         "radcam_air_min_focus_us": 900,
-        "radcam_air_min_zoom_us": 900,
+        "radcam_air_min_zoom_us": 935,
         "radcam_air_max_focus_us": 900,
-        "radcam_air_max_zoom_us": 900,
+        "radcam_air_max_zoom_us": 1850,
         "radcam_water_min_focus_us": 900,
-        "radcam_water_min_zoom_us": 900,
+        "radcam_water_min_zoom_us": 935,
         "radcam_water_max_focus_us": 900,
-        "radcam_water_max_zoom_us": 900,
+        "radcam_water_max_zoom_us": 1850,
         "battery": {
             "enabled": True,
             "serial_port": "auto",
@@ -2381,7 +2382,7 @@ def _lens_preset_from_cfg(cfg, slot):
         raise ValueError(f"Unknown lens preset slot: {slot}")
     medium, zoom_end = slot.split("_", 1)  # air|water, min|max
     legacy_focus = cfg.get(f"radcam_{medium}_focus_us", cfg.get("radcam_focus_us", 900))
-    legacy_zoom = cfg.get(f"radcam_{medium}_zoom_us", cfg.get("radcam_zoom_us", 900))
+    legacy_zoom = cfg.get(f"radcam_{medium}_zoom_us", cfg.get("radcam_zoom_us", 935))
     return {
         "focus_us": int(cfg.get(f"radcam_{medium}_{zoom_end}_focus_us", legacy_focus)),
         "zoom_us": int(cfg.get(f"radcam_{medium}_{zoom_end}_zoom_us", legacy_zoom)),
@@ -2508,7 +2509,7 @@ def route_detect_radcam():
     logger.info(f"Manual RadCam detection succeeded — switching to RadCam mode")
     cfg = load_config()
     hw.set_aux_pwm("focus", cfg.get("radcam_focus_us", 900))
-    hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 900))
+    hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 935))
     hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
     hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
     init_default_recipes(radcam=True)
@@ -2939,7 +2940,7 @@ def _boot():
     if radcam_mode:
         logger.info("Applying saved RadCam PWM settings from config")
         hw.set_aux_pwm("focus", cfg.get("radcam_focus_us", 900))
-        hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 900))
+        hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 935))
         hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
         hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
         init_default_recipes(radcam=True)

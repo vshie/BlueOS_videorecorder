@@ -15,13 +15,14 @@ unchanged, only the silkscreen and this file's constants moved):
   - I2C1 GPIO 2/3 -> PCA9685 @ 0x40 drives all servo/PWM outputs. Channels
     are wired 1:1 to J105 header pins (silkscreen labels shown below), and
     the same driver code runs identically on Pi 4 and Pi 5:
-        Ch 0 = TILT      (camera tilt servo, 1000-2000 us)
+        Ch 0 = TILT      (camera tilt servo; DropCam 1000-2000 us,
+                          RadCam 865-2250 us)
         Ch 1 = LUMEN     (lumen light, 1000 us = off, 2000 us = full)
         Ch 2 = RELEASE   (continuous-rotation release drive; 1500 = stop,
                           1000 = wind, 2000 = unwind)
         Ch 3 = EXTSERVO  (external / aux servo, 1000-2000 us)
-        Ch 4 = FOCUS     (RadCam focus, 500-2500 us)
-        Ch 5 = ZOOM      (RadCam zoom, 500-2500 us)
+        Ch 4 = FOCUS     (RadCam focus, 870-2130 us)
+        Ch 5 = ZOOM      (RadCam zoom, 935-1850 us)
         Ch 6 = PAN       (RadCam pan, 1000-2000 us)
         Ch 7 = SPARE     (unused header pin reserved for future actuators)
   - GPIO 4  (Pin 7):  PCA9685 ~OE (active-low, 10 k pull-up; held HIGH by
@@ -158,15 +159,19 @@ AUX_PWM_GPIOS = {
     "spare": SPARE_GPIO,
 }
 
-# Servo PWM range (microseconds)
+# Servo PWM range (microseconds) — DropCam tilt / lumen / release / pan
 SERVO_MIN_US = 1000
 SERVO_MAX_US = 2000
 SERVO_MID_US = 1500
 
-# RadCam focus/zoom lens actuators accept a wider pulse window than standard
-# hobby servos; recipes and the calibration UI use 500-2500 us.
-AUX_LENS_MIN_US = 500
-AUX_LENS_MAX_US = 2500
+# RadCam measured actuator limits (µs). Tilt shares the TILT PCA channel but
+# travels farther than a standard hobby servo; focus/zoom are lens drives.
+RADCAM_TILT_MIN_US = 865
+RADCAM_TILT_MAX_US = 2250
+RADCAM_FOCUS_MIN_US = 870
+RADCAM_FOCUS_MAX_US = 2130
+RADCAM_ZOOM_MIN_US = 935
+RADCAM_ZOOM_MAX_US = 1850
 
 # Release servo positions (microseconds).  The release uses a continuous-
 # rotation drive: 1500 us holds the shaft still, 1000/2000 us spin it in
@@ -559,7 +564,9 @@ class HardwareController:
     # ── Camera Servo ─────────────────────────────────────────────────────
 
     def set_servo(self, position_us):
-        position_us = max(SERVO_MIN_US, min(SERVO_MAX_US, int(position_us)))
+        # Allow the wider RadCam tilt window; DropCam UI/recipes stay inside
+        # the classic 1000-2000 µs band which is a subset of this range.
+        position_us = max(RADCAM_TILT_MIN_US, min(RADCAM_TILT_MAX_US, int(position_us)))
         with self._lock:
             self._servo_position = position_us
         if self._servo and self._servo.available:
@@ -1466,8 +1473,10 @@ class HardwareController:
         """
         if channel not in AUX_PWM_GPIOS:
             raise ValueError(f"Unknown aux PWM channel: {channel}")
-        if channel in ("focus", "zoom"):
-            lo, hi = AUX_LENS_MIN_US, AUX_LENS_MAX_US
+        if channel == "focus":
+            lo, hi = RADCAM_FOCUS_MIN_US, RADCAM_FOCUS_MAX_US
+        elif channel == "zoom":
+            lo, hi = RADCAM_ZOOM_MIN_US, RADCAM_ZOOM_MAX_US
         else:
             lo, hi = SERVO_MIN_US, SERVO_MAX_US
         position_us = max(lo, min(hi, int(position_us)))

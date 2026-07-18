@@ -345,7 +345,7 @@ body.radcam .calib-hint{color:#6a5a8f}
       <div class="form-row mt-8">
         <div class="form-group">
           <label>Tilt Servo: <span id="servoVal" class="mono">1500</span> us</label>
-          <input type="range" id="servoSlider" min="1000" max="2000" step="10" value="1500" oninput="setServo(this.value)">
+          <input type="range" id="servoSlider" min="1000" max="2000" step="1" value="1500" oninput="setServo(this.value)">
         </div>
         <div class="form-group narrow">
           <label>Lumen Light</label>
@@ -425,16 +425,16 @@ body.radcam .calib-hint{color:#6a5a8f}
         <div class="form-group mt-8">
           <label>Focus</label>
           <div style="display:flex;gap:6px;align-items:center">
-            <input type="range" id="focusSlider" min="500" max="2500" step="1" value="900" oninput="syncAuxInput('focus',this.value)">
-            <input type="number" id="focusInput" min="500" max="2500" step="1" value="900" style="width:70px" oninput="syncAuxSlider('focus',this.value)">
+            <input type="range" id="focusSlider" min="870" max="2130" step="1" value="900" oninput="syncAuxInput('focus',this.value)">
+            <input type="number" id="focusInput" min="870" max="2130" step="1" value="900" style="width:70px" oninput="syncAuxSlider('focus',this.value)">
             <span class="mono text-muted">us</span>
           </div>
         </div>
         <div class="form-group mt-8">
           <label>Zoom</label>
           <div style="display:flex;gap:6px;align-items:center">
-            <input type="range" id="zoomSlider" min="500" max="2500" step="1" value="900" oninput="syncAuxInput('zoom',this.value)">
-            <input type="number" id="zoomInput" min="500" max="2500" step="1" value="900" style="width:70px" oninput="syncAuxSlider('zoom',this.value)">
+            <input type="range" id="zoomSlider" min="935" max="1850" step="1" value="935" oninput="syncAuxInput('zoom',this.value)">
+            <input type="number" id="zoomInput" min="935" max="1850" step="1" value="935" style="width:70px" oninput="syncAuxSlider('zoom',this.value)">
             <span class="mono text-muted">us</span>
           </div>
         </div>
@@ -562,11 +562,11 @@ body.radcam .calib-hint{color:#6a5a8f}
     <div class="form-row">
       <div class="form-group">
         <label>Start Position: <span id="rServoStartVal" class="mono">1500</span> us</label>
-        <input type="range" id="rServoStart" min="1000" max="2000" step="10" value="1500" oninput="previewServo(this.value,'rServoStartVal')">
+        <input type="range" id="rServoStart" min="1000" max="2000" step="1" value="1500" oninput="previewServo(this.value,'rServoStartVal')">
       </div>
       <div class="form-group" id="servoEndGroup">
         <label>End Position: <span id="rServoEndVal" class="mono">1500</span> us</label>
-        <input type="range" id="rServoEnd" min="1000" max="2000" step="10" value="1500" oninput="previewServo(this.value,'rServoEndVal')">
+        <input type="range" id="rServoEnd" min="1000" max="2000" step="1" value="1500" oninput="previewServo(this.value,'rServoEndVal')">
       </div>
     </div>
     <div id="sweepFields">
@@ -584,15 +584,15 @@ body.radcam .calib-hint{color:#6a5a8f}
         <div class="form-group">
           <label>Focus: <span id="rRecFocusVal" class="mono">900</span> us</label>
           <div style="display:flex;gap:6px;align-items:center">
-            <input type="range" id="rRecFocus" min="500" max="2500" step="10" value="900" oninput="document.getElementById('rRecFocusVal').textContent=this.value;document.getElementById('rRecFocusNum').value=this.value">
-            <input type="number" id="rRecFocusNum" min="500" max="2500" step="10" value="900" style="width:70px" oninput="document.getElementById('rRecFocusVal').textContent=this.value;document.getElementById('rRecFocus').value=this.value">
+            <input type="range" id="rRecFocus" min="870" max="2130" step="1" value="900" oninput="document.getElementById('rRecFocusVal').textContent=this.value;document.getElementById('rRecFocusNum').value=this.value">
+            <input type="number" id="rRecFocusNum" min="870" max="2130" step="1" value="900" style="width:70px" oninput="document.getElementById('rRecFocusVal').textContent=this.value;document.getElementById('rRecFocus').value=this.value">
           </div>
         </div>
         <div class="form-group">
-          <label>Zoom: <span id="rRecZoomVal" class="mono">900</span> us</label>
+          <label>Zoom: <span id="rRecZoomVal" class="mono">935</span> us</label>
           <div style="display:flex;gap:6px;align-items:center">
-            <input type="range" id="rRecZoom" min="500" max="2500" step="10" value="900" oninput="document.getElementById('rRecZoomVal').textContent=this.value;document.getElementById('rRecZoomNum').value=this.value">
-            <input type="number" id="rRecZoomNum" min="500" max="2500" step="10" value="900" style="width:70px" oninput="document.getElementById('rRecZoomVal').textContent=this.value;document.getElementById('rRecZoom').value=this.value">
+            <input type="range" id="rRecZoom" min="935" max="1850" step="1" value="935" oninput="document.getElementById('rRecZoomVal').textContent=this.value;document.getElementById('rRecZoomNum').value=this.value">
+            <input type="number" id="rRecZoomNum" min="935" max="1850" step="1" value="935" style="width:70px" oninput="document.getElementById('rRecZoomVal').textContent=this.value;document.getElementById('rRecZoom').value=this.value">
           </div>
         </div>
       </div>
@@ -609,18 +609,18 @@ body.radcam .calib-hint{color:#6a5a8f}
       <div id="focusFinderFields" style="display:none">
         <div class="form-row">
           <div class="form-group">
-            <label>Zoom Level: <span id="rFocusFinderZoomVal" class="mono">900</span> us</label>
-            <input type="range" id="rFocusFinderZoom" min="500" max="2500" step="10" value="900" oninput="document.getElementById('rFocusFinderZoomVal').textContent=this.value">
+            <label>Zoom Level: <span id="rFocusFinderZoomVal" class="mono">935</span> us</label>
+            <input type="range" id="rFocusFinderZoom" min="935" max="1850" step="1" value="935" oninput="document.getElementById('rFocusFinderZoomVal').textContent=this.value">
           </div>
         </div>
         <div class="form-row">
           <div class="form-group">
             <label>Focus Sweep Start: <span id="rFocusSweepStartVal" class="mono">870</span> us</label>
-            <input type="range" id="rFocusSweepStart" min="500" max="2500" step="10" value="870" oninput="document.getElementById('rFocusSweepStartVal').textContent=this.value">
+            <input type="range" id="rFocusSweepStart" min="870" max="2130" step="1" value="870" oninput="document.getElementById('rFocusSweepStartVal').textContent=this.value">
           </div>
           <div class="form-group">
             <label>Focus Sweep End: <span id="rFocusSweepEndVal" class="mono">2130</span> us</label>
-            <input type="range" id="rFocusSweepEnd" min="500" max="2500" step="10" value="2130" oninput="document.getElementById('rFocusSweepEndVal').textContent=this.value">
+            <input type="range" id="rFocusSweepEnd" min="870" max="2130" step="1" value="2130" oninput="document.getElementById('rFocusSweepEndVal').textContent=this.value">
           </div>
         </div>
         <div style="background:rgba(0,255,247,.08);border-left:3px solid #00fff7;padding:8px 12px;font-size:.85em;border-radius:4px;margin:8px 0">
@@ -748,13 +748,13 @@ body.radcam .calib-hint{color:#6a5a8f}
         <p class="calib-hint mt-8">On startup the last applied focus+zoom PWM is restored. Jog live below; save each zoom extreme for air and water (4 presets).</p>
 
         <div class="pwm-jog mt-8">
-          <label>Focus: <span id="calibFocusVal" class="mono">900</span> <span class="text-muted">us</span></label>
-          <input type="range" id="calibFocusSlider" min="500" max="2500" step="1" value="900"
+          <label>Focus: <span id="calibFocusVal" class="mono">900</span> <span class="text-muted">us</span> <span class="text-muted">(870–2130)</span></label>
+          <input type="range" id="calibFocusSlider" min="870" max="2130" step="1" value="900"
                  oninput="syncCalibChannel('focus', this.value)">
           <div class="jog-row">
             <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('focus',-5)">−5</button>
             <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('focus',-1)">−1</button>
-            <input type="number" id="calibFocusInput" min="500" max="2500" step="1" value="900" style="width:72px"
+            <input type="number" id="calibFocusInput" min="870" max="2130" step="1" value="900" style="width:72px"
                    oninput="syncCalibChannel('focus', this.value)">
             <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('focus',1)">+1</button>
             <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('focus',5)">+5</button>
@@ -762,13 +762,13 @@ body.radcam .calib-hint{color:#6a5a8f}
         </div>
 
         <div class="pwm-jog">
-          <label>Zoom: <span id="calibZoomVal" class="mono">900</span> <span class="text-muted">us</span></label>
-          <input type="range" id="calibZoomSlider" min="500" max="2500" step="1" value="900"
+          <label>Zoom: <span id="calibZoomVal" class="mono">935</span> <span class="text-muted">us</span> <span class="text-muted">(935–1850)</span></label>
+          <input type="range" id="calibZoomSlider" min="935" max="1850" step="1" value="935"
                  oninput="syncCalibChannel('zoom', this.value)">
           <div class="jog-row">
             <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('zoom',-5)">−5</button>
             <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('zoom',-1)">−1</button>
-            <input type="number" id="calibZoomInput" min="500" max="2500" step="1" value="900" style="width:72px"
+            <input type="number" id="calibZoomInput" min="935" max="1850" step="1" value="935" style="width:72px"
                    oninput="syncCalibChannel('zoom', this.value)">
             <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('zoom',1)">+1</button>
             <button type="button" class="btn-sm btn-jog" onclick="nudgeCalib('zoom',5)">+5</button>
@@ -1153,6 +1153,7 @@ async function pollTelemetry() {
     document.body.classList.add('radcam');
     document.getElementById('appTitle').innerHTML = '<img src="/static/radcam_logo.png" alt="RadCam" class="radcam-logo">';
     document.title = 'RadCam';
+    applyRadcamPwmRanges();
     switchSubtab(document.querySelector('[data-subtab="focuszoom"]'));
   }
   if (d.aux_pwm) {
@@ -1467,17 +1468,58 @@ function updateReleaseUi(positionUs, direction, running) {
 
 /* ── Aux PWM (RadCam focus/zoom) ──────────── */
 let auxDebounce = {};
-const AUX_LENS_MIN = 500;
-const AUX_LENS_MAX = 2500;
+/* RadCam measured actuator limits (µs) */
+const RADCAM_FOCUS_MIN = 870, RADCAM_FOCUS_MAX = 2130;
+const RADCAM_ZOOM_MIN = 935, RADCAM_ZOOM_MAX = 1850;
+const RADCAM_TILT_MIN = 865, RADCAM_TILT_MAX = 2250;
+const DROPCAM_TILT_MIN = 1000, DROPCAM_TILT_MAX = 2000;
 
-function _clampLensUs(val) {
+function _lensRange(channel) {
+  return channel === 'zoom'
+    ? [RADCAM_ZOOM_MIN, RADCAM_ZOOM_MAX]
+    : [RADCAM_FOCUS_MIN, RADCAM_FOCUS_MAX];
+}
+
+function _clampLensUs(val, channel) {
+  const [lo, hi] = _lensRange(channel || 'focus');
   const n = Math.round(Number(val));
-  if (!Number.isFinite(n)) return AUX_LENS_MIN;
-  return Math.max(AUX_LENS_MIN, Math.min(AUX_LENS_MAX, n));
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function applyRadcamPwmRanges() {
+  const focusIds = ['focusSlider','focusInput','calibFocusSlider','calibFocusInput',
+                    'rRecFocus','rRecFocusNum','rFocusSweepStart','rFocusSweepEnd'];
+  const zoomIds = ['zoomSlider','zoomInput','calibZoomSlider','calibZoomInput',
+                   'rRecZoom','rRecZoomNum','rFocusFinderZoom'];
+  const tiltIds = ['servoSlider','rServoStart','rServoEnd'];
+  focusIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.min = RADCAM_FOCUS_MIN; el.max = RADCAM_FOCUS_MAX; el.step = 1;
+    el.value = _clampLensUs(el.value, 'focus');
+  });
+  zoomIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.min = RADCAM_ZOOM_MIN; el.max = RADCAM_ZOOM_MAX; el.step = 1;
+    el.value = _clampLensUs(el.value, 'zoom');
+  });
+  tiltIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.min = RADCAM_TILT_MIN; el.max = RADCAM_TILT_MAX; el.step = 1;
+    const n = Math.round(Number(el.value));
+    if (Number.isFinite(n)) el.value = Math.max(RADCAM_TILT_MIN, Math.min(RADCAM_TILT_MAX, n));
+  });
+  const fv = document.getElementById('calibFocusVal');
+  const zv = document.getElementById('calibZoomVal');
+  if (fv) fv.textContent = document.getElementById('calibFocusInput').value;
+  if (zv) zv.textContent = document.getElementById('calibZoomInput').value;
 }
 
 function updateLensUi(channel, val, {markUserSet=true} = {}) {
-  const v = _clampLensUs(val);
+  const v = _clampLensUs(val, channel);
   const statusSlider = document.getElementById(channel + 'Slider');
   const statusInput = document.getElementById(channel + 'Input');
   const calibSlider = document.getElementById('calib' + channel.charAt(0).toUpperCase() + channel.slice(1) + 'Slider');
@@ -1572,8 +1614,8 @@ async function loadLensCalibration() {
 async function saveLensPreset(slot) {
   const status = document.getElementById('lensCalibStatus');
   if (status) status.textContent = 'Saving ' + _slotLabel(slot) + '…';
-  const focus = _clampLensUs(document.getElementById('calibFocusInput').value);
-  const zoom = _clampLensUs(document.getElementById('calibZoomInput').value);
+  const focus = _clampLensUs(document.getElementById('calibFocusInput').value, 'focus');
+  const zoom = _clampLensUs(document.getElementById('calibZoomInput').value, 'zoom');
   const d = await api('/radcam_lens', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -1628,6 +1670,7 @@ async function detectRadcam() {
     document.getElementById('appTitle').innerHTML = '<img src="/static/radcam_logo.png" alt="RadCam" class="radcam-logo">';
     document.title = 'RadCam';
     btn.style.display = 'none';
+    applyRadcamPwmRanges();
     const fz = document.querySelector('[data-subtab="focuszoom"]');
     if (fz) switchSubtab(fz);
     loadRecipes();
@@ -2153,14 +2196,14 @@ function newRecipe() {
   document.getElementById('rLedColor').value = 'red';
   document.getElementById('rLedBlink').value = 'slow';
   document.getElementById('rFocusFinder').checked = false;
-  document.getElementById('rFocusFinderZoom').value = 900;
-  document.getElementById('rFocusFinderZoomVal').textContent = '900';
+  document.getElementById('rFocusFinderZoom').value = 935;
+  document.getElementById('rFocusFinderZoomVal').textContent = '935';
   document.getElementById('rFocusSweepStart').value = 870;
   document.getElementById('rFocusSweepStartVal').textContent = '870';
   document.getElementById('rFocusSweepEnd').value = 2130;
   document.getElementById('rFocusSweepEndVal').textContent = '2130';
   const curFocus = document.getElementById('focusSlider').value || '900';
-  const curZoom = document.getElementById('zoomSlider').value || '900';
+  const curZoom = document.getElementById('zoomSlider').value || '935';
   document.getElementById('rRecFocus').value = curFocus;
   document.getElementById('rRecFocusNum').value = curFocus;
   document.getElementById('rRecFocusVal').textContent = curFocus;
@@ -2212,14 +2255,14 @@ async function editRecipe(id) {
   document.getElementById('rLedColor').value = r.led_color || 'red';
   document.getElementById('rLedBlink').value = r.led_blink || 'slow';
   document.getElementById('rFocusFinder').checked = !!r.radcam_focus_finder;
-  document.getElementById('rFocusFinderZoom').value = r.focus_finder_zoom_us || 900;
-  document.getElementById('rFocusFinderZoomVal').textContent = r.focus_finder_zoom_us || 900;
+  document.getElementById('rFocusFinderZoom').value = r.focus_finder_zoom_us || 935;
+  document.getElementById('rFocusFinderZoomVal').textContent = r.focus_finder_zoom_us || 935;
   document.getElementById('rFocusSweepStart').value = r.focus_sweep_start_us || 870;
   document.getElementById('rFocusSweepStartVal').textContent = r.focus_sweep_start_us || 870;
   document.getElementById('rFocusSweepEnd').value = r.focus_sweep_end_us || 2130;
   document.getElementById('rFocusSweepEndVal').textContent = r.focus_sweep_end_us || 2130;
   const rFocus = r.radcam_focus_us || 900;
-  const rZoom = r.radcam_zoom_us || 900;
+  const rZoom = r.radcam_zoom_us || 935;
   document.getElementById('rRecFocus').value = rFocus;
   document.getElementById('rRecFocusNum').value = rFocus;
   document.getElementById('rRecFocusVal').textContent = rFocus;
@@ -2439,11 +2482,11 @@ function loadSetup() {
   <tr><td>RGB Status LED (WS2812)</td><td>GPIO 20 (SPI1 MOSI)</td><td>Pin 38</td><td>Single NeoPixel data line to J104 pin 3; <code>/dev/spidev1.0</code> provided by BlueOS's default <code>dtoverlay=spi1-3cs</code></td></tr>
   <tr><td>Release rotation sensor</td><td>GPIO 10</td><td>Pin 19</td><td>Falling-edge alert via lgpio; J104 pin 4</td></tr>
   <tr><td>Lumen Light</td><td>GPIO 13 (PWM1)</td><td>Pin 33</td><td>1000-2000 &mu;s servo PWM. Modes: always on, pause points only, or snapshot only</td></tr>
-  <tr><td>Camera Focus</td><td>PCA9685 ch 4</td><td>J105 pin 13</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
-  <tr><td>Zoom</td><td>GPIO 26</td><td>Pin 37</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
-  <tr><td>Pan</td><td>GPIO 16</td><td>Pin 36</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
-  <tr><td>External Servo</td><td>GPIO 19</td><td>Pin 35</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
-  <tr><td>Camera Tilt Servo</td><td>GPIO 21</td><td>Pin 40</td><td>1000-2000 &mu;s PWM</td></tr>
+  <tr><td>Camera Focus</td><td>PCA9685 ch 4</td><td>J105 pin 13</td><td>RadCam focus 870-2130 &mu;s</td></tr>
+  <tr><td>Zoom</td><td>PCA9685 ch 5</td><td>J105</td><td>RadCam zoom 935-1850 &mu;s</td></tr>
+  <tr><td>Pan</td><td>PCA9685 ch 6</td><td>J105</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
+  <tr><td>External Servo</td><td>PCA9685 ch 3</td><td>J105</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
+  <tr><td>Camera Tilt Servo</td><td>PCA9685 ch 0</td><td>J105</td><td>DropCam 1000-2000 &mu;s; RadCam tilt 865-2250 &mu;s</td></tr>
   <tr><td>USB Camera</td><td colspan="2">/dev/video2</td><td>H264 USB camera (1080p 30fps)</td></tr>
 </table>
 <p>All servo/light/PWM signals share a common ground with the Pi. Servos, lights, and motors require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header.</p>
