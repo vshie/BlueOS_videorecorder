@@ -740,9 +740,8 @@ def _humanize_gst_error(msg):
 def probe_radcam_encode(url: str = RTSP_ENDPOINT, timeout_s: float = 5.0) -> str:
     """Return ``H264`` or ``H265`` for the RadCam RTSP stream.
 
-    Uses ffprobe over TCP. On any failure, keeps the last known
-    ``radcam_encode`` (default H264) so a transient probe miss doesn't
-    flip the pipeline to the wrong depayloader.
+    Uses ffprobe over TCP. Always refreshes — the operator can flip the
+    camera between H.264 and H.265 without restarting the extension.
     """
     global radcam_encode
     try:
@@ -774,22 +773,30 @@ def probe_radcam_encode(url: str = RTSP_ENDPOINT, timeout_s: float = 5.0) -> str
 
 def _radcam_depay(encode: str) -> str:
     """GStreamer depay/parse chain for a RadCam H264 or H265 RTSP stream."""
+    # No byte-stream caps before mp4mux — those break linking with
+    # fragment-duration mp4mux on this GStreamer build (towfish used them
+    # only with splitmuxsink).
     if encode == "H265":
         return "rtph265depay ! h265parse config-interval=-1"
     return "rtph264depay ! h264parse config-interval=-1"
 
 
-def _build_radcam_pipeline(filepath: str, encode: str) -> str:
+def _build_radcam_pipeline(filepath: str, encode: str, proto=None) -> str:
     """Remux RadCam RTSP into a fragmented MP4 (power-cut safe).
 
-    Soft-ports towfish latency/queue options into dropcam's existing
-    gst-launch + mp4mux path. Caps-filter to ``media=video`` so the
-    camera's secondary (audio) RTP stream does not break linking.
+    H.265 on this camera is unreliable over TCP interleaved RTSP (same
+    finding that pushed towfish to H.264 / hauv-v2 to UDP). Use UDP for
+    H.265 and TCP for H.264. Caps-filter to ``media=video`` so the
+    camera's secondary audio RTP stream does not break linking.
     """
+    if proto is None:
+        proto = "udp" if encode == "H265" else "tcp"
     depay = _radcam_depay(encode)
+    # do-retransmission is H.265/UDP hygiene from the towfish recorder.
+    retrans = " do-retransmission=false" if proto == "udp" else ""
     return (
         f"rtspsrc location={RTSP_ENDPOINT} is-live=true "
-        "protocols=tcp latency=5000 retry=5 timeout=5000000 "
+        f"protocols={proto} latency=5000 retry=5 timeout=5000000{retrans} "
         "! application/x-rtp,media=video "
         f"! {depay} "
         "! queue max-size-time=30000000000 max-size-bytes=0 "
@@ -1148,8 +1155,14 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
             filepath = os.path.join(rec_dir, filename)
             current_video_file = filepath
             encode = probe_radcam_encode()
-            pipeline = _build_radcam_pipeline(filepath, encode)
-            logger.info(f"RadCam recording pipeline encode={encode}")
+            radcam_proto = "udp" if encode == "H265" else "tcp"
+            # Brief settle so the probe's RTSP session is fully torn down
+            # before gst-launch opens its own (helps flaky H.265 cameras).
+            time.sleep(0.5)
+            pipeline = _build_radcam_pipeline(filepath, encode, radcam_proto)
+            logger.info(
+                f"RadCam recording pipeline encode={encode} proto={radcam_proto}"
+            )
         else:
             # DropCam: record the BlueOS camera-manager RTSP stream (BlueOS
             # owns the USB camera, so we no longer touch /dev/video* directly).
@@ -1232,12 +1245,10 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
                     f"{depay} ! queue ! mp4mux fragment-duration=5000 ! "
                     f"filesink location={filepath}"
                 )
-        # RadCam: if the probed codec's pipeline dies immediately, retry once
-        # with the other codec (camera configs flip between H264/H265).
-        # Use a local ``proc`` during startup so a concurrent /status poll
-        # cannot clear ``gst_process`` mid-check (it sets the global to None
-        # when it sees a dead child).
-        radcam_retried = False
+        # RadCam startup retries: (1) flip transport UDP↔TCP, (2) re-probe
+        # codec and rebuild. Use a local ``proc`` so a concurrent /status
+        # poll cannot clear ``gst_process`` mid-check.
+        radcam_attempt = 0
         while True:
             command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
             try:
@@ -1252,21 +1263,37 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
                     err_text = err.decode(errors="replace")
                     logger.error(f"GStreamer failed: {err_text}")
                 else:
-                    time.sleep(2)
+                    time.sleep(3 if radcam_mode else 2)
                     if proc.poll() is not None:
                         _out, err = proc.communicate()
                         err_text = err.decode(errors="replace")
                         logger.error(f"GStreamer died during startup: {err_text}")
                 if err_text is not None:
-                    if radcam_mode and not radcam_retried:
-                        radcam_retried = True
-                        alt = "H265" if radcam_encode == "H264" else "H264"
-                        logger.warning(
-                            f"RadCam {radcam_encode} pipeline died at startup; "
-                            f"retrying with {alt}"
-                        )
-                        radcam_encode = alt
-                        pipeline = _build_radcam_pipeline(filepath, alt)
+                    if radcam_mode and radcam_attempt < 2:
+                        radcam_attempt += 1
+                        if radcam_attempt == 1:
+                            alt_proto = "tcp" if radcam_proto == "udp" else "udp"
+                            logger.warning(
+                                f"RadCam {radcam_encode}/{radcam_proto} died at "
+                                f"startup; retrying with proto={alt_proto}"
+                            )
+                            radcam_proto = alt_proto
+                            pipeline = _build_radcam_pipeline(
+                                filepath, radcam_encode, radcam_proto
+                            )
+                        else:
+                            # Re-probe (codec may have changed) and use that
+                            # result directly — do not flip away from it.
+                            enc = probe_radcam_encode()
+                            radcam_proto = "udp" if enc == "H265" else "tcp"
+                            logger.warning(
+                                f"RadCam startup still failing; re-probe "
+                                f"encode={enc} proto={radcam_proto}"
+                            )
+                            time.sleep(0.5)
+                            pipeline = _build_radcam_pipeline(
+                                filepath, enc, radcam_proto
+                            )
                         start_time = None
                         continue
                     recording_error = _gst_startup_error(err_text)
