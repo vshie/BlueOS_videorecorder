@@ -851,7 +851,7 @@ body.calib-tab .file-manager-wrapper{display:none}
   <iframe id="fileBrowserFrame" src="" style="width:100%;height:600px;border:none;border-radius:8px"></iframe>
 </div>
 
-<script src="/static/mcm_webrtc_live.js"></script>
+<script src="static/mcm_webrtc_live.js"></script>
 <script>
 /* ── State ─────────────────────────────────── */
 let isRecording = false;
@@ -881,9 +881,20 @@ function fmtDur(ms) {
   const s = Math.floor(ms/1000)%60, m = Math.floor(ms/60000)%60, h = Math.floor(ms/3600000);
   return [h,m,s].map(v=>String(v).padStart(2,'0')).join(':');
 }
+/* Root-absolute paths ("/status") hit BlueOS nginx, not this extension, when
+   the UI is opened via /extensionv2/dropcam/. Prefix them with the extension
+   base so API/static/download requests stay inside the extension proxy. */
+function extUrl(path) {
+  if (path == null || path === '') return path;
+  if (/^(https?:|blob:|data:)/i.test(path)) return path;
+  if (path.charAt(0) !== '/') return path;
+  if (path.indexOf('/extensionv2/') === 0) return path;
+  const m = window.location.pathname.match(/^(.*?\/extensionv2\/[^/]+)/);
+  return m ? (m[1] + path) : path;
+}
 async function api(url, opts) {
   try {
-    const r = await fetch(url, opts);
+    const r = await fetch(extUrl(url), opts);
     return await r.json();
   } catch(e) { console.error(url, e); return {success:false, message:String(e)}; }
 }
@@ -1300,7 +1311,7 @@ function mirrorLivePreviewToCalib() {
 }
 
 async function _pickStream() {
-  const r = await fetch('/streams');
+  const r = await fetch(extUrl('/streams'));
   if (!r.ok) throw new Error('stream list HTTP ' + r.status);
   const d = await r.json();
   const list = (d && d.streams) || [];
@@ -1786,7 +1797,7 @@ async function downloadZip(url, filename, progressEl) {
   bar.style.width = '0%';
   lbl.textContent = 'Preparing zip\u2026';
   try {
-    const resp = await fetch(url);
+    const resp = await fetch(extUrl(url));
     if (!resp.ok) { lbl.textContent = 'Error ' + resp.status; return; }
     const total = parseInt(resp.headers.get('Content-Length') || '0', 10);
     const reader = resp.body.getReader();
@@ -1845,7 +1856,7 @@ function _makeDirectLink(filename, url, size) {
   const li = document.createElement('li');
   li.style.cssText = 'padding:2px 0 2px 24px;display:flex;align-items:center;gap:6px';
   const a = document.createElement('a');
-  a.href = url;
+  a.href = extUrl(url);
   a.textContent = filename;
   a.style.cssText = 'color:#1a73e8;cursor:pointer;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.84em';
   a.title = 'Download ' + filename;
@@ -1881,7 +1892,7 @@ function _makeUsbSession(folder, files, deleteData, locationBadge, videoFile) {
 
   if (zipFile) {
     const a = document.createElement('a');
-    a.href = '/download_usb/' + encodeURIComponent(folder) + '/' + encodeURIComponent(zipFile.name);
+    a.href = extUrl('/download_usb/' + encodeURIComponent(folder) + '/' + encodeURIComponent(zipFile.name));
     a.textContent = folder;
     a.style.cssText = 'color:#1a73e8;cursor:pointer;font-weight:600;font-size:.88em;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
     a.title = 'Download ' + zipFile.name;
