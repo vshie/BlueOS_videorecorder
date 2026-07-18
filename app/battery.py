@@ -4,7 +4,7 @@ Battery monitor for the Doris battery pack (Daly BMS over RS485).
 Background polling thread that:
   - Opens the serial port, reads a full snapshot every poll_interval_s
   - Reconnects with backoff on serial errors / missing dependencies
-  - Tracks time since last full charge via FullChargeTracker
+  - Tracks SOC-gated awake uptime via AwakeUptimeTracker
   - Appends a CSV row per poll to a per-power-up file
         - Filename starts as an incrementing number, e.g. battery_0007.csv,
           because a battery-backed RTC is not always current on boot
@@ -196,7 +196,11 @@ class BatteryMonitor:
                 "current_a": summary.get("current_a"),
                 "soc_percent": summary.get("soc_percent"),
                 "cell_delta_mv": summary.get("cell_delta_mv"),
-                "since_full_charge": summary.get("since_full_charge"),
+                "awake_uptime": summary.get("awake_uptime"),
+                "seconds_awake": summary.get("seconds_awake"),
+                # Legacy alias kept for older UI clients.
+                "since_full_charge": summary.get("awake_uptime")
+                    or summary.get("since_full_charge"),
                 "low_voltage_alarm": self._alarm_active,
                 "last_error": self._last_error,
             }
@@ -774,25 +778,20 @@ class BatteryMonitor:
         except Exception as exc:
             logger.error("Failed to drive battery alarm: %s", exc)
 
-    # ── Charge tracker ───────────────────────────────────────────────────
+    # ── Awake uptime tracker ─────────────────────────────────────────────
 
     def _get_tracker(self, cfg: dict[str, Any]) -> Any:
-        from doris_battery.charge_tracker import FullChargeTracker
+        from doris_battery.charge_tracker import AwakeUptimeTracker
 
         path = Path(cfg.get("charge_state_path", DEFAULT_CONFIG["charge_state_path"]))
-        threshold = float(cfg.get("full_charge_soc_percent", 98.0))
-        if (
-            self._charge_tracker is None
-            or self._tracker_path != path
-            or self._tracker_threshold != threshold
-        ):
+        if self._charge_tracker is None or self._tracker_path != path:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                self._charge_tracker = FullChargeTracker(path, full_charge_soc_percent=threshold)
+                self._charge_tracker = AwakeUptimeTracker(path)
                 self._tracker_path = path
-                self._tracker_threshold = threshold
+                self._tracker_threshold = None
             except Exception as exc:
-                logger.warning("Could not initialize charge tracker at %s: %s", path, exc)
+                logger.warning("Could not initialize awake uptime tracker at %s: %s", path, exc)
                 self._charge_tracker = None
         return self._charge_tracker
 

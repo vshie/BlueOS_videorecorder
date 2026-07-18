@@ -514,7 +514,7 @@ body.calib-tab .file-manager-wrapper{display:none}
         <div class="telem-item"><div class="telem-label">Battery V</div><div class="telem-value" id="tBattV">--</div></div>
         <div class="telem-item"><div class="telem-label">Battery SOC</div><div class="telem-value" id="tBattSoc">--</div></div>
         <div class="telem-item"><div class="telem-label">Battery Current</div><div class="telem-value" id="tBattI">--</div></div>
-        <div class="telem-item"><div class="telem-label">Since Full Charge</div><div class="telem-value" id="tBattAge" style="font-size:.85em">--</div></div>
+        <div class="telem-item"><div class="telem-label">Awake</div><div class="telem-value" id="tBattAge" style="font-size:.85em">--</div></div>
         <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
       </div>
     </div>
@@ -1191,7 +1191,7 @@ async function pollTelemetry() {
     }
     battSocEl.textContent = b.soc_percent != null ? b.soc_percent.toFixed(0) + '%' : '--';
     battIEl.textContent = b.current_a != null ? b.current_a.toFixed(2) + ' A' : '--';
-    battAgeEl.textContent = b.since_full_charge || '--';
+    battAgeEl.textContent = b.awake_uptime || b.since_full_charge || '--';
   } else {
     battVEl.textContent = b && b.last_error ? 'N/C' : '--';
     battVEl.style.color = '';

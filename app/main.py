@@ -574,6 +574,17 @@ def update_ass_file():
                         if batt.get("low_voltage_alarm"):
                             tag += " LOW"
                         parts.append(tag)
+                    # Awake uptime goes to the events sidecar only (not ASS).
+                    awake_s = batt.get("seconds_awake")
+                    if awake_s is not None:
+                        awake_i = int(float(awake_s))
+                        if awake_i != getattr(update_ass_file, "_last_awake_s", None):
+                            update_ass_file._last_awake_s = awake_i
+                            log_event(
+                                "awake_uptime",
+                                f"seconds={awake_i} "
+                                f"display={batt.get('awake_uptime') or ''}",
+                            )
                 try:
                     if hw.is_winch_active():
                         parts.append(

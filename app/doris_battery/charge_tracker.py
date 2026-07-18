@@ -1,6 +1,8 @@
-"""Track time since last full charge per pack.
+"""Track awake uptime gated by battery SOC.
 
-Ported verbatim from brianhBR/Doris-Battery.
+Counter resets when SOC hits 100%, stays at zero until SOC drops to
+99% or below, then accumulates only while the monitor is running
+(offline gaps are not credited across process restarts).
 """
 
 from __future__ import annotations
@@ -10,18 +12,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-
-def is_charging(snapshot: dict[str, Any]) -> bool:
-    summary = snapshot.get("summary") or {}
-    mosfet = snapshot.get("mosfet_status") or {}
-    current = summary.get("current_a")
-    if summary.get("charger_running"):
-        return True
-    if mosfet.get("mode") == "charging" or mosfet.get("charging_mosfet"):
-        return True
-    if current is not None and float(current) > 0.5:
-        return True
-    return False
+# Hard thresholds per product request (not the legacy full_charge_soc knob).
+RESET_SOC_PERCENT = 100.0
+START_SOC_PERCENT = 99.0
 
 
 def format_duration(seconds: float | None) -> str:
@@ -40,13 +33,23 @@ def format_duration(seconds: float | None) -> str:
     return "<1m"
 
 
-class FullChargeTracker:
-    """Record when a pack reaches full SOC while charging."""
+class AwakeUptimeTracker:
+    """Accumulate system-awake time between full-charge resets.
 
-    def __init__(self, state_path: Path, full_charge_soc_percent: float = 98.0) -> None:
+    State machine (per pack board):
+      * SOC >= 100% → reset counter to 0, hold (not counting)
+      * SOC <= 99%  → start/continue counting
+      * 99% < SOC < 100% after a reset → keep holding at 0
+      * Boot with SOC <= 99% and no prior hold → start counting
+        (system is already awake mid-deployment)
+    """
+
+    def __init__(self, state_path: Path, **_ignored: Any) -> None:
         self.state_path = state_path
-        self.full_charge_soc_percent = full_charge_soc_percent
         self._state: dict[str, dict[str, Any]] = self._load()
+        # last_tick is process-local; on load we resume accumulated_s
+        # without crediting the offline gap.
+        self._last_tick: dict[str, float] = {}
 
     def _load(self) -> dict[str, dict[str, Any]]:
         if not self.state_path.exists():
@@ -63,29 +66,62 @@ class FullChargeTracker:
         with self.state_path.open("w", encoding="utf-8") as handle:
             json.dump(self._state, handle, indent=2)
 
+    def _entry(self, key: str) -> dict[str, Any]:
+        entry = dict(self._state.get(key) or {})
+        entry.setdefault("accumulated_s", 0.0)
+        entry.setdefault("counting", False)
+        entry.setdefault("holding", False)
+        return entry
+
     def observe(self, board: int, snapshot: dict[str, Any]) -> bool:
-        """Update state from a snapshot. Returns True if state changed."""
+        """Update awake uptime from a snapshot. Returns True if state changed."""
         summary = snapshot.get("summary") or {}
         soc = summary.get("soc_percent")
         if soc is None:
             return False
 
         key = str(board)
-        entry = dict(self._state.get(key) or {})
-        was_at_full = bool(entry.get("was_at_full"))
-        at_full = float(soc) >= self.full_charge_soc_percent
-        charging = is_charging(snapshot)
+        entry = self._entry(key)
+        now = time.time()
+        soc_f = float(soc)
         changed = False
 
-        if at_full:
-            if charging and not was_at_full:
-                entry["last_full_charge_at"] = time.time()
+        # Credit elapsed awake time since the previous tick (process uptime
+        # only — last_tick is not persisted, so reboots do not add offline
+        # time).
+        if entry.get("counting"):
+            last = self._last_tick.get(key)
+            if last is not None and now > last:
+                entry["accumulated_s"] = float(entry["accumulated_s"]) + (now - last)
                 changed = True
-            entry["was_at_full"] = True
+            self._last_tick[key] = now
+
+        if soc_f >= RESET_SOC_PERCENT:
+            if float(entry["accumulated_s"]) != 0.0 or entry.get("counting") or not entry.get("holding"):
+                changed = True
+            entry["accumulated_s"] = 0.0
+            entry["counting"] = False
+            entry["holding"] = True
+            self._last_tick.pop(key, None)
+        elif soc_f <= START_SOC_PERCENT:
+            if entry.get("holding") or not entry.get("counting"):
+                # Leave full-charge hold, or first observation mid-dive.
+                if not entry.get("counting"):
+                    changed = True
+                entry["holding"] = False
+                entry["counting"] = True
+                self._last_tick[key] = now
+            else:
+                entry["counting"] = True
+                self._last_tick.setdefault(key, now)
         else:
-            if was_at_full:
-                changed = True
-            entry["was_at_full"] = False
+            # 99% < SOC < 100%: hold at zero after a reset; otherwise keep
+            # whatever counting state we already had.
+            if entry.get("holding"):
+                entry["counting"] = False
+                self._last_tick.pop(key, None)
+            elif entry.get("counting"):
+                self._last_tick.setdefault(key, now)
 
         if entry != self._state.get(key):
             self._state[key] = entry
@@ -96,13 +132,23 @@ class FullChargeTracker:
         board = snapshot.get("board_number")
         if board is None:
             return
-        entry = self._state.get(str(board)) or {}
-        last_at = entry.get("last_full_charge_at")
-        seconds_since = None
-        if isinstance(last_at, (int, float)):
-            seconds_since = max(0.0, time.time() - float(last_at))
+        key = str(board)
+        entry = self._entry(key)
+        seconds = float(entry.get("accumulated_s") or 0.0)
+        # Include sub-tick elapsed so the UI advances between observes.
+        if entry.get("counting"):
+            last = self._last_tick.get(key)
+            if last is not None:
+                seconds += max(0.0, time.time() - last)
         summary = dict(snapshot.get("summary") or {})
-        summary["last_full_charge_at"] = last_at
-        summary["seconds_since_full_charge"] = seconds_since
-        summary["since_full_charge"] = format_duration(seconds_since)
+        summary["seconds_awake"] = seconds
+        summary["awake_uptime"] = format_duration(seconds)
+        summary["awake_counting"] = bool(entry.get("counting"))
+        # Legacy keys so older UI/log readers keep working until rolled.
+        summary["seconds_since_full_charge"] = seconds
+        summary["since_full_charge"] = summary["awake_uptime"]
         snapshot["summary"] = summary
+
+
+# Back-compat alias — battery.py historically imported FullChargeTracker.
+FullChargeTracker = AwakeUptimeTracker

@@ -52,8 +52,14 @@ def flatten_snapshot(snapshot: dict[str, Any], resting: bool) -> dict[str, Any]:
         "total_voltage_v": summary.get("total_voltage_v"),
         "current_a": summary.get("current_a"),
         "soc_percent": summary.get("soc_percent"),
-        "since_full_charge": summary.get("since_full_charge"),
-        "seconds_since_full_charge": summary.get("seconds_since_full_charge"),
+        "awake_uptime": summary.get("awake_uptime"),
+        "seconds_awake": summary.get("seconds_awake"),
+        # Legacy aliases (same values as awake uptime).
+        "since_full_charge": summary.get("awake_uptime")
+            or summary.get("since_full_charge"),
+        "seconds_since_full_charge": summary.get("seconds_awake")
+            if summary.get("seconds_awake") is not None
+            else summary.get("seconds_since_full_charge"),
         "mode": summary.get("mode"),
         "cell_delta_mv": summary.get("cell_delta_mv"),
         "highest_cell": summary.get("highest_cell"),
