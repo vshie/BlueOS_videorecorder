@@ -418,6 +418,17 @@ body.calib-tab .file-manager-wrapper{display:none}
           <button class="subtab radcam-only" data-subtab="focuszoom" onclick="switchSubtab(this)">Focus / Zoom</button>
         </div>
       </div>
+      <div class="radcam-only form-group mb-8" id="awbSceneGroup">
+        <label>Water white balance</label>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <button type="button" id="btnAwbGreen" class="btn-sm" onclick="setAwbScene('green')" title="Green-water AWB scene (awb_auto_mode=0)">Green</button>
+          <button type="button" id="btnAwbBlue" class="btn-sm btn-primary" onclick="setAwbScene('blue')" title="Blue-water AWB scene (awb_auto_mode=1)">Blue</button>
+          <span id="awbSceneStatus" class="text-muted" style="font-size:.8em"></span>
+        </div>
+        <div class="text-muted" style="font-size:.8em;margin-top:4px">
+          Sets Auto WB scene before each one-push. Saved across reboots (default Blue).
+        </div>
+      </div>
       <div class="subtab-content active" id="subtab-led">
         <div class="form-row mt-8">
           <div class="form-group">
@@ -658,6 +669,7 @@ body.calib-tab .file-manager-wrapper{display:none}
       </div>
       <div class="text-muted" style="font-size:.82em">
         Re-triggers RadCam white balance via <span class="mono">setImageAdjustmentEx</span> (<span class="mono">onceAWB=1</span>) while recording — same path as radcam-manager / towfish.
+        Water scene (Green/Blue) is global — set it on the Status tab under RadCam control; it is applied on boot and before every one-push.
       </div>
     </div>
 
@@ -1077,6 +1089,38 @@ async function pollStatus() {
   }
 }
 
+function updateAwbSceneButtons(scene) {
+  const s = (scene === 'green') ? 'green' : 'blue';
+  const btnG = document.getElementById('btnAwbGreen');
+  const btnB = document.getElementById('btnAwbBlue');
+  if (!btnG || !btnB) return;
+  btnG.className = 'btn-sm' + (s === 'green' ? ' btn-primary' : '');
+  btnB.className = 'btn-sm' + (s === 'blue' ? ' btn-primary' : '');
+  const st = document.getElementById('awbSceneStatus');
+  if (st) st.textContent = s === 'green' ? 'Green (mode 0)' : 'Blue (mode 1)';
+}
+
+async function setAwbScene(scene) {
+  const st = document.getElementById('awbSceneStatus');
+  if (st) st.textContent = 'Saving…';
+  updateAwbSceneButtons(scene);
+  const d = await api('/radcam_awb_scene', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({scene}),
+  });
+  if (!d || !d.success) {
+    if (st) st.textContent = (d && d.message) ? d.message : 'Failed';
+    return;
+  }
+  updateAwbSceneButtons(d.scene);
+  if (st) {
+    st.textContent = d.applied_to_camera
+      ? ((d.scene === 'green' ? 'Green' : 'Blue') + ' applied')
+      : ((d.scene === 'green' ? 'Green' : 'Blue') + ' saved');
+  }
+}
+
 async function setStoragePref(pref) {
   const btnUsb = document.getElementById('btnStorageUsb');
   const btnSd = document.getElementById('btnStorageSd');
@@ -1117,6 +1161,7 @@ async function pollTelemetry() {
   document.getElementById('tUsbDisk').textContent = d.usb_disk_free_mb != null ? (d.usb_disk_free_mb/1024).toFixed(1)+' GB' : '--';
   document.getElementById('tSysTime').textContent = d.system_time || '--';
   document.getElementById('tSync').textContent = d.time_synced === true ? 'Yes' : d.time_synced === false ? 'No' : '--';
+  if (d.radcam_awb_scene) updateAwbSceneButtons(d.radcam_awb_scene);
   document.getElementById('tServo').textContent = d.servo_position_us != null ? d.servo_position_us + ' us' : '--';
   document.getElementById('tLight').textContent = d.light_on ? d.light_brightness_pct + '%' : 'Off';
   if (d.release_position_us != null) {

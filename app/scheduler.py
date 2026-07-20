@@ -20,10 +20,57 @@ DISK_FREE_MINIMUM_MB = 1024  # 1 GB
 RECORDING_START_RETRIES = 5
 RECORDING_RETRY_INTERVAL_S = 5
 
-# Same POST radcam-manager / towfish use for one-push WB. The older
+# Same POSTs radcam-manager / towfish use for WB scene + one-push.
 # cgi_action GET path returns "error user/pwd" on current firmware.
+RADCAM_IMAGE_URL = "http://192.168.2.10/action/setImageAdjustment"
 RADCAM_AWB_URL = "http://192.168.2.10/action/setImageAdjustmentEx"
 RADCAM_AWB_BODY = {"onceAWB": 1}
+
+# Water-environment AWB scene (radcam-manager Green/Blue buttons).
+# Maps to camera awb_auto_mode; scene only applies with auto_awb=0 (Auto).
+AWB_SCENE_MODE = {"green": 0, "blue": 1}
+DEFAULT_AWB_SCENE = "blue"
+
+
+def normalize_awb_scene(scene) -> str:
+    s = str(scene or DEFAULT_AWB_SCENE).strip().lower()
+    return s if s in AWB_SCENE_MODE else DEFAULT_AWB_SCENE
+
+
+def apply_awb_scene(scene) -> bool:
+    """Set RadCam Auto WB + water scene (green/blue). Never raises."""
+    scene = normalize_awb_scene(scene)
+    body = {
+        "auto_awb": 0,  # Auto (Manual=1); scene is ignored in Manual
+        "awb_auto_mode": AWB_SCENE_MODE[scene],
+    }
+    try:
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            RADCAM_IMAGE_URL,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body_text = (resp.read() or b"").decode("utf-8", errors="replace").strip()
+            code = None
+            try:
+                code = (json.loads(body_text) or {}).get("code")
+            except Exception:
+                pass
+            if code is None or code == 0:
+                logger.info(
+                    "RadCam AWB scene set: %s (auto_awb=0, awb_auto_mode=%d)",
+                    scene, AWB_SCENE_MODE[scene],
+                )
+                return True
+            logger.warning("RadCam AWB scene failed: code %s: %s", code, body_text[:120])
+    except urllib.error.HTTPError as e:
+        logger.warning("RadCam AWB scene failed: HTTP %s", e.code)
+    except Exception as e:
+        logger.warning("RadCam AWB scene failed: %s", e)
+    return False
 
 LED_COLOR_MAP = {
     "red": (20, 0, 0),
@@ -61,9 +108,11 @@ class Scheduler:
         self._winch_thread = None
         self._awb_thread = None
         self._radcam_mode = False
+        self._awb_scene = DEFAULT_AWB_SCENE
 
     def configure(self, *, start_fn, stop_fn, disk_free_fn, hw,
-                  capture_still_fn=None, log_event_fn=None, radcam_mode=False):
+                  capture_still_fn=None, log_event_fn=None, radcam_mode=False,
+                  awb_scene=None):
         self._start_recording_fn = start_fn
         self._stop_recording_fn = stop_fn
         self._get_disk_free_fn = disk_free_fn
@@ -75,10 +124,19 @@ class Scheduler:
         self._log_event_fn = log_event_fn
         self._hw = hw
         self._radcam_mode = bool(radcam_mode)
+        if awb_scene is not None:
+            self._awb_scene = normalize_awb_scene(awb_scene)
 
     def set_radcam_mode(self, enabled):
         """Update tilt-nod extents after a late RadCam detect."""
         self._radcam_mode = bool(enabled)
+
+    def set_awb_scene(self, scene):
+        """Update the water-environment AWB scene used before each one-push."""
+        self._awb_scene = normalize_awb_scene(scene)
+
+    def get_awb_scene(self):
+        return normalize_awb_scene(self._awb_scene)
 
     def _log(self, event, detail=""):
         """Best-effort event log via the injected main.log_event."""
@@ -497,7 +555,11 @@ class Scheduler:
                 pass
 
     def _trigger_awb_once(self) -> bool:
-        """POST onceAWB=1 to RadCam setImageAdjustmentEx. Never raises."""
+        """Apply water WB scene, then POST onceAWB=1. Never raises."""
+        scene = self.get_awb_scene()
+        if not apply_awb_scene(scene):
+            self._log("radcam_awb_scene_failed", scene)
+            # Still attempt one-push; scene may already be correct on camera.
         try:
             data = json.dumps(RADCAM_AWB_BODY).encode("utf-8")
             req = urllib.request.Request(
@@ -514,8 +576,8 @@ class Scheduler:
                 except Exception:
                     pass
                 if code is None or code == 0:
-                    logger.info("RadCam AWB (onceAWB=1) OK")
-                    self._log("radcam_awb_ok", "onceAWB=1")
+                    logger.info("RadCam AWB (onceAWB=1) OK scene=%s", scene)
+                    self._log("radcam_awb_ok", f"onceAWB=1 scene={scene}")
                     return True
                 err = f"code {code}: {body_text[:120]}"
         except urllib.error.HTTPError as e:

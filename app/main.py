@@ -34,7 +34,13 @@ logger = logging.getLogger(__name__)
 
 # ── Imports from local modules ───────────────────────────────────────────
 from hardware import hw
-from scheduler import scheduler
+from scheduler import (
+    scheduler,
+    apply_awb_scene,
+    normalize_awb_scene,
+    DEFAULT_AWB_SCENE,
+    AWB_SCENE_MODE,
+)
 from system_telemetry import (
     get_cpu_temperature, get_cpu_voltage, get_cpu_clock_mhz,
     get_cpu_load_avg, is_time_synced, get_disk_free_mb, get_all_telemetry,
@@ -416,6 +422,10 @@ def load_config():
         "radcam_water_min_zoom_us": 935,
         "radcam_water_max_focus_us": 900,
         "radcam_water_max_zoom_us": 1850,
+        # Water-environment AWB scene for one-push WB (radcam-manager Green/Blue).
+        # green → awb_auto_mode=0, blue → awb_auto_mode=1. Applied on RadCam
+        # boot and again before every onceAWB trigger.
+        "radcam_awb_scene": DEFAULT_AWB_SCENE,
         "battery": {
             "enabled": True,
             "serial_port": "auto",
@@ -475,6 +485,7 @@ _cfg = load_config()
 image_rotation = _cfg.get("rotation_degrees", 0)
 storage_preference = _cfg.get("storage_preference", "usb")
 audio_enabled = bool(_cfg.get("audio_enabled", True))
+radcam_awb_scene = normalize_awb_scene(_cfg.get("radcam_awb_scene", DEFAULT_AWB_SCENE))
 
 # ── ASS subtitle generation (system telemetry) ──────────────────────────
 
@@ -2109,6 +2120,8 @@ def route_telemetry():
         except Exception:
             pass
         data["radcam_mode"] = radcam_mode
+        data["radcam_awb_scene"] = radcam_awb_scene
+        data["radcam_awb_scene_mode"] = AWB_SCENE_MODE.get(radcam_awb_scene)
         if radcam_mode:
             data["aux_pwm"] = hw.get_all_aux_pwm()
         try:
@@ -2194,6 +2207,59 @@ def route_audio_set():
         except Exception as e:
             logger.debug(f"Post-enable mic unmute skipped: {e}")
     return jsonify({"success": True, "audio_enabled": audio_enabled})
+
+
+# ── RadCam water-environment AWB scene (Green / Blue) ───────────────────
+
+def _apply_and_persist_awb_scene(scene, apply_to_camera=True):
+    """Normalize, persist, push to scheduler, and optionally set on camera."""
+    global radcam_awb_scene
+    scene = normalize_awb_scene(scene)
+    radcam_awb_scene = scene
+    cfg = load_config()
+    cfg["radcam_awb_scene"] = scene
+    save_config(cfg)
+    try:
+        scheduler.set_awb_scene(scene)
+    except Exception:
+        pass
+    applied = False
+    if apply_to_camera and radcam_mode:
+        applied = apply_awb_scene(scene)
+    return scene, applied
+
+
+@app.route("/radcam_awb_scene", methods=["GET"])
+def route_radcam_awb_scene_get():
+    scene = normalize_awb_scene(radcam_awb_scene)
+    return jsonify({
+        "success": True,
+        "scene": scene,
+        "awb_auto_mode": AWB_SCENE_MODE[scene],
+        "options": [
+            {"id": "green", "awb_auto_mode": AWB_SCENE_MODE["green"]},
+            {"id": "blue", "awb_auto_mode": AWB_SCENE_MODE["blue"]},
+        ],
+    })
+
+
+@app.route("/radcam_awb_scene", methods=["POST"])
+def route_radcam_awb_scene_set():
+    """Set Green/Blue water WB scene (persisted). Applied to camera immediately
+    in RadCam mode so the next one-push uses the selected scene."""
+    data = request.get_json(silent=True) or {}
+    raw = data.get("scene", data.get("radcam_awb_scene"))
+    if raw is None:
+        return jsonify({"success": False, "message": "scene required (green|blue)"}), 400
+    if str(raw).strip().lower() not in AWB_SCENE_MODE:
+        return jsonify({"success": False, "message": "scene must be green or blue"}), 400
+    scene, applied = _apply_and_persist_awb_scene(raw, apply_to_camera=True)
+    return jsonify({
+        "success": True,
+        "scene": scene,
+        "awb_auto_mode": AWB_SCENE_MODE[scene],
+        "applied_to_camera": applied,
+    })
 
 
 # ── Host setup (DeckHand config.txt + pinmux verification) ──────────────
@@ -2703,7 +2769,7 @@ def route_radcam_lens_set():
 
 @app.route("/detect_radcam", methods=["POST"])
 def route_detect_radcam():
-    global radcam_mode
+    global radcam_mode, radcam_awb_scene
     if radcam_mode:
         return jsonify({"success": True, "message": "Already in RadCam mode"})
     if not _ping_radcam():
@@ -2715,9 +2781,12 @@ def route_detect_radcam():
     hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 935))
     hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
     hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
+    radcam_awb_scene = normalize_awb_scene(cfg.get("radcam_awb_scene", radcam_awb_scene))
+    apply_awb_scene(radcam_awb_scene)
     init_default_recipes(radcam=True)
     try:
         scheduler.set_radcam_mode(True)
+        scheduler.set_awb_scene(radcam_awb_scene)
     except Exception:
         pass
     register_service()
@@ -3035,6 +3104,7 @@ def _remux_orphaned_ts():
 
 def _boot():
     """Initialize hardware, default recipes, USB storage, and auto-start if configured."""
+    global storage_preference, radcam_awb_scene
     logger.info("=== DropCam boot sequence starting ===")
 
     # Defensive pin-mux recovery on Pi 4 (BCM2711). BlueOS's autopilot_manager
@@ -3140,6 +3210,7 @@ def _boot():
         capture_still_fn=_sweep_snapshot,
         log_event_fn=log_event,
         radcam_mode=radcam_mode,
+        awb_scene=radcam_awb_scene,
     )
 
     hw.led_idle()
@@ -3147,7 +3218,6 @@ def _boot():
     threading.Thread(target=_remux_orphaned_ts, daemon=True).start()
 
     cfg = load_config()
-    global storage_preference
     storage_preference = cfg.get("storage_preference", "usb")
 
     rid = cfg.get("active_recipe_id")
@@ -3162,6 +3232,16 @@ def _boot():
         hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 935))
         hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
         hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
+        # Water WB scene before any recipe one-push AWB can fire.
+        radcam_awb_scene = normalize_awb_scene(
+            cfg.get("radcam_awb_scene", radcam_awb_scene)
+        )
+        logger.info(
+            "Applying RadCam AWB scene from config: %s (awb_auto_mode=%d)",
+            radcam_awb_scene, AWB_SCENE_MODE[radcam_awb_scene],
+        )
+        apply_awb_scene(radcam_awb_scene)
+        scheduler.set_awb_scene(radcam_awb_scene)
         init_default_recipes(radcam=True)
 
     # Boot nod — visible "alive" cue once hardware is ready, before any
