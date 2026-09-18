@@ -6,7 +6,16 @@
 <title>DropCam</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f4f5f7;color:#1a1a1a;max-width:1400px;margin:0 auto;padding:10px 16px}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f4f5f7;color:#1a1a1a;max-width:100%;margin:0 auto;padding:10px 16px}
+/* Only the Status tab breaks out to the full window width; every other body-level
+   region stays centered at the pre-existing 1400px so the Recipes, Lens Cal, and
+   Setup tabs (plus the shared header/banners/file browser) look unchanged. */
+body > .flex-between,
+body > #timeBanner,
+body > #hostSetupBanner,
+body > .tabs,
+body > .tab-content:not(#tab-status),
+body > .file-manager-wrapper{max-width:1400px;margin-left:auto;margin-right:auto}
 h1{font-size:1.25em;margin-bottom:2px}
 h2{font-size:1.05em;margin:12px 0 6px;color:#333}
 h3{font-size:.88em;margin:8px 0 4px;color:#555;text-transform:uppercase;letter-spacing:.04em}
@@ -22,12 +31,25 @@ h3{font-size:.88em;margin:8px 0 4px;color:#555;text-transform:uppercase;letter-s
 /* Cards */
 .card{background:#fff;border-radius:8px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
 
-/* Two-column status layout */
-.status-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:stretch}
-.status-col{display:flex;flex-direction:column}
-@media(max-width:700px){.status-grid{grid-template-columns:1fr}}
+/* Full-width Status tab layout.
+   Row 1: two columns (Manual controls | 4k Cam control).
+   Row 2: three columns (recording | storage | schedule).
+   Row 3+: full-width live preview, environment, telemetry, recorded files. */
+.status-controls-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:stretch;margin-bottom:10px}
+.status-controls-row > .card{margin-bottom:0}
+@media(max-width:900px){.status-controls-row{grid-template-columns:1fr}}
 
-/* Camera preview card stretches to fill remaining left-column height */
+.status-summary-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;align-items:stretch;margin-bottom:10px}
+.status-summary-row > .card{margin-bottom:0}
+@media(max-width:1000px){.status-summary-row{grid-template-columns:1fr 1fr}}
+@media(max-width:700px){.status-summary-row{grid-template-columns:1fr}}
+
+/* Full-width live preview: fills the extension window width, 16:9 aspect. */
+.status-preview-card{margin-bottom:10px}
+.status-preview-card .snapshot-area{width:100%;aspect-ratio:16/9;min-height:280px}
+.status-preview-card .snapshot-area .live-video{width:100%;height:100%;max-width:100%;max-height:100%;object-fit:contain}
+
+/* Legacy stretch-to-fill helper (kept for any downstream card that still uses it). */
 .card-grow{flex:1;display:flex;flex-direction:column;margin-bottom:0}
 .card-grow .snapshot-area{flex:1;min-height:200px}
 
@@ -253,7 +275,7 @@ body.calib-tab .file-manager-wrapper{display:none}
 <div class="flex-between mb-8">
   <h1 id="appTitle">DropCam</h1>
   <div style="display:flex;align-items:center;gap:10px">
-    <button class="btn-sm" id="btnDetectRadcam" onclick="detectRadcam()">Detect RadCam</button>
+    <button class="btn-sm" id="btnDetectRadcam" onclick="detectRadcam()">Detect 4k Cam</button>
     <span class="text-muted mono" id="sysTime">--</span>
   </div>
 </div>
@@ -282,87 +304,9 @@ body.calib-tab .file-manager-wrapper{display:none}
 
 <!-- ═══════════════ STATUS TAB ═══════════════ -->
 <div class="tab-content active" id="tab-status">
-<div class="status-grid">
 
-  <!-- LEFT COLUMN -->
-  <div class="status-col">
-
-    <div class="card">
-      <div class="flex-between">
-        <div><span class="status-dot idle" id="statusDot"></span><strong id="statusText">Idle</strong>
-          <span class="mono" id="durationText" style="margin-left:8px;color:#666"></span>
-        </div>
-        <div style="display:flex;gap:6px">
-          <button class="btn-start" id="btnStart" onclick="manualStart()">Start</button>
-          <button class="btn-stop" id="btnStop" onclick="manualStop()" disabled>Stop</button>
-        </div>
-      </div>
-      <div class="mt-8 text-muted" id="fileSizeText"></div>
-      <div id="recErrorText" class="hidden" style="margin-top:8px;padding:8px 10px;border-radius:6px;background:#fdecea;border:1px solid #f5c6cb;color:#b71c1c;font-size:.85em;line-height:1.35"></div>
-      <div id="remuxBar" class="hidden" style="margin-top:6px">
-        <div style="display:flex;align-items:center;gap:8px">
-          <span id="remuxStage" style="font-size:.82em;color:#43a047;font-weight:500">Remuxing TS→MP4</span>
-          <span id="remuxPct" style="font-size:.82em;font-weight:600;min-width:32px;text-align:right">0%</span>
-        </div>
-        <div style="background:#e0e0e0;border-radius:4px;height:8px;overflow:hidden;margin-top:3px">
-          <div id="remuxProgBar" style="background:#43a047;height:100%;width:0%;transition:width .5s;border-radius:4px"></div>
-        </div>
-        <div id="remuxFile" style="font-size:.75em;color:#888;margin-top:2px"></div>
-      </div>
-    </div>
-
-    <!-- Storage indicator -->
-    <div class="card" id="storageCard">
-      <div class="flex-between">
-        <div>
-          <span id="storageDot" class="status-dot idle"></span>
-          <strong id="storageLabel">Storage: Local SD</strong>
-        </div>
-        <div style="display:flex;align-items:center;gap:5px">
-          <span class="text-muted mono" id="storageFree"></span>
-          <span style="font-size:.78em;color:#888;margin-left:2px">Use:</span>
-          <button id="btnStorageUsb" class="btn-sm btn-primary" onclick="setStoragePref('usb')" title="Save recordings to USB drive when available">USB</button>
-          <button id="btnStorageSd" class="btn-sm" onclick="setStoragePref('local')" title="Always save recordings to SD card">SD</button>
-        </div>
-      </div>
-      <div class="text-muted mt-8" id="storageDetail"></div>
-    </div>
-
-    <!-- Auto-start recipe selector -->
-    <div class="card">
-      <div class="form-row" style="margin-bottom:4px">
-        <div class="form-group">
-          <label>Auto-Start Recipe</label>
-          <select id="autoRecipeSelect" onchange="setActiveRecipe()">
-            <option value="">None (manual only)</option>
-          </select>
-        </div>
-        <span class="text-muted" id="autoRecipeSaved" style="font-size:.8em;display:none">Saved</span>
-        <button class="btn-primary btn-sm" onclick="startSchedule()" id="btnSchedule">Start Schedule</button>
-        <button class="btn-sm" onclick="stopSchedule()" id="btnScheduleStop" disabled>Cancel</button>
-      </div>
-      <div class="text-muted mt-8" id="scheduleStatus"></div>
-    </div>
-
-    <!-- Snapshot -->
-    <div class="card card-grow">
-      <div class="flex-between mb-8">
-        <h3>Camera Preview</h3>
-        <div style="display:flex;gap:5px">
-          <button class="btn-sm" onclick="cycleRotation()">Rotate <span id="rotLabel">0</span>&deg;</button>
-        </div>
-      </div>
-      <div class="snapshot-area" id="snapArea">
-        <div class="snapshot-placeholder" id="snapPlaceholder">Waiting for camera...</div>
-        <video id="liveVideo" class="live-video hidden" playsinline autoplay muted></video>
-        <div class="snapshot-status hidden" id="liveStatus"></div>
-      </div>
-    </div>
-
-  </div><!-- end left col -->
-
-  <!-- RIGHT COLUMN -->
-  <div class="status-col">
+  <!-- Row 1: Manual controls (left) + 4k Cam control (right) -->
+  <div class="status-controls-row">
 
     <!-- Manual controls -->
     <div class="card">
@@ -408,11 +352,11 @@ body.calib-tab .file-manager-wrapper{display:none}
       </div>
     </div>
 
-    <!-- RadCam control (LED + Focus/Zoom tabs); DropCam title stays Adjustments -->
+    <!-- 4k Cam control (LED + Focus/Zoom tabs); DropCam title stays Adjustments -->
     <div class="card">
       <div class="flex-between mb-8">
         <h3 class="dropcam-only">Adjustments</h3>
-        <h3 class="radcam-only">RadCam control</h3>
+        <h3 class="radcam-only">4k Cam control</h3>
         <div class="subtabs">
           <button class="subtab active" data-subtab="led" onclick="switchSubtab(this)">LED</button>
           <button class="subtab radcam-only" data-subtab="focuszoom" onclick="switchSubtab(this)">Focus / Zoom</button>
@@ -423,10 +367,12 @@ body.calib-tab .file-manager-wrapper{display:none}
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <button type="button" id="btnAwbGreen" class="btn-sm" onclick="setAwbScene('green')" title="Green-water AWB scene (awb_auto_mode=0)">Green</button>
           <button type="button" id="btnAwbBlue" class="btn-sm btn-primary" onclick="setAwbScene('blue')" title="Blue-water AWB scene (awb_auto_mode=1)">Blue</button>
+          <button type="button" id="btnAwbTrigger" class="btn-sm btn-primary" onclick="triggerAwbOnce()" title="Fire a one-push AWB (onceAWB=1) on the camera immediately. Independent of recipes.">Trigger AWB</button>
           <span id="awbSceneStatus" class="text-muted" style="font-size:.8em"></span>
         </div>
         <div class="text-muted" style="font-size:.8em;margin-top:4px">
           Sets Auto WB scene before each one-push. Saved across reboots (default Blue).
+          <strong>Trigger AWB</strong> fires <span class="mono">onceAWB=1</span> immediately; recipes still handle interval AWB independently.
         </div>
       </div>
       <div class="subtab-content active" id="subtab-led">
@@ -489,67 +435,143 @@ body.calib-tab .file-manager-wrapper{display:none}
       </div>
     </div>
 
-    <!-- Environment sensors (Bar30 + Celsius/Celsius 2) — only shown when detected -->
-    <div class="card hidden" id="envCard">
-      <div class="flex-between mb-8">
-        <h3>Environment</h3>
-        <span id="envSensorLabel" class="text-muted" style="font-size:.8em"></span>
-      </div>
-      <div class="telem-grid mt-8">
-        <div class="telem-item hidden" id="envDepthItem"><div class="telem-label">Depth (salt)</div><div class="telem-value" id="tEnvDepth">--</div></div>
-        <div class="telem-item hidden" id="envPressItem"><div class="telem-label">Pressure</div><div class="telem-value" id="tEnvPress">--</div></div>
-        <div class="telem-item hidden" id="envTempItem"><div class="telem-label">Water Temp</div><div class="telem-value" id="tEnvTemp">--</div></div>
-        <div class="telem-item hidden" id="envBar30TempItem"><div class="telem-label">Bar30 Temp</div><div class="telem-value" id="tEnvBar30Temp">--</div></div>
-      </div>
-    </div>
+  </div><!-- end status-controls-row -->
 
-    <!-- Telemetry -->
+  <!-- Row 2: Recording status | Storage | Auto-start recipe -->
+  <div class="status-summary-row">
+
     <div class="card">
-      <h3>System Telemetry</h3>
-      <div class="telem-grid mt-8">
-        <div class="telem-item"><div class="telem-label">CPU Temp</div><div class="telem-value" id="tCpuTemp">--</div></div>
-        <div class="telem-item"><div class="telem-label">CPU Voltage</div><div class="telem-value" id="tCpuVolt">--</div></div>
-        <div class="telem-item"><div class="telem-label">CPU Clock</div><div class="telem-value" id="tCpuClk">--</div></div>
-        <div class="telem-item"><div class="telem-label">Load (1m)</div><div class="telem-value" id="tCpuLoad">--</div></div>
-        <div class="telem-item"><div class="telem-label">Disk Free</div><div class="telem-value" id="tDisk">--</div></div>
-        <div class="telem-item"><div class="telem-label">USB Disk</div><div class="telem-value" id="tUsbDisk">--</div></div>
-        <div class="telem-item"><div class="telem-label">System Time</div><div class="telem-value" id="tSysTime" style="font-size:.8em">--</div></div>
-        <div class="telem-item"><div class="telem-label">Time Synced</div><div class="telem-value" id="tSync">--</div></div>
-        <div class="telem-item"><div class="telem-label">Status LED</div><div class="telem-value" id="tLed">--</div></div>
-        <div class="telem-item"><div class="telem-label">Servo</div><div class="telem-value" id="tServo">--</div></div>
-        <div class="telem-item"><div class="telem-label">Lumen Light</div><div class="telem-value" id="tLight">--</div></div>
-        <div class="telem-item"><div class="telem-label">Release Servo</div><div class="telem-value" id="tRelease">--</div></div>
-        <div class="telem-item"><div class="telem-label">Winch State</div><div class="telem-value" id="tWinchState">--</div></div>
-        <div class="telem-item"><div class="telem-label">Winch Turns</div><div class="telem-value" id="tWinchTurns">--</div></div>
-        <div class="telem-item radcam-only"><div class="telem-label">Focus</div><div class="telem-value" id="tFocus">--</div></div>
-        <div class="telem-item radcam-only"><div class="telem-label">Zoom</div><div class="telem-value" id="tZoom">--</div></div>
-        <div class="telem-item"><div class="telem-label">Battery V</div><div class="telem-value" id="tBattV">--</div></div>
-        <div class="telem-item"><div class="telem-label">Battery SOC</div><div class="telem-value" id="tBattSoc">--</div></div>
-        <div class="telem-item"><div class="telem-label">Battery Current</div><div class="telem-value" id="tBattI">--</div></div>
-        <div class="telem-item"><div class="telem-label">Awake</div><div class="telem-value" id="tBattAge" style="font-size:.85em">--</div></div>
-        <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
-      </div>
-    </div>
-
-    <!-- Recorded files -->
-    <div class="card" style="margin-bottom:0">
       <div class="flex-between">
-        <div style="display:flex;align-items:center;gap:7px">
-          <input type="checkbox" id="selectAllRec" onchange="toggleSelectAll(this)" title="Select all" style="width:14px;height:14px;cursor:pointer;accent-color:#e53935">
-          <h3 style="margin:0">Recorded Files</h3>
+        <div><span class="status-dot idle" id="statusDot"></span><strong id="statusText">Idle</strong>
+          <span class="mono" id="durationText" style="margin-left:8px;color:#666"></span>
         </div>
-        <div style="display:flex;gap:4px">
-          <button class="btn-primary btn-sm" id="btnProcessSelected" onclick="processSelectedRecordings()" disabled>Process</button>
-          <button class="btn-danger btn-sm" id="btnDeleteSelected" onclick="deleteSelectedRecordings()" disabled>Delete Selected</button>
+        <div style="display:flex;gap:6px">
+          <button class="btn-start" id="btnStart" onclick="manualStart()">Start</button>
+          <button class="btn-stop" id="btnStop" onclick="manualStop()" disabled>Stop</button>
         </div>
       </div>
-      <ul id="videoList" style="list-style:none;margin-top:6px"></ul>
-      <div id="noFiles" class="text-muted mt-8">No recordings yet.</div>
+      <div class="mt-8 text-muted" id="fileSizeText"></div>
+      <div id="recErrorText" class="hidden" style="margin-top:8px;padding:8px 10px;border-radius:6px;background:#fdecea;border:1px solid #f5c6cb;color:#b71c1c;font-size:.85em;line-height:1.35"></div>
+      <div id="remuxBar" class="hidden" style="margin-top:6px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="remuxStage" style="font-size:.82em;color:#43a047;font-weight:500">Remuxing TS→MP4</span>
+          <span id="remuxPct" style="font-size:.82em;font-weight:600;min-width:32px;text-align:right">0%</span>
+        </div>
+        <div style="background:#e0e0e0;border-radius:4px;height:8px;overflow:hidden;margin-top:3px">
+          <div id="remuxProgBar" style="background:#43a047;height:100%;width:0%;transition:width .5s;border-radius:4px"></div>
+        </div>
+        <div id="remuxFile" style="font-size:.75em;color:#888;margin-top:2px"></div>
+      </div>
     </div>
 
-  </div><!-- end right col -->
+    <!-- Storage indicator -->
+    <div class="card" id="storageCard">
+      <div class="flex-between">
+        <div>
+          <span id="storageDot" class="status-dot idle"></span>
+          <strong id="storageLabel">Storage: Local SD</strong>
+        </div>
+        <div style="display:flex;align-items:center;gap:5px">
+          <span class="text-muted mono" id="storageFree"></span>
+          <span style="font-size:.78em;color:#888;margin-left:2px">Use:</span>
+          <button id="btnStorageUsb" class="btn-sm btn-primary" onclick="setStoragePref('usb')" title="Save recordings to USB drive when available">USB</button>
+          <button id="btnStorageSd" class="btn-sm" onclick="setStoragePref('local')" title="Always save recordings to SD card">SD</button>
+        </div>
+      </div>
+      <div class="text-muted mt-8" id="storageDetail"></div>
+    </div>
 
-</div><!-- end status-grid -->
+    <!-- Auto-start recipe selector -->
+    <div class="card">
+      <div class="form-row" style="margin-bottom:4px">
+        <div class="form-group">
+          <label>Auto-Start Recipe</label>
+          <select id="autoRecipeSelect" onchange="setActiveRecipe()">
+            <option value="">None (manual only)</option>
+          </select>
+        </div>
+        <span class="text-muted" id="autoRecipeSaved" style="font-size:.8em;display:none">Saved</span>
+        <button class="btn-primary btn-sm" onclick="startSchedule()" id="btnSchedule">Start Schedule</button>
+        <button class="btn-sm" onclick="stopSchedule()" id="btnScheduleStop" disabled>Cancel</button>
+      </div>
+      <div class="text-muted mt-8" id="scheduleStatus"></div>
+    </div>
+
+  </div><!-- end status-summary-row -->
+
+  <!-- Row 3: Full-width live preview -->
+  <div class="card status-preview-card">
+    <div class="flex-between mb-8">
+      <h3>Camera Preview</h3>
+      <div style="display:flex;gap:5px">
+        <button class="btn-sm" onclick="cycleRotation()">Rotate <span id="rotLabel">0</span>&deg;</button>
+      </div>
+    </div>
+    <div class="snapshot-area" id="snapArea">
+      <div class="snapshot-placeholder" id="snapPlaceholder">Waiting for camera...</div>
+      <video id="liveVideo" class="live-video hidden" playsinline autoplay muted></video>
+      <div class="snapshot-status hidden" id="liveStatus"></div>
+    </div>
+  </div>
+
+  <!-- Row 4: Environment sensors (Bar30 + Celsius/Celsius 2) — only shown when detected -->
+  <div class="card hidden" id="envCard">
+    <div class="flex-between mb-8">
+      <h3>Environment</h3>
+      <span id="envSensorLabel" class="text-muted" style="font-size:.8em"></span>
+    </div>
+    <div class="telem-grid mt-8">
+      <div class="telem-item hidden" id="envDepthItem"><div class="telem-label">Depth (salt)</div><div class="telem-value" id="tEnvDepth">--</div></div>
+      <div class="telem-item hidden" id="envPressItem"><div class="telem-label">Pressure</div><div class="telem-value" id="tEnvPress">--</div></div>
+      <div class="telem-item hidden" id="envTempItem"><div class="telem-label">Water Temp</div><div class="telem-value" id="tEnvTemp">--</div></div>
+      <div class="telem-item hidden" id="envBar30TempItem"><div class="telem-label">Bar30 Temp</div><div class="telem-value" id="tEnvBar30Temp">--</div></div>
+    </div>
+  </div>
+
+  <!-- Row 5: Telemetry (full width) -->
+  <div class="card">
+    <h3>System Telemetry</h3>
+    <div class="telem-grid mt-8">
+      <div class="telem-item"><div class="telem-label">CPU Temp</div><div class="telem-value" id="tCpuTemp">--</div></div>
+      <div class="telem-item"><div class="telem-label">CPU Voltage</div><div class="telem-value" id="tCpuVolt">--</div></div>
+      <div class="telem-item"><div class="telem-label">CPU Clock</div><div class="telem-value" id="tCpuClk">--</div></div>
+      <div class="telem-item"><div class="telem-label">Load (1m)</div><div class="telem-value" id="tCpuLoad">--</div></div>
+      <div class="telem-item"><div class="telem-label">Disk Free</div><div class="telem-value" id="tDisk">--</div></div>
+      <div class="telem-item"><div class="telem-label">USB Disk</div><div class="telem-value" id="tUsbDisk">--</div></div>
+      <div class="telem-item"><div class="telem-label">System Time</div><div class="telem-value" id="tSysTime" style="font-size:.8em">--</div></div>
+      <div class="telem-item"><div class="telem-label">Time Synced</div><div class="telem-value" id="tSync">--</div></div>
+      <div class="telem-item"><div class="telem-label">Status LED</div><div class="telem-value" id="tLed">--</div></div>
+      <div class="telem-item"><div class="telem-label">Servo</div><div class="telem-value" id="tServo">--</div></div>
+      <div class="telem-item"><div class="telem-label">Lumen Light</div><div class="telem-value" id="tLight">--</div></div>
+      <div class="telem-item"><div class="telem-label">Release Servo</div><div class="telem-value" id="tRelease">--</div></div>
+      <div class="telem-item"><div class="telem-label">Winch State</div><div class="telem-value" id="tWinchState">--</div></div>
+      <div class="telem-item"><div class="telem-label">Winch Turns</div><div class="telem-value" id="tWinchTurns">--</div></div>
+      <div class="telem-item radcam-only"><div class="telem-label">Focus</div><div class="telem-value" id="tFocus">--</div></div>
+      <div class="telem-item radcam-only"><div class="telem-label">Zoom</div><div class="telem-value" id="tZoom">--</div></div>
+      <div class="telem-item"><div class="telem-label">Battery V</div><div class="telem-value" id="tBattV">--</div></div>
+      <div class="telem-item"><div class="telem-label">Battery SOC</div><div class="telem-value" id="tBattSoc">--</div></div>
+      <div class="telem-item"><div class="telem-label">Battery Current</div><div class="telem-value" id="tBattI">--</div></div>
+      <div class="telem-item"><div class="telem-label">Awake</div><div class="telem-value" id="tBattAge" style="font-size:.85em">--</div></div>
+      <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
+    </div>
+  </div>
+
+  <!-- Row 6: Recorded files (full width) -->
+  <div class="card" style="margin-bottom:0">
+    <div class="flex-between">
+      <div style="display:flex;align-items:center;gap:7px">
+        <input type="checkbox" id="selectAllRec" onchange="toggleSelectAll(this)" title="Select all" style="width:14px;height:14px;cursor:pointer;accent-color:#e53935">
+        <h3 style="margin:0">Recorded Files</h3>
+      </div>
+      <div style="display:flex;gap:4px">
+        <button class="btn-primary btn-sm" id="btnProcessSelected" onclick="processSelectedRecordings()" disabled>Process</button>
+        <button class="btn-danger btn-sm" id="btnDeleteSelected" onclick="deleteSelectedRecordings()" disabled>Delete Selected</button>
+      </div>
+    </div>
+    <ul id="videoList" style="list-style:none;margin-top:6px"></ul>
+    <div id="noFiles" class="text-muted mt-8">No recordings yet.</div>
+  </div>
+
 </div>
 
 <!-- ═══════════════ RECIPES TAB ═══════════════ -->
@@ -640,7 +662,7 @@ body.calib-tab .file-manager-wrapper{display:none}
     </div>
 
     <div class="radcam-only" id="recipeFocusZoomSection">
-      <h3>RadCam Optics</h3>
+      <h3>4k Cam Optics</h3>
       <div class="form-row">
         <div class="form-group">
           <label>Focus: <span id="rRecFocusVal" class="mono">900</span> us</label>
@@ -668,13 +690,13 @@ body.calib-tab .file-manager-wrapper{display:none}
         </div>
       </div>
       <div class="text-muted" style="font-size:.82em">
-        Re-triggers RadCam white balance via <span class="mono">setImageAdjustmentEx</span> (<span class="mono">onceAWB=1</span>) while recording — same path as radcam-manager / towfish.
-        Water scene (Green/Blue) is global — set it on the Status tab under RadCam control; it is applied on boot and before every one-push.
+        Re-triggers 4k Cam white balance via <span class="mono">setImageAdjustmentEx</span> (<span class="mono">onceAWB=1</span>) while recording — same path as radcam-manager / towfish.
+        Water scene (Green/Blue) is global — set it on the Status tab under 4k Cam control; it is applied on boot and before every one-push.
       </div>
     </div>
 
     <div class="radcam-only" id="focusFinderSection">
-      <h3>Focus Finder (RadCam)</h3>
+      <h3>Focus Finder (4k Cam)</h3>
       <div class="form-row">
         <div class="form-group narrow">
           <label><input type="checkbox" id="rFocusFinder" onchange="toggleFocusFinderFields()"> Enable Focus Finder</label>
@@ -800,7 +822,7 @@ body.calib-tab .file-manager-wrapper{display:none}
   </div>
 </div>
 
-<!-- ═══════════════ LENS CALIBRATION TAB (RadCam) ═══════════════ -->
+<!-- ═══════════════ LENS CALIBRATION TAB (4k Cam) ═══════════════ -->
 <div class="tab-content" id="tab-calibration">
   <div class="calib-layout">
     <div class="card calib-preview-card">
@@ -1119,6 +1141,28 @@ async function setAwbScene(scene) {
       ? ((d.scene === 'green' ? 'Green' : 'Blue') + ' applied')
       : ((d.scene === 'green' ? 'Green' : 'Blue') + ' saved');
   }
+}
+
+/* One-push AWB trigger — independent of any recipe. Fires onceAWB=1 on the
+   camera only when the operator presses the button; nothing is sent
+   otherwise. The button is disabled just while the request is in flight. */
+async function triggerAwbOnce() {
+  const btn = document.getElementById('btnAwbTrigger');
+  const st = document.getElementById('awbSceneStatus');
+  if (!btn) return;
+  const prevLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Triggering…';
+  if (st) st.textContent = 'AWB firing…';
+  const d = await api('/awb_trigger', {method:'POST'});
+  btn.disabled = false;
+  btn.textContent = prevLabel;
+  if (!d || !d.success) {
+    if (st) st.textContent = (d && d.message) ? ('AWB failed: ' + d.message) : 'AWB failed';
+    return;
+  }
+  const sceneLabel = d.scene === 'green' ? 'Green' : 'Blue';
+  if (st) st.textContent = 'AWB fired (' + sceneLabel + ')';
 }
 
 async function setStoragePref(pref) {
@@ -1786,17 +1830,18 @@ function switchSubtab(btn) {
   parent.querySelector('#subtab-' + btn.dataset.subtab).classList.add('active');
 }
 
-/* ── RadCam UI theme (name stays DropCam) ─── */
+/* ── 4k Cam UI theme (extension name stays DropCam) ─── */
 function enterRadcamUi() {
   document.body.classList.add('radcam');
   // Relative path so the logo loads under /extensionv2/dropcam/ as well as :5423/.
-  // Official RadCam Manager store icon (extension_logo.png from radcam-manager).
+  // The 4k Cam logo is itself the wordmark, so it stands alone in the title
+  // bar (alt text is the plaintext fallback if the image fails to load).
   document.getElementById('appTitle').innerHTML =
-    '<img src="static/radcam_logo.png" alt="" class="radcam-logo">DropCam';
-  document.title = 'DropCam';
+    '<img src="static/4k_cam_logo.png" alt="4k Cam" class="radcam-logo">';
+  document.title = '4k Cam';
 }
 
-/* ── Detect RadCam (manual) ───────────────── */
+/* ── Detect 4k Cam (manual) ───────────────── */
 async function detectRadcam() {
   const btn = document.getElementById('btnDetectRadcam');
   btn.disabled = true;
@@ -1812,9 +1857,9 @@ async function detectRadcam() {
     loadRecipes();
     loadLensCalibration();
   } else {
-    alert(d.message || 'RadCam not detected');
+    alert(d.message || '4k Cam not detected');
     btn.disabled = false;
-    btn.textContent = 'Detect RadCam';
+    btn.textContent = 'Detect 4k Cam';
   }
 }
 
@@ -2630,11 +2675,11 @@ function loadSetup() {
   <tr><td>RGB Status LED (WS2812)</td><td>GPIO 20 (SPI1 MOSI)</td><td>Pin 38</td><td>Single NeoPixel data line to J104 pin 3; <code>/dev/spidev1.0</code> provided by BlueOS's default <code>dtoverlay=spi1-3cs</code></td></tr>
   <tr><td>Release rotation sensor</td><td>GPIO 10</td><td>Pin 19</td><td>Falling-edge alert via lgpio; J104 pin 4</td></tr>
   <tr><td>Lumen Light</td><td>GPIO 13 (PWM1)</td><td>Pin 33</td><td>1000-2000 &mu;s servo PWM. Modes: always on, pause points only, or snapshot only</td></tr>
-  <tr><td>Camera Focus</td><td>PCA9685 ch 4</td><td>J105 pin 13</td><td>RadCam focus 870-2130 &mu;s</td></tr>
-  <tr><td>Zoom</td><td>PCA9685 ch 5</td><td>J105</td><td>RadCam zoom 935-1850 &mu;s</td></tr>
+  <tr><td>Camera Focus</td><td>PCA9685 ch 4</td><td>J105 pin 13</td><td>4k Cam focus 870-2130 &mu;s</td></tr>
+  <tr><td>Zoom</td><td>PCA9685 ch 5</td><td>J105</td><td>4k Cam zoom 935-1850 &mu;s</td></tr>
   <tr><td>Pan</td><td>PCA9685 ch 6</td><td>J105</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
   <tr><td>External Servo</td><td>PCA9685 ch 3</td><td>J105</td><td>1000-2000 &mu;s servo-style PWM</td></tr>
-  <tr><td>Camera Tilt Servo</td><td>PCA9685 ch 0</td><td>J105</td><td>DropCam 1000-2000 &mu;s; RadCam tilt 865-2250 &mu;s</td></tr>
+  <tr><td>Camera Tilt Servo</td><td>PCA9685 ch 0</td><td>J105</td><td>DropCam 1000-2000 &mu;s; 4k Cam tilt 865-2250 &mu;s</td></tr>
   <tr><td>USB Camera</td><td colspan="2">/dev/video2</td><td>H264 USB camera (1080p 30fps)</td></tr>
 </table>
 <p>All servo/light/PWM signals share a common ground with the Pi. Servos, lights, and motors require an external 5V power source appropriate for their load; do not power them from the Pi's GPIO header.</p>

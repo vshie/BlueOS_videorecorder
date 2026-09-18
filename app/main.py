@@ -40,6 +40,8 @@ from scheduler import (
     normalize_awb_scene,
     DEFAULT_AWB_SCENE,
     AWB_SCENE_MODE,
+    RADCAM_AWB_URL,
+    RADCAM_AWB_BODY,
 )
 from system_telemetry import (
     get_cpu_temperature, get_cpu_voltage, get_cpu_clock_mhz,
@@ -492,7 +494,7 @@ radcam_awb_scene = normalize_awb_scene(_cfg.get("radcam_awb_scene", DEFAULT_AWB_
 def create_ass_file(video_path):
     base = os.path.splitext(video_path)[0]
     ass_path = base + ".ass"
-    title = "RadCam Telemetry" if radcam_mode else "DropCam Telemetry"
+    title = "4k Cam Telemetry" if radcam_mode else "DropCam Telemetry"
     # ASS Fontsize/margins are in PlayRes pixels. 4K uses 2× the 1080p
     # style so on-screen subtitle size matches DropCam footage.
     if radcam_mode:
@@ -731,14 +733,14 @@ def _gst_startup_error(stderr_text):
 def _humanize_gst_error(msg):
     """Map a raw GStreamer error line to a short, operator-friendly hint."""
     low = msg.lower()
-    cam = ("RadCam RTSP stream"
+    cam = ("4k Cam RTSP stream"
            if radcam_mode else
            "USB camera connection/power")
     if ("could not read from resource" in low
             or "failed to allocate a buffer" in low
             or "internal data stream error" in low):
         if radcam_mode:
-            return ("Camera stopped delivering video. Check the RadCam "
+            return ("Camera stopped delivering video. Check the 4k Cam "
                     "network link and that stream_0 is reachable "
                     f"({RTSP_ENDPOINT}).")
         return ("Camera stopped delivering video. Check the USB camera "
@@ -952,7 +954,7 @@ def recording_health_watchdog():
                         hw.led_warning()
                     if file_stall_count >= STALL_ABORT_INTERVALS:
                         secs = file_stall_count * WATCHDOG_INTERVAL_S
-                        hint = ("RadCam RTSP link"
+                        hint = ("4k Cam RTSP link"
                                 if radcam_mode else
                                 "camera/USB connection")
                         _abort_recording(
@@ -967,7 +969,7 @@ def recording_health_watchdog():
 
             if gst_process and gst_process.poll() is not None:
                 log_event("process_died", f"GStreamer exit code {gst_process.returncode}")
-                hint = ("RadCam RTSP link"
+                hint = ("4k Cam RTSP link"
                         if radcam_mode else
                         "camera/USB connection")
                 _abort_recording(
@@ -2246,7 +2248,7 @@ def route_radcam_awb_scene_get():
 @app.route("/radcam_awb_scene", methods=["POST"])
 def route_radcam_awb_scene_set():
     """Set Green/Blue water WB scene (persisted). Applied to camera immediately
-    in RadCam mode so the next one-push uses the selected scene."""
+    in 4k Cam mode so the next one-push uses the selected scene."""
     data = request.get_json(silent=True) or {}
     raw = data.get("scene", data.get("radcam_awb_scene"))
     if raw is None:
@@ -2260,6 +2262,62 @@ def route_radcam_awb_scene_set():
         "awb_auto_mode": AWB_SCENE_MODE[scene],
         "applied_to_camera": applied,
     })
+
+
+# ── Manual one-push AWB trigger (Status-tab button, standalone) ──────────
+#
+# Unlike the recipe interval AWB (scheduler._awb_loop), this endpoint fires
+# a single onceAWB=1 to the camera only when explicitly invoked from the UI.
+# It does not spawn a recording, does not start any background loop, and
+# does not depend on scheduler state — if nothing calls this route, nothing
+# is sent. Applies the persisted water scene first so the one-push uses the
+# currently selected Green/Blue mode.
+
+@app.route("/awb_trigger", methods=["POST"])
+def route_awb_trigger():
+    if not radcam_mode:
+        return jsonify({
+            "success": False,
+            "message": "4k Cam not active — one-push AWB is only available in 4k Cam mode",
+        }), 400
+    import urllib.request
+    import urllib.error
+    scene = normalize_awb_scene(radcam_awb_scene)
+    scene_applied = apply_awb_scene(scene)
+    try:
+        req = urllib.request.Request(
+            RADCAM_AWB_URL,
+            data=json.dumps(RADCAM_AWB_BODY).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body_text = (resp.read() or b"").decode("utf-8", errors="replace").strip()
+        code = None
+        try:
+            code = (json.loads(body_text) or {}).get("code")
+        except Exception:
+            pass
+        if code is None or code == 0:
+            logger.info(
+                "Manual AWB trigger OK scene=%s (scene_applied=%s)",
+                scene, scene_applied,
+            )
+            return jsonify({
+                "success": True,
+                "scene": scene,
+                "awb_auto_mode": AWB_SCENE_MODE[scene],
+                "scene_applied": scene_applied,
+            })
+        msg = f"camera returned code {code}"
+        logger.warning("Manual AWB trigger failed: %s", msg)
+        return jsonify({"success": False, "message": msg, "scene": scene}), 502
+    except urllib.error.HTTPError as e:
+        logger.warning("Manual AWB trigger HTTP error: %s", e)
+        return jsonify({"success": False, "message": f"HTTP {e.code}", "scene": scene}), 502
+    except Exception as e:
+        logger.warning("Manual AWB trigger failed: %s", e)
+        return jsonify({"success": False, "message": str(e), "scene": scene}), 502
 
 
 # ── Host setup (DeckHand config.txt + pinmux verification) ──────────────
@@ -2771,11 +2829,11 @@ def route_radcam_lens_set():
 def route_detect_radcam():
     global radcam_mode, radcam_awb_scene
     if radcam_mode:
-        return jsonify({"success": True, "message": "Already in RadCam mode"})
+        return jsonify({"success": True, "message": "Already in 4k Cam mode"})
     if not _ping_radcam():
-        return jsonify({"success": False, "message": f"RadCam not reachable at {RADCAM_IP}"}), 404
+        return jsonify({"success": False, "message": f"4k Cam not reachable at {RADCAM_IP}"}), 404
     radcam_mode = True
-    logger.info(f"Manual RadCam detection succeeded — switching to RadCam mode")
+    logger.info(f"Manual 4k Cam detection succeeded — switching to 4k Cam mode")
     cfg = load_config()
     hw.set_aux_pwm("focus", cfg.get("radcam_focus_us", 900))
     hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 935))
@@ -2790,7 +2848,7 @@ def route_detect_radcam():
     except Exception:
         pass
     register_service()
-    return jsonify({"success": True, "message": "RadCam detected, mode switched"})
+    return jsonify({"success": True, "message": "4k Cam detected, mode switched"})
 
 
 # ── Recipes API ──────────────────────────────────────────────────────────

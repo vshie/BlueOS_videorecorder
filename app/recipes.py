@@ -185,7 +185,7 @@ DEFAULT_RECIPES = [
 RADCAM_DEFAULT_RECIPES = [
     {
         "id": "radcam-focus-finder",
-        "name": "RadCam Focus Finder",
+        "name": "4k Cam Focus Finder",
         "mode": "video",
         "still_interval_s": 1.0,
         "duration_minutes": 2,
