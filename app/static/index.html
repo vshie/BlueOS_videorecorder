@@ -93,6 +93,11 @@ label{font-size:.84em;color:#555;display:block;margin-bottom:2px}
 
 /* Slider */
 input[type=range]{width:100%;margin:3px 0;accent-color:#1a73e8}
+/* Tilt sliders run right = up, matching the way the camera actually moves.
+   direction:rtl flips the control's own axis, so dragging and the arrow keys
+   agree; a transform:scaleX(-1) mirror only repaints it and leaves the arrow
+   keys running backwards. Values stay raw PWM microseconds either way. */
+input[type=range].tilt-reversed{direction:rtl}
 
 /* Live preview — height fills remaining card space; min-height guards against tiny column */
 .snapshot-area{position:relative;text-align:center;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:6px;background:#e8e8e8}
@@ -314,7 +319,7 @@ body.calib-tab .file-manager-wrapper{display:none}
         <div class="form-row mt-8">
           <div class="form-group">
             <label>Tilt Servo: <span id="servoVal" class="mono">1500</span> us</label>
-            <input type="range" id="servoSlider" min="1000" max="2000" step="1" value="1500" oninput="setServo(this.value)">
+            <input type="range" id="servoSlider" class="tilt-reversed" min="1000" max="2000" step="1" value="1500" oninput="setServo(this.value)">
           </div>
           <div class="form-group narrow">
             <label>Lumen Light</label>
@@ -642,11 +647,11 @@ body.calib-tab .file-manager-wrapper{display:none}
     <div class="form-row">
       <div class="form-group">
         <label>Start Position: <span id="rServoStartVal" class="mono">1500</span> us</label>
-        <input type="range" id="rServoStart" min="1000" max="2000" step="1" value="1500" oninput="previewServo(this.value,'rServoStartVal')">
+        <input type="range" id="rServoStart" class="tilt-reversed" min="1000" max="2000" step="1" value="1500" oninput="previewServo(this.value,'rServoStartVal')">
       </div>
       <div class="form-group" id="servoEndGroup">
         <label>End Position: <span id="rServoEndVal" class="mono">1500</span> us</label>
-        <input type="range" id="rServoEnd" min="1000" max="2000" step="1" value="1500" oninput="previewServo(this.value,'rServoEndVal')">
+        <input type="range" id="rServoEnd" class="tilt-reversed" min="1000" max="2000" step="1" value="1500" oninput="previewServo(this.value,'rServoEndVal')">
       </div>
     </div>
     <div id="sweepFields">
