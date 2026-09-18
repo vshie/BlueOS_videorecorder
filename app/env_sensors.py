@@ -323,9 +323,9 @@ class EnvSensorMonitor:
                 if tmp.init():
                     self._temp = tmp
                     self._temp_kind = "tmp119"
-                    self._temp_label = "Celsius 2 (TMP119)"
+                    self._temp_label = "Celsius (TMP119)"
                     logger.info(
-                        "Env sensors: Celsius 2 (TMP119) detected on i2c-1 @ 0x48"
+                        "Env sensors: Celsius (TMP119) detected on i2c-1 @ 0x48"
                     )
             except Exception as e:
                 logger.debug("Env sensors: TMP119 probe failed: %s", e)

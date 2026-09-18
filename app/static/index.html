@@ -514,7 +514,7 @@ body.calib-tab .file-manager-wrapper{display:none}
     </div>
   </div>
 
-  <!-- Row 4: Environment sensors (Bar30 + Celsius/Celsius 2) — only shown when detected -->
+  <!-- Row 4: Environment sensors (Bar30 + Celsius: TMP119 or TSYS01) — only shown when detected -->
   <div class="card hidden" id="envCard">
     <div class="flex-between mb-8">
       <h3>Environment</h3>
@@ -1291,7 +1291,7 @@ async function pollTelemetry() {
     battAgeEl.textContent = '--';
   }
 
-  // Environment sensors (Bar30 + Celsius/Celsius 2). Slow-path update
+  // Environment sensors (Bar30 + Celsius: TMP119 or TSYS01). Slow-path update
   // from /telemetry; a faster pollEnv() loop drives the numbers at 2 Hz.
   updateEnvCard(d.environment);
 
