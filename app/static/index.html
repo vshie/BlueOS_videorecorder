@@ -1834,11 +1834,10 @@ function switchSubtab(btn) {
 function enterRadcamUi() {
   document.body.classList.add('radcam');
   // Relative path so the logo loads under /extensionv2/dropcam/ as well as :5423/.
-  // The 4k Cam logo is itself the wordmark, so it stands alone in the title
-  // bar (alt text is the plaintext fallback if the image fails to load).
+  // The 4k Cam wordmark names the camera; the extension itself stays DropCam.
   document.getElementById('appTitle').innerHTML =
-    '<img src="static/4k_cam_logo.png" alt="4k Cam" class="radcam-logo">';
-  document.title = '4k Cam';
+    '<img src="static/4k_cam_logo.png" alt="4k Cam" class="radcam-logo">DropCam';
+  document.title = 'DropCam';
 }
 
 /* ── Detect 4k Cam (manual) ───────────────── */
