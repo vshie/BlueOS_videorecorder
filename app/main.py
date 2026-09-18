@@ -2096,6 +2096,8 @@ def route_telemetry():
         )
         data["success"] = True
         data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data["booting"] = not boot_complete.is_set()
+        data["boot_error"] = boot_error
         data["recording"] = recording
         data["light_on"] = hw.is_light_on()
         data["led_state"] = hw.get_led_state()
@@ -3160,6 +3162,13 @@ def _remux_orphaned_ts():
         logger.error(f"Orphaned TS remux scan failed: {e}")
 
 
+# Set once the boot sequence finishes, successfully or not. The server now
+# accepts requests while hardware is still coming up, so endpoints and the
+# UI need a way to tell "still initializing" from "ready".
+boot_complete = threading.Event()
+boot_error = None
+
+
 def _boot():
     """Initialize hardware, default recipes, USB storage, and auto-start if configured."""
     global storage_preference, radcam_awb_scene
@@ -3364,6 +3373,27 @@ def _shutdown_safely():
         pass
 
 
+def _boot_guarded():
+    """Run the boot sequence, recording how it finished.
+
+    Kept off the main thread so a peripheral that blocks forever can no
+    longer stop the server from starting.
+    """
+    global boot_error
+    try:
+        _boot()
+    except Exception as exc:
+        boot_error = str(exc)
+        logger.exception("Boot sequence failed")
+    finally:
+        boot_complete.set()
+
+
 if __name__ == "__main__":
-    _boot()
+    # Hardware init can block indefinitely on a wedged peripheral — a stuck
+    # SPI transfer is an uninterruptible kernel call that no timeout can
+    # break — and that used to take the web UI and the BlueOS service
+    # registration down with it, leaving no way to see what went wrong.
+    # Boot alongside the server so the interface is always reachable.
+    threading.Thread(target=_boot_guarded, name="boot", daemon=True).start()
     app.run(host="0.0.0.0", port=5423)

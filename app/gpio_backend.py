@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Any
 
@@ -742,6 +743,41 @@ class Ws2812SpiLedBackend(LedBackend):
 # MOSI). Anything else must go through Ws2812SpiLedBackend.
 _WS281X_CAPABLE_PINS = {10, 12, 13, 18, 19, 21}
 
+# An interrupted SPI transfer can leave the bcm2835aux controller wedged:
+# every later open/write on that bus blocks in an uninterruptible kernel
+# call, which no signal or timeout can break. Probe on a throwaway daemon
+# thread so a wedged bus costs a few seconds and the sim backend, instead
+# of hanging LED init — and with it the whole process — forever.
+_LED_PROBE_TIMEOUT_S = 5.0
+
+
+def _probe_backend(factory, timeout: float = _LED_PROBE_TIMEOUT_S) -> LedBackend:
+    """Build a LED backend, giving up if it blocks longer than ``timeout``.
+
+    The worker cannot be cancelled when it is stuck in the kernel, so it is
+    abandoned rather than joined. It is a daemon thread and holds no locks
+    the caller needs.
+    """
+    done: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            done["backend"] = factory()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller
+            done["error"] = exc
+
+    worker = threading.Thread(target=run, name="led-probe", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise TimeoutError(
+            f"SPI did not respond within {timeout:.0f}s (bus wedged by an "
+            "earlier transfer? a reboot clears it)"
+        )
+    if "error" in done:
+        raise done["error"]
+    return done["backend"]
+
 
 def make_led_backend(gpio: int, count: int, brightness: int) -> LedBackend:
     """Pick the best available WS2812 LED backend for the requested pin.
@@ -767,7 +803,9 @@ def make_led_backend(gpio: int, count: int, brightness: int) -> LedBackend:
     """
     if gpio == 20:
         try:
-            backend = Ws2812SpiLedBackend(count, spi_bus=1, spi_device=0)
+            backend = _probe_backend(
+                lambda: Ws2812SpiLedBackend(count, spi_bus=1, spi_device=0)
+            )
             logger.info("LED backend: %s (SPI1 MOSI / GPIO 20)", backend.name)
             return backend
         except Exception as exc:
@@ -786,7 +824,9 @@ def make_led_backend(gpio: int, count: int, brightness: int) -> LedBackend:
                 if name == "rpi_ws281x":
                     backend = Ws281xLedBackend(gpio, count, brightness)
                 else:
-                    backend = Ws2812SpiLedBackend(count, spi_bus=0, spi_device=0)
+                    backend = _probe_backend(
+                        lambda: Ws2812SpiLedBackend(count, spi_bus=0, spi_device=0)
+                    )
                 logger.info("LED backend: %s (legacy GPIO 10)", backend.name)
                 return backend
             except Exception as exc:
