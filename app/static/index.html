@@ -32,15 +32,29 @@ h3{font-size:.88em;margin:8px 0 4px;color:#555;text-transform:uppercase;letter-s
 .card{background:#fff;border-radius:8px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
 
 /* Full-width Status tab layout.
-   Row 1: two columns — left stacks Manual controls over recording / storage /
-   schedule, right holds the taller 4k Cam control card.
-   Row 2+: full-width live preview, environment, telemetry, recorded files. */
+   Row 1: two columns — left stacks recording / storage / schedule, right holds
+   the 4k Cam control card.
+   Row 2: full-width Manual controls (light + release servo), with the tilt
+   slider along its bottom edge.
+   Row 3+: full-width live preview, environment, telemetry, recorded files. */
 .status-controls-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start;margin-bottom:10px}
 .status-controls-row > .card{margin-bottom:0}
 @media(max-width:900px){.status-controls-row{grid-template-columns:1fr}}
 
 .status-controls-col{display:flex;flex-direction:column;gap:10px;min-width:0}
 .status-controls-col > .card{margin-bottom:0}
+
+/* Manual controls span the full width below the two columns. */
+.manual-controls-card .form-row{justify-content:space-between;gap:20px}
+.manual-controls-card .form-group{flex:0 1 auto}
+
+/* Tilt slider runs along the bottom of Manual controls, right above the live
+   preview, so the whole frame stays visible while tilting. */
+.manual-controls-card{margin-bottom:6px}
+.manual-controls-card .form-row{margin-bottom:10px}
+.tilt-row{display:flex;align-items:center;gap:10px}
+.tilt-row label{margin:0;white-space:nowrap}
+.tilt-row input[type=range]{flex:1;min-width:0}
 
 /* Full-width live preview: fills the extension window width, 16:9 aspect. */
 .status-preview-card{margin-bottom:10px}
@@ -313,50 +327,6 @@ body.calib-tab .file-manager-wrapper{display:none}
 
     <div class="status-controls-col">
 
-      <!-- Manual controls -->
-      <div class="card">
-        <h3>Manual Controls</h3>
-        <div class="form-row mt-8">
-          <div class="form-group">
-            <label>Tilt Servo: <span id="servoVal" class="mono">1500</span> us</label>
-            <input type="range" id="servoSlider" class="tilt-reversed" min="1000" max="2000" step="1" value="1500" oninput="setServo(this.value)">
-          </div>
-          <div class="form-group narrow">
-            <label>Lumen Light</label>
-            <div style="display:flex;gap:6px;align-items:center">
-              <input type="range" id="lightSlider" min="0" max="100" step="5" value="0" oninput="setLight(this.value)" style="width:80px">
-              <span class="mono" id="lightVal">0</span>%
-              <button class="btn-sm" id="lightToggle" onclick="toggleLight()">Off</button>
-            </div>
-          </div>
-          <div class="form-group narrow">
-            <label>Release Servo</label>
-            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-              <span class="mono" id="releaseVal">1500</span><span class="text-muted" style="font-size:.78em">us</span>
-              <button class="btn-sm" id="releaseWindBtn"
-                      onmousedown="releaseWindStart()" onmouseup="releaseWindStop()"
-                      onmouseleave="releaseWindStop()"
-                      ontouchstart="releaseWindStart();event.preventDefault()"
-                      ontouchend="releaseWindStop();event.preventDefault()"
-                      title="Press and hold: drives the release servo at 1000 us (wind) until released. Cancels any running recipe.">
-                Wind
-              </button>
-              <button class="btn-sm" id="releaseTestBtn" onclick="testRelease()"
-                      title="Click to fire a fast unwind (2000 us) that stops after 52 shaft rotations (60 s safety cap), the same behaviour the recipe uses. Click again to cancel. Cancels any running recipe.">
-                Test Release
-              </button>
-            </div>
-            <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-top:4px"
-                 title="Rotation-counted jog (~52 RPM). Closed-loop on the shaft sensor; safety-capped at 60 s.">
-              <input type="number" id="manualRevs" value="3" min="1" max="200" step="1" style="width:5em">
-              <span class="text-muted" style="font-size:.78em">rev</span>
-              <button class="btn-sm" id="manualUnwindBtn" onclick="manualJog('unwind')">Unwind N</button>
-              <button class="btn-sm" id="manualWindBtn"   onclick="manualJog('wind')">Wind N</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <div class="card">
         <div class="flex-between">
           <div><span class="status-dot idle" id="statusDot"></span><strong id="statusText">Idle</strong>
@@ -501,14 +471,55 @@ body.calib-tab .file-manager-wrapper{display:none}
 
   </div><!-- end status-controls-row -->
 
-  <!-- Row 3: Full-width live preview -->
-  <div class="card status-preview-card">
-    <div class="flex-between mb-8">
-      <h3>Camera Preview</h3>
-      <div style="display:flex;gap:5px">
-        <button class="btn-sm" onclick="cycleRotation()">Rotate <span id="rotLabel">0</span>&deg;</button>
+  <!-- Row 2: Manual controls, full width; tilt slider along its bottom edge -->
+  <div class="card manual-controls-card">
+    <h3>Manual Controls</h3>
+    <div class="form-row mt-8">
+      <div class="form-group">
+        <label>Lumen Light</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="range" id="lightSlider" min="0" max="100" step="5" value="0" oninput="setLight(this.value)" style="width:80px">
+          <span class="mono" id="lightVal">0</span>%
+          <button class="btn-sm" id="lightToggle" onclick="toggleLight()">Off</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Release Servo</label>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span class="mono" id="releaseVal">1500</span><span class="text-muted" style="font-size:.78em">us</span>
+          <button class="btn-sm" id="releaseWindBtn"
+                  onmousedown="releaseWindStart()" onmouseup="releaseWindStop()"
+                  onmouseleave="releaseWindStop()"
+                  ontouchstart="releaseWindStart();event.preventDefault()"
+                  ontouchend="releaseWindStop();event.preventDefault()"
+                  title="Press and hold: drives the release servo at 1000 us (wind) until released. Cancels any running recipe.">
+            Wind
+          </button>
+          <button class="btn-sm" id="releaseTestBtn" onclick="testRelease()"
+                  title="Click to fire a fast unwind (2000 us) that stops after 52 shaft rotations (60 s safety cap), the same behaviour the recipe uses. Click again to cancel. Cancels any running recipe.">
+            Test Release
+          </button>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-top:4px"
+             title="Rotation-counted jog (~52 RPM). Closed-loop on the shaft sensor; safety-capped at 60 s.">
+          <input type="number" id="manualRevs" value="3" min="1" max="200" step="1" style="width:5em">
+          <span class="text-muted" style="font-size:.78em">rev</span>
+          <button class="btn-sm" id="manualUnwindBtn" onclick="manualJog('unwind')">Unwind N</button>
+          <button class="btn-sm" id="manualWindBtn"   onclick="manualJog('wind')">Wind N</button>
+        </div>
       </div>
     </div>
+    <!-- Tilt sits at the bottom edge of this card, directly above the live
+         preview, so it can be adjusted with the whole frame in view. -->
+    <div class="tilt-row">
+      <label>Tilt Servo: <span id="servoVal" class="mono">1500</span> us</label>
+      <input type="range" id="servoSlider" class="tilt-reversed" min="1000" max="2000" step="1" value="1500" oninput="setServo(this.value)">
+      <button class="btn-sm" onclick="cycleRotation()" title="Rotate the camera preview">Rotate <span id="rotLabel">0</span>&deg;</button>
+    </div>
+  </div>
+
+  <!-- Row 3: Full-width live preview -->
+  <div class="card status-preview-card">
     <div class="snapshot-area" id="snapArea">
       <div class="snapshot-placeholder" id="snapPlaceholder">Waiting for camera...</div>
       <video id="liveVideo" class="live-video hidden" playsinline autoplay muted></video>
