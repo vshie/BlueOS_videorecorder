@@ -645,18 +645,20 @@ class BatteryMonitor:
                 return
             seen.append(path)
 
-        # Prefer the actual UART4 hardware, wherever the kernel put it.
-        uart4 = BatteryMonitor._find_pi_uart_by_mmio(("7e201800",))
-        if uart4:
-            if BatteryMonitor._uart4_logged != uart4:
-                logger.info("BMS auto-scan: resolved UART4 hardware to %s", uart4)
-                BatteryMonitor._uart4_logged = uart4
-            _add(uart4)
+        # Prefer the UART wired to GPIO 8/9, wherever the kernel put it:
+        # UART4 (7e201800) on a Pi 4, UART3 on the Pi 5's RP1 (3c000).
+        uart = BatteryMonitor._find_pi_uart_by_mmio(("7e201800", "3c000"))
+        if uart:
+            if BatteryMonitor._uart4_logged != uart:
+                logger.info("BMS auto-scan: resolved GPIO 8/9 UART hardware to %s", uart)
+                BatteryMonitor._uart4_logged = uart
+            _add(uart)
         elif BatteryMonitor._uart4_logged != "__missing__":
             logger.info(
-                "BMS auto-scan: UART4 MMIO (0x7e201800) not exposed as any "
-                "ttyAMA* — check that 'dtoverlay=uart4' is set in "
-                "/boot/config.txt on the host and the Pi has been rebooted."
+                "BMS auto-scan: GPIO 8/9 UART (Pi 4 UART4 0x7e201800 / Pi 5 "
+                "UART3 0x3c000) not exposed as any ttyAMA* — check that "
+                "'dtoverlay=uart4' ([pi4]) or 'dtoverlay=uart3-pi5' ([pi5]) is "
+                "set in config.txt on the host and the Pi has been rebooted."
             )
             BatteryMonitor._uart4_logged = "__missing__"
 

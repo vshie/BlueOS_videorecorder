@@ -3185,7 +3185,8 @@ def _boot():
     # /dev/ttyAMA*, or /dev/spidev1.0. GPIO 10 stays in its default
     # INPUT state (no alt) for the rotation sensor — lgpio's alert
     # claim in init_rotation_sensor() will configure the input mode
-    # itself. No-op on Pi 5 or dev laptops (returns False silently).
+    # itself. No-op on Pi 5 or dev laptops (returns False silently); on a
+    # Pi 5 the GPIO 11 -> RTS3 mux is done by deckhand_host_setup instead.
     try:
         from bcm_pinmux import set_alt
         set_alt(2, "a0")   # SDA1 for PCA9685 + MCP7940N

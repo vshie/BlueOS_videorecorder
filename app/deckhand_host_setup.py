@@ -54,6 +54,18 @@ Runs on every extension start. Non-destructive on non-DeckHand hardware:
      without a reboot), and only escalate ``reboot_required=True`` when
      that runtime recovery fails too.
 
+Raspberry Pi 5: the firmware reads the ``[pi5]`` section instead, and the
+RP1 I/O chip maps GPIO 8/9 to UART3 (not UART4), with RTS3 on GPIO 11 as
+alt-function a2. BlueOS's own ``[pi5]`` defaults already carry
+``dtoverlay=uart3-pi5`` and ``dtoverlay=spi1-3cs``, so on a Pi 5 we only
+check that the UART3 line is present and that its tty (RP1
+``serial@3c000``) exists. The BlueOS ``gpio=11,24,25=op,pu,dh`` line
+holds GPIO 11 as a plain output HIGH, which keeps the RS-485 transceiver
+stuck transmitting so the BMS can never be heard. Like the Pi 4 path
+(``bcm_pinmux`` in main.py) we fix that at runtime rather than fighting
+the reconciler in config.txt: every start we run ``pinctrl set 11 a2 pn``
+on the host, handing DE to the PL011's kernel RS-485 mode.
+
 All host-side file writes and the reboot itself go through BlueOS's
 commander HTTP API at ``http://localhost/commander/v1.0/``. Our
 container uses ``NetworkMode: host`` so ``localhost`` == the Pi's
@@ -161,6 +173,32 @@ EXPECTED_DEVICES: list[tuple[str, str, str | None]] = [
 # reboot to take effect from config.txt cleanly.
 NO_RUNTIME_RELOAD = {"uart4"}
 
+# Pi 5 equivalents. GPIO 8/9 are UART3 on the RP1, which BlueOS already
+# enables in its [pi5] defaults; we just make sure the line is there.
+WANTED_OVERLAYS_PI5: list[tuple[str, str]] = [
+    (r"^dtoverlay=uart3-pi5(?:,\S+)?(?:\s+#.*)?$",     "dtoverlay=uart3-pi5"),
+]
+
+EXPECTED_DEVICES_PI5: list[tuple[str, str, str | None]] = [
+    ("/dev/i2c-1",       "I2C bus 1 (PCA9685 + MCP7940N RTC)",   "i2c1-pi5"),
+    ("/dev/spidev1.0",   "SPI1 device 0 (WS2812 RGB LED)",       "spi1-1cs"),
+    ("uart:3c000",       "UART3 tty (Daly BMS RS-485)",          None),
+]
+
+# RS-485 DE lives on GPIO 11. On the Pi 5's RP1 that pin's RTS3 function
+# is alt a2; pull disabled so DE idles where the UART drives it.
+PI5_PINMUX_CMDS: list[str] = ["sudo pinctrl set 11 a2 pn"]
+
+
+def _is_pi5() -> bool:
+    for path in ("/proc/device-tree/model", "/sys/firmware/devicetree/base/model"):
+        try:
+            with open(path, "rb") as handle:
+                return b"raspberry pi 5" in handle.read().lower()
+        except OSError:
+            continue
+    return False
+
 # Public status dict — read by main.py's /telemetry and /host_setup routes.
 _STATUS: dict[str, Any] = {
     "ran": False,
@@ -171,6 +209,8 @@ _STATUS: dict[str, Any] = {
     "problems": [],             # list[str] of missing config lines or runtime devices
     "missing_devices": [],      # list[str] of expected /dev entries not present
     "runtime_recovered": [],    # list[str] of overlays we loaded live to fix a gap
+    "board": None,              # "pi4" / "pi5" — selects the config section + pin map
+    "pinmux_applied": [],       # list[str] of runtime pinctrl commands that succeeded
     "changes_applied": False,   # did we just write the config?
     "reboot_required": False,   # config or runtime device gap needs a reboot
     "reboot_triggered": False,  # did we call the commander shutdown endpoint?
@@ -368,14 +408,15 @@ def _read_config(path: str) -> str:
     return out
 
 
-def _first_pi4_section_bounds(lines: list[str]) -> tuple[int, int] | None:
+def _first_section_bounds(lines: list[str], section: str = "pi4") -> tuple[int, int] | None:
     """Return (start_line_index, end_line_index_exclusive) for the first
-    [pi4] block. blueos_startup_update.py bounds the section at the first
-    blank line or the next [tag] header — we mirror that so our writes
-    land in exactly the same range it inspects.
+    ``[section]`` block. blueos_startup_update.py bounds the section at the
+    first blank line or the next [tag] header — we mirror that so our
+    writes land in exactly the same range it inspects.
     """
+    header = re.compile(rf"^\[{re.escape(section)}\]\s*$")
     start = next(
-        (i for i, l in enumerate(lines) if re.match(r"^\[pi4\]\s*$", l)),
+        (i for i, l in enumerate(lines) if header.match(l)),
         None,
     )
     if start is None:
@@ -388,24 +429,30 @@ def _first_pi4_section_bounds(lines: list[str]) -> tuple[int, int] | None:
     return start, end
 
 
-def _needed_changes(config_text: str) -> list[str]:
+def _needed_changes(
+    config_text: str,
+    section_name: str = "pi4",
+    wanted: list[tuple[str, str]] | None = None,
+) -> list[str]:
     """Return a list of DeckHand overrides that are missing / wrong in
-    the first [pi4] section. Empty list = config is already correct.
+    the first ``[section_name]`` section. Empty list = config is already
+    correct.
 
     We also flag any *broken* forms of our overlays — i.e. the same
     overlay name with a trailing ``#`` inline comment, which the RPi
     firmware silently rejects at boot. On next apply we'll rewrite
     those lines to the plain form.
     """
+    wanted = WANTED_OVERLAYS if wanted is None else wanted
     lines = config_text.splitlines()
-    bounds = _first_pi4_section_bounds(lines)
+    bounds = _first_section_bounds(lines, section_name)
     if bounds is None:
-        return ["[pi4] section missing"]
+        return [f"[{section_name}] section missing"]
     start, end = bounds
     section = lines[start + 1 : end]
 
     problems: list[str] = []
-    for regex, canonical in WANTED_OVERLAYS:
+    for regex, canonical in wanted:
         pat = re.compile(regex)
         matched = [l for l in section if pat.match(l)]
         if not matched:
@@ -418,16 +465,21 @@ def _needed_changes(config_text: str) -> list[str]:
     return problems
 
 
-def _rewrite_config(config_text: str) -> str:
+def _rewrite_config(
+    config_text: str,
+    section_name: str = "pi4",
+    wanted: list[tuple[str, str]] | None = None,
+) -> str:
     """Return a new config.txt with DeckHand overrides applied in the
-    first [pi4] section. Idempotent — running twice on the same input
-    yields byte-identical output.
+    first ``[section_name]`` section. Idempotent — running twice on the
+    same input yields byte-identical output.
     """
+    wanted = WANTED_OVERLAYS if wanted is None else wanted
     lines = config_text.splitlines()
-    bounds = _first_pi4_section_bounds(lines)
+    bounds = _first_section_bounds(lines, section_name)
     if bounds is None:
-        # No [pi4] block at all — append one at the end.
-        lines.extend(["", "[pi4]"])
+        # No such block at all — append one at the end.
+        lines.extend(["", f"[{section_name}]"])
         bounds = (len(lines) - 1, len(lines))
     start, end = bounds
     section = lines[start + 1 : end]
@@ -436,7 +488,7 @@ def _rewrite_config(config_text: str) -> str:
     # present insert at the first stable anchor (before the first gpio=
     # line, else at end of section). Doing this per-line means we never
     # strip-and-reinsert, so line order is stable across reruns.
-    for pattern, canonical in WANTED_OVERLAYS:
+    for pattern, canonical in wanted:
         pat = re.compile(pattern)
         matched_idx = next((i for i, l in enumerate(section) if pat.match(l)), None)
         if matched_idx is not None:
@@ -476,13 +528,14 @@ def _write_config(path: str, new_content: str) -> None:
 
 # ----- runtime device presence + on-the-fly overlay recovery ------------
 
-def _find_uart4_tty() -> str | None:
-    """Resolve UART4's /dev/ttyAMA<N> by MMIO address (7e201800 on BCM2711).
+def _find_uart_tty(mmio: str = "7e201800") -> str | None:
+    """Resolve a PL011's /dev/ttyAMA<N> by MMIO address — 7e201800 is
+    UART4 on BCM2711 (Pi 4), 3c000 is UART3 on the Pi 5's RP1.
 
     The ttyAMA index isn't stable across kernels/overlay-load-order, so we
     walk /sys/class/tty/ttyAMA*/device/of_node and match the target address
-    the same way BatteryMonitor does. Returns None if UART4 isn't wired
-    through to any tty yet (usually means dtoverlay=uart4 didn't take).
+    the same way BatteryMonitor does. Returns None if the UART isn't wired
+    through to any tty yet (usually means its dtoverlay didn't take).
     """
     for tty_dir in sorted(glob.glob("/sys/class/tty/ttyAMA*")):
         of_link = os.path.join(tty_dir, "device", "of_node")
@@ -491,7 +544,7 @@ def _find_uart4_tty() -> str | None:
         except OSError:
             continue
         base = os.path.basename(target).lower()
-        if "@" in base and base.split("@", 1)[1] == "7e201800":
+        if "@" in base and base.split("@", 1)[1] == mmio:
             return "/dev/" + os.path.basename(tty_dir)
     return None
 
@@ -500,16 +553,20 @@ def _device_present(probe_key: str) -> bool:
     """Return True if the runtime device identified by ``probe_key`` exists.
 
     ``probe_key`` is either a filesystem path (checked with os.path.exists)
-    or a special sentinel starting with ``uart4:`` (resolved via MMIO
-    scan). Kept small and dependency-free so it works both inside the
+    or a sentinel ``uart4:...`` (Pi 4 UART4) / ``uart:<mmio>`` (resolved
+    via MMIO scan). Kept small and dependency-free so it works both inside the
     container and on the host during debugging.
     """
     if probe_key.startswith("uart4:"):
-        return _find_uart4_tty() is not None
+        return _find_uart_tty("7e201800") is not None
+    if probe_key.startswith("uart:"):
+        return _find_uart_tty(probe_key.split(":", 1)[1]) is not None
     return os.path.exists(probe_key)
 
 
-def _check_runtime_devices() -> list[tuple[str, str, str | None]]:
+def _check_runtime_devices(
+    expected: list[tuple[str, str, str | None]] | None = None,
+) -> list[tuple[str, str, str | None]]:
     """Return the subset of EXPECTED_DEVICES that aren't currently exposed
     to /dev (or, for UART4, aren't wired to any /dev/ttyAMA<N>).
 
@@ -520,7 +577,7 @@ def _check_runtime_devices() -> list[tuple[str, str, str | None]]:
     boot. Either way we escalate to the operator.
     """
     missing: list[tuple[str, str, str | None]] = []
-    for probe, label, overlay in EXPECTED_DEVICES:
+    for probe, label, overlay in (EXPECTED_DEVICES if expected is None else expected):
         if not _device_present(probe):
             missing.append((probe, label, overlay))
     return missing
@@ -555,6 +612,27 @@ def _try_runtime_dtoverlay_load(overlay: str) -> bool:
     return False
 
 
+def _apply_pi5_pinmux() -> list[str]:
+    """Run ``PI5_PINMUX_CMDS`` on the host; return the ones that succeeded.
+
+    Runs on every start because the BlueOS ``gpio=11=op,dh`` line puts
+    GPIO 11 back to a plain output at each boot.
+    """
+    applied: list[str] = []
+    for cmd in PI5_PINMUX_CMDS:
+        try:
+            rc, _, err = _run_host_command(cmd, timeout=5.0)
+        except Exception as exc:
+            logger.warning("host_setup: %s errored: %s", cmd, exc)
+            continue
+        if rc == 0:
+            applied.append(cmd)
+            logger.info("host_setup: %s", cmd)
+        else:
+            logger.warning("host_setup: %s failed rc=%d stderr=%s", cmd, rc, err[:200].strip())
+    return applied
+
+
 # ----- reboot ------------------------------------------------------------
 
 def _trigger_reboot() -> None:
@@ -581,6 +659,12 @@ def run_startup_setup(auto_reboot: bool = False) -> dict[str, Any]:
     """
     _STATUS["ran"] = True
     _STATUS["last_error"] = None
+    # Start each pass clean so a rerun after a fix clears an earlier
+    # reboot notice instead of carrying it forward.
+    _STATUS.update(
+        problems=[], missing_devices=[], runtime_recovered=[], pinmux_applied=[],
+        changes_applied=False, reboot_required=False, reboot_triggered=False,
+    )
 
     # 1) DeckHand detection is a hard prerequisite for any host mutation.
     is_deckhand = _detect_deckhand()
@@ -613,11 +697,20 @@ def run_startup_setup(auto_reboot: bool = False) -> dict[str, Any]:
         logger.warning("host_setup: %s (%s)", _STATUS["detail"], exc)
         return get_status()
 
+    pi5 = _is_pi5()
+    board = "pi5" if pi5 else "pi4"
+    wanted = WANTED_OVERLAYS_PI5 if pi5 else WANTED_OVERLAYS
+    expected = EXPECTED_DEVICES_PI5 if pi5 else EXPECTED_DEVICES
+    _STATUS["board"] = board
+
+    if pi5:
+        _STATUS["pinmux_applied"] = _apply_pi5_pinmux()
+
     try:
         config_path = _resolve_config_path()
         _STATUS["config_path"] = config_path
         config_text = _read_config(config_path)
-        problems = _needed_changes(config_text)
+        problems = _needed_changes(config_text, board, wanted)
         _STATUS["problems"] = problems
 
         if not problems:
@@ -630,7 +723,7 @@ def run_startup_setup(auto_reboot: bool = False) -> dict[str, Any]:
             # text-only diff can't see. Try to recover in-band first via
             # ``dtoverlay <name>`` on the host, and only escalate to a
             # reboot notice if that fails too.
-            missing = _check_runtime_devices()
+            missing = _check_runtime_devices(expected)
             _STATUS["missing_devices"] = [label for _, label, _ in missing]
 
             recovered_via_runtime: list[str] = []
@@ -706,7 +799,7 @@ def run_startup_setup(auto_reboot: bool = False) -> dict[str, Any]:
             len(problems),
             ", ".join(problems),
         )
-        new_content = _rewrite_config(config_text)
+        new_content = _rewrite_config(config_text, board, wanted)
         _write_config(config_path, new_content)
         _STATUS["changes_applied"] = True
         _STATUS["config_valid"] = True   # verified after reboot
