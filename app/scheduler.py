@@ -9,8 +9,10 @@ into the main app to start recording and hardware control.
 
 import json
 import logging
+import re
 import threading
 import time
+from datetime import datetime
 import urllib.error
 import urllib.request
 
@@ -109,6 +111,10 @@ class Scheduler:
         self._awb_thread = None
         self._radcam_mode = False
         self._awb_scene = DEFAULT_AWB_SCENE
+        # Record / idle cycle progress (0 when the recipe doesn't cycle).
+        self._cycle_window = 0
+        self._cycle_windows_total = 0
+        self._deadline = None  # monotonic end of the whole deployment
 
     def configure(self, *, start_fn, stop_fn, disk_free_fn, hw,
                   capture_still_fn=None, log_event_fn=None, radcam_mode=False,
@@ -180,14 +186,23 @@ class Scheduler:
         with self._lock:
             self._state = "idle"
             self._remaining_s = 0
+            self._cycle_window = 0
+            self._cycle_windows_total = 0
+            self._deadline = None
         self._active_recipe = None
 
     def get_state(self):
         with self._lock:
+            total_remaining = None
+            if self._deadline is not None:
+                total_remaining = round(max(0.0, self._deadline - time.monotonic()), 1)
             return {
                 "state": self._state,
                 "remaining_s": round(self._remaining_s, 1),
                 "recipe_name": self._active_recipe["name"] if self._active_recipe else None,
+                "cycle_window": self._cycle_window,
+                "cycle_windows_total": self._cycle_windows_total,
+                "total_remaining_s": total_remaining,
             }
 
     def is_running(self):
@@ -237,28 +252,42 @@ class Scheduler:
             if self._stop.is_set():
                 return
 
-            self._set_state("starting")
-            ok = False
-            for attempt in range(1, RECORDING_START_RETRIES + 1):
-                if self._stop.is_set():
-                    return
-                ok = self._start_recording_fn(recipe)
-                if ok:
-                    break
-                logger.warning(f"Scheduler: recording start attempt {attempt}/{RECORDING_START_RETRIES} failed")
-                if attempt < RECORDING_START_RETRIES:
-                    self._stop.wait(RECORDING_RETRY_INTERVAL_S)
+            duration_s = recipe.get("duration_minutes", 30) * 60
+            cycling = bool(recipe.get("cycle_enable"))
+            if cycling:
+                from recipes import calculate_cycle_plan
+                plan = calculate_cycle_plan(
+                    recipe.get("duration_minutes", 30),
+                    recipe.get("cycle_record_minutes", 10),
+                    recipe.get("cycle_idle_minutes", 50),
+                )
+                safe_name = re.sub(r"[^a-zA-Z0-9_-]", "",
+                                   str(recipe.get("name", "recipe")).replace(" ", "_"))
+                deployment_id = f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                with self._lock:
+                    self._cycle_windows_total = plan["windows"]
+                    self._cycle_window = 1
+                logger.info(
+                    "Record/idle cycle: %s min record / %s min idle over %s min "
+                    "-> %d window(s), deployment %s",
+                    recipe.get("cycle_record_minutes"), recipe.get("cycle_idle_minutes"),
+                    recipe.get("duration_minutes"), plan["windows"], deployment_id,
+                )
 
-            if not ok:
-                logger.error("Scheduler: recording failed to start after all retries")
-                self._set_state("error")
-                if self._hw:
-                    self._hw.led_warning()
+            def window_recipe(index):
+                if not cycling:
+                    return recipe
+                return dict(recipe, _deployment_id=deployment_id, _window_index=index)
+
+            if not self._start_recording_with_retries(window_recipe(1)):
                 return
+            with self._lock:
+                self._deadline = time.monotonic() + duration_s
+            if cycling:
+                self._log("cycle_window_started", f"window=1/{self._cycle_windows_total}")
 
             self._apply_recipe_led(recipe)
 
-            duration_s = recipe.get("duration_minutes", 30) * 60
             if self._hw and recipe.get("release_enable"):
                 offset_s = int(recipe.get("release_offset_s", 0))
                 self._schedule_release(duration_s, offset_s, recipe)
@@ -361,11 +390,16 @@ class Scheduler:
                     f"delay {delay_s:.0f}s, recording {duration_s:.0f}s"
                 )
 
-            self._countdown("recording", duration_s, check_disk=True)
+            if cycling:
+                if not self._run_cycle(recipe, window_recipe):
+                    return  # a later window failed to start; error state is set
+            else:
+                self._countdown("recording", duration_s, check_disk=True)
 
             if not self._stop.is_set():
                 logger.info("Scheduler: duration reached, stopping recording")
-                self._stop_recording_fn()
+                if not cycling:
+                    self._stop_recording_fn()
                 self._set_state("complete")
                 if self._hw:
                     self._hw.stop_sweep()
@@ -379,6 +413,71 @@ class Scheduler:
             self._set_state("error")
             if self._hw:
                 self._hw.led_warning()
+
+    def _start_recording_with_retries(self, recipe):
+        """Start recording, retrying a few times. Returns True on success.
+
+        On final failure sets the error state and warning LED.
+        """
+        self._set_state("starting")
+        for attempt in range(1, RECORDING_START_RETRIES + 1):
+            if self._stop.is_set():
+                return False
+            if self._start_recording_fn(recipe):
+                return True
+            logger.warning(f"Scheduler: recording start attempt {attempt}/{RECORDING_START_RETRIES} failed")
+            if attempt < RECORDING_START_RETRIES:
+                self._stop.wait(RECORDING_RETRY_INTERVAL_S)
+        if self._stop.is_set():
+            return False
+        logger.error("Scheduler: recording failed to start after all retries")
+        self._set_state("error")
+        if self._hw:
+            self._hw.led_warning()
+        return False
+
+    def _run_cycle(self, recipe, window_recipe):
+        """Alternate record and idle windows until the deployment deadline.
+
+        Window 1 is already recording when this is called. Each record
+        window ends with the recording stopped, so the caller must not stop
+        it again. The light (light_mode "always") is on only while recording.
+        Returns False if a later window failed to start.
+        """
+        record_s = float(recipe.get("cycle_record_minutes", 10)) * 60
+        idle_s = float(recipe.get("cycle_idle_minutes", 50)) * 60
+        light_on_while_recording = recipe.get("light_mode", "off") == "always"
+        brightness = recipe.get("light_brightness_pct", 100)
+        window = 1
+
+        def until_deadline():
+            return max(0.0, self._deadline - time.monotonic())
+
+        while True:
+            self._countdown("recording", min(record_s, until_deadline()), check_disk=True)
+            if self._stop.is_set():
+                return True
+            self._stop_recording_fn()
+            if self._hw and light_on_while_recording:
+                self._hw.light_off()
+            if until_deadline() <= 0:
+                return True
+
+            self._log("cycle_idle_started", f"after_window={window}")
+            self._countdown("cycle_idle", min(idle_s, until_deadline()))
+            if self._stop.is_set() or until_deadline() <= 0:
+                return True
+
+            window += 1
+            with self._lock:
+                self._cycle_window = window
+            if not self._start_recording_with_retries(window_recipe(window)):
+                return False
+            self._log("cycle_window_started", f"window={window}/{self._cycle_windows_total}")
+            if self._hw:
+                if light_on_while_recording:
+                    self._hw.light_on(brightness)
+                self._apply_recipe_led(recipe)
 
     def _schedule_release(self, duration_s, offset_s, recipe):
         """Schedule the closed-loop release (fast unwind at 2000 us until

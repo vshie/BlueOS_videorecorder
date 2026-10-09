@@ -85,7 +85,21 @@ RECIPE_SCHEMA_DEFAULTS = {
     "winch_rotations": 10,
     "winch_profiles": 1,
     "winch_start_delay_minutes": 0,
+    # Record / idle duty cycle.  When enabled, duration_minutes is the total
+    # deployment length and the recorder repeats "record for
+    # cycle_record_minutes, then sit idle for cycle_idle_minutes" until it
+    # runs out.  The Lumen light (light_mode "always") is on only while
+    # recording.
+    "cycle_enable": False,
+    "cycle_record_minutes": 10.0,
+    "cycle_idle_minutes": 50.0,
 }
+
+# Shortest record or idle window a cycle may use (minutes).
+CYCLE_MIN_MINUTES = 0.5
+# Light modes that make sense across idle gaps; the others follow sweep
+# pause points, which a duty cycle doesn't line up with.
+CYCLE_LIGHT_MODES = ("off", "always")
 
 # Allowed window for release-trigger offset relative to recording finish.
 # Negative = fire before the recording ends, positive = fire after.
@@ -118,6 +132,34 @@ def calculate_sweep_time(duration_minutes, pause_points, loiter_time_s, oscillat
         "time_per_oscillation_s": round(time_per_osc, 1),
         "valid": True,
     }
+
+def calculate_cycle_plan(duration_minutes, record_minutes, idle_minutes):
+    """Lay out record windows across a deployment.
+
+    Windows start every record + idle minutes until duration_minutes runs
+    out; the last window is cut short if the deadline lands inside it.
+    Returns dict with windows, record_total_minutes and last_window_minutes.
+    """
+    duration = max(float(duration_minutes), 0.0)
+    # Match the scheduler loop exactly; the floor only guards against a
+    # zero-length period (validation enforces CYCLE_MIN_MINUTES).
+    record = max(float(record_minutes), 0.001)
+    period = record + max(float(idle_minutes), 0.001)
+    windows = 0
+    record_total = 0.0
+    last = 0.0
+    start = 0.0
+    while start < duration:
+        last = min(record, duration - start)
+        windows += 1
+        record_total += last
+        start += period
+    return {
+        "windows": windows,
+        "record_total_minutes": round(record_total, 2),
+        "last_window_minutes": round(last, 2),
+    }
+
 
 DEFAULT_RECIPES = [
     {
@@ -369,6 +411,29 @@ def validate_recipe(data):
                 )
             else:
                 clean["winch_start_delay_minutes"] = wsd
+
+    if "cycle_enable" in data:
+        clean["cycle_enable"] = bool(data["cycle_enable"])
+
+    for fld in ("cycle_record_minutes", "cycle_idle_minutes"):
+        if fld in data:
+            try:
+                val = parse_duration_to_minutes(data[fld])
+            except ValueError:
+                errors.append(f"{fld} must be a number of minutes")
+                continue
+            if val < CYCLE_MIN_MINUTES or val > RECIPE_MAX_DURATION_MINUTES:
+                errors.append(
+                    f"{fld} must be between {CYCLE_MIN_MINUTES} and "
+                    f"{RECIPE_MAX_DURATION_MINUTES} minutes"
+                )
+            else:
+                clean[fld] = round(val, 2)
+
+    if clean["cycle_enable"] and clean["light_mode"] not in CYCLE_LIGHT_MODES:
+        errors.append(
+            "light_mode must be 'off' or 'always' when the record/idle cycle is enabled"
+        )
 
     if "radcam_focus_finder" in data:
         clean["radcam_focus_finder"] = bool(data["radcam_focus_finder"])

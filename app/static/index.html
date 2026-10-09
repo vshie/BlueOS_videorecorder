@@ -621,9 +621,9 @@ body.calib-tab .file-manager-wrapper{display:none}
         <input type="text" id="rStillPrefix" maxlength="32" placeholder="e.g. site_A" pattern="[a-zA-Z0-9_-]*" title="Letters, numbers, underscore, hyphen only">
       </div>
       <div class="form-group" style="min-width:18em;flex:1.2">
-        <label>Duration</label>
+        <label id="rDurationLabel">Duration</label>
         <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
-          <input type="number" id="rDuration" value="30" min="0" step="any" style="width:6.5em" oninput="updateSweepCalc();updateWinchCalc()" title="Recording length (use Minutes or Hours)">
+          <input type="number" id="rDuration" value="30" min="0" step="any" style="width:6.5em" oninput="updateSweepCalc();updateWinchCalc();updateCycleCalc()" title="Recording length (use Minutes or Hours)">
           <span style="display:inline-flex;align-items:center;gap:12px;font-size:.9em;white-space:nowrap">
             <label style="font-weight:normal;margin:0;cursor:pointer"><input type="radio" name="rDurationUnit" id="rDurationUnitMin" value="minutes" checked onchange="onRecipeDurationUnitChange()"> Minutes</label>
             <label style="font-weight:normal;margin:0;cursor:pointer"><input type="radio" name="rDurationUnit" id="rDurationUnitHr" value="hours" onchange="onRecipeDurationUnitChange()"> Hours</label>
@@ -644,6 +644,21 @@ body.calib-tab .file-manager-wrapper{display:none}
         </select>
       </div>
     </div>
+
+    <div class="form-row">
+      <div class="form-group narrow">
+        <label><input type="checkbox" id="rCycleEnable" onchange="toggleCycleFields()"> Repeat: record, then idle</label>
+      </div>
+      <div class="form-group narrow cycle-field">
+        <label>Record (min)</label>
+        <input type="number" id="rCycleRecord" value="10" min="0.5" step="any" oninput="updateCycleCalc()">
+      </div>
+      <div class="form-group narrow cycle-field">
+        <label>Idle (min)</label>
+        <input type="number" id="rCycleIdle" value="50" min="0.5" step="any" oninput="updateCycleCalc()">
+      </div>
+    </div>
+    <div id="cycleCalc" class="text-muted cycle-field" style="font-size:.85em"></div>
 
     <div style="background:#e8f0fe;border-left:3px solid #1a73e8;padding:8px 12px;font-size:.85em;border-radius:4px;margin:10px 0;color:#333">
       <strong>When storage is low:</strong> If free disk space falls below 1 GB, the active recording will stop automatically and the status LED will flash yellow. The recipe will not resume &mdash; you must manually restart.
@@ -766,17 +781,20 @@ body.calib-tab .file-manager-wrapper{display:none}
     <div class="form-row">
       <div class="form-group narrow">
         <label>Light Mode</label>
-        <select id="rLightMode">
+        <select id="rLightMode" onchange="onLightModeChange()">
           <option value="off">Off</option>
-          <option value="always">Always On</option>
-          <option value="pause_only">Pause Points Only</option>
-          <option value="snapshot_only">Snapshot Only</option>
+          <option value="always" id="rLightModeAlways">Always On</option>
+          <option value="pause_only" class="no-cycle">Pause Points Only</option>
+          <option value="snapshot_only" class="no-cycle">Snapshot Only</option>
         </select>
       </div>
       <div class="form-group narrow">
         <label>Brightness: <span id="rLightBrightVal" class="mono">0</span>%</label>
         <input type="range" id="rLightBright" min="0" max="100" step="5" value="0" oninput="document.getElementById('rLightBrightVal').textContent=this.value">
       </div>
+    </div>
+    <div id="rLightCycleHint" class="text-muted cycle-field" style="font-size:.82em">
+      With the record/idle cycle on, the light comes on at this brightness for each recording window and turns off during idle breaks.
     </div>
 
     <h3>Release Servo</h3>
@@ -1013,6 +1031,7 @@ async function pollStatus() {
     }
   } else {
     txt.textContent = d.scheduler && d.scheduler.state === 'delay' ? 'Waiting to start...' :
+                      d.scheduler && d.scheduler.state === 'cycle_idle' ? 'Idle break' :
                       d.scheduler && d.scheduler.state === 'complete' ? 'Complete' : 'Idle';
     document.getElementById('btnStart').disabled = false;
     document.getElementById('btnStop').disabled = true;
@@ -1057,7 +1076,16 @@ async function pollStatus() {
     schedEl.textContent = `Starting "${sched.recipe_name}" in ${Math.ceil(sched.remaining_s)}s...`;
     document.getElementById('btnScheduleStop').disabled = false;
   } else if (sched.state === 'recording') {
-    schedEl.textContent = `Recording "${sched.recipe_name}" — ${Math.ceil(sched.remaining_s/60)} min remaining`;
+    if (sched.cycle_windows_total) {
+      schedEl.textContent = `Recording "${sched.recipe_name}" — window ${sched.cycle_window}/${sched.cycle_windows_total}, ` +
+        `${Math.ceil(sched.remaining_s/60)} min left in window · ${fmtMinutes((sched.total_remaining_s || 0)/60)} total remaining`;
+    } else {
+      schedEl.textContent = `Recording "${sched.recipe_name}" — ${Math.ceil(sched.remaining_s/60)} min remaining`;
+    }
+    document.getElementById('btnScheduleStop').disabled = false;
+  } else if (sched.state === 'cycle_idle') {
+    schedEl.textContent = `Idle break — next recording in ${Math.ceil(sched.remaining_s/60)} min ` +
+      `(window ${sched.cycle_window + 1}/${sched.cycle_windows_total}) · ${fmtMinutes((sched.total_remaining_s || 0)/60)} total remaining`;
     document.getElementById('btnScheduleStop').disabled = false;
   } else if (sched.state === 'complete') {
     schedEl.textContent = `Schedule complete: "${sched.recipe_name}"`;
@@ -2298,7 +2326,7 @@ function renderRecipeList() {
   el.innerHTML = allRecipes.map(r => `
     <div class="recipe-item">
       <span class="name">${esc(r.name)}</span>
-      <span class="meta">${r.mode} | ${r.duration_minutes} min</span>
+      <span class="meta">${r.mode} | ${r.cycle_enable ? `${fmtRecipeDurationInput(r.cycle_record_minutes)}/${fmtRecipeDurationInput(r.cycle_idle_minutes)} min cycle | ${fmtMinutes(r.duration_minutes)}` : `${r.duration_minutes} min`}</span>
       <div class="recipe-actions">
         <button class="btn-sm" onclick="editRecipe('${r.id}')">Edit</button>
         <button class="btn-sm btn-danger" onclick="deleteRecipeUI('${r.id}')">Del</button>
@@ -2356,6 +2384,7 @@ function onRecipeDurationUnitChange() {
   recipeDurationUnitLast = now;
   updateSweepCalc();
   updateWinchCalc();
+  updateCycleCalc();
 }
 
 /** Duration in minutes from the recipe form (NaN if the number field is invalid). */
@@ -2373,6 +2402,9 @@ function newRecipe() {
   document.getElementById('rStillPrefix').value = '';
   document.getElementById('rDuration').value = '30';
   setRecipeDurationUnit('minutes');
+  document.getElementById('rCycleEnable').checked = false;
+  document.getElementById('rCycleRecord').value = '10';
+  document.getElementById('rCycleIdle').value = '50';
   document.getElementById('rDelay').value = '1';
   document.getElementById('rRotation').value = '0';
   document.getElementById('rServoFixed').checked = true;
@@ -2419,6 +2451,7 @@ function newRecipe() {
   toggleAwbFields();
   toggleReleaseFields();
   toggleWinchFields();
+  toggleCycleFields();
   updateSweepCalc();
   updateWinchCalc();
 }
@@ -2435,6 +2468,9 @@ async function editRecipe(id) {
   const dm = r.duration_minutes == null ? 30 : Number(r.duration_minutes);
   document.getElementById('rDuration').value = fmtRecipeDurationInput(dm);
   setRecipeDurationUnit('minutes');
+  document.getElementById('rCycleEnable').checked = !!r.cycle_enable;
+  document.getElementById('rCycleRecord').value = fmtRecipeDurationInput(r.cycle_record_minutes != null ? r.cycle_record_minutes : 10);
+  document.getElementById('rCycleIdle').value = fmtRecipeDurationInput(r.cycle_idle_minutes != null ? r.cycle_idle_minutes : 50);
   document.getElementById('rDelay').value = r.auto_start_delay_minutes;
   document.getElementById('rRotation').value = r.rotation_degrees;
   document.getElementById('rServoFixed').checked = r.servo_fixed;
@@ -2481,6 +2517,7 @@ async function editRecipe(id) {
   toggleAwbFields();
   toggleReleaseFields();
   toggleWinchFields();
+  toggleCycleFields();
   updateSweepCalc();
   updateWinchCalc();
 }
@@ -2499,6 +2536,9 @@ async function saveCurrentRecipe() {
     still_interval_s: +document.getElementById('rStillInterval').value,
     still_prefix: document.getElementById('rStillPrefix').value,
     duration_minutes: dm,
+    cycle_enable: document.getElementById('rCycleEnable').checked,
+    cycle_record_minutes: +document.getElementById('rCycleRecord').value,
+    cycle_idle_minutes: +document.getElementById('rCycleIdle').value,
     auto_start_delay_minutes: +document.getElementById('rDelay').value,
     rotation_degrees: +document.getElementById('rRotation').value,
     servo_fixed: document.getElementById('rServoFixed').checked,
@@ -2562,6 +2602,65 @@ function toggleReleaseFields() {
   const on = document.getElementById('rReleaseEnable').checked;
   document.getElementById('releaseOffsetGroup').style.display = on ? '' : 'none';
   document.getElementById('releaseHint').style.display = on ? '' : 'none';
+}
+
+function toggleCycleFields() {
+  const on = document.getElementById('rCycleEnable').checked;
+  document.querySelectorAll('#recipeEditor .cycle-field').forEach(el => el.style.display = on ? '' : 'none');
+  document.getElementById('rDurationLabel').textContent = on ? 'Total Duration' : 'Duration';
+  // Pause-point / snapshot light modes follow the servo sweep, which doesn't
+  // line up with idle breaks; the backend rejects them for cycling recipes.
+  const sel = document.getElementById('rLightMode');
+  sel.querySelectorAll('option.no-cycle').forEach(o => { o.hidden = on; o.disabled = on; });
+  if (on && sel.selectedOptions[0] && sel.selectedOptions[0].classList.contains('no-cycle')) sel.value = 'always';
+  document.getElementById('rLightModeAlways').textContent = on ? 'On while recording' : 'Always On';
+  updateCycleCalc();
+}
+
+function onLightModeChange() {
+  // "On" at 0% would look broken — start from a visible brightness.
+  const bright = document.getElementById('rLightBright');
+  if (document.getElementById('rLightMode').value !== 'off' && +bright.value === 0) {
+    bright.value = 50;
+    document.getElementById('rLightBrightVal').textContent = '50';
+  }
+}
+
+function fmtMinutes(min) {
+  if (!isFinite(min)) return '--';
+  if (min >= 120) return `${fmtRecipeDurationInput(Math.round(min / 6) / 10)} h`;
+  return `${fmtRecipeDurationInput(Math.round(min * 10) / 10)} min`;
+}
+
+// Mirrors recipes.calculate_cycle_plan(): a window starts every record+idle
+// minutes until the total runs out; the last one is cut at the deadline.
+function cyclePlan(totalMin, recordMin, idleMin) {
+  const period = recordMin + idleMin;
+  let windows = 0, recorded = 0, last = 0;
+  for (let t = 0; t < totalMin && windows < 100000; t += period) {
+    last = Math.min(recordMin, totalMin - t);
+    windows++;
+    recorded += last;
+  }
+  return {windows, recorded, last};
+}
+
+function updateCycleCalc() {
+  const el = document.getElementById('cycleCalc');
+  if (!el || !document.getElementById('rCycleEnable').checked) { if (el) el.textContent = ''; return; }
+  const total = getRecipeDurationMinutesFromForm();
+  const rec = parseFloat(document.getElementById('rCycleRecord').value);
+  const idle = parseFloat(document.getElementById('rCycleIdle').value);
+  if (Number.isNaN(total) || total <= 0 || !(rec >= 0.5) || !(idle >= 0.5)) {
+    el.innerHTML = '<span style="color:#c83232">Record and idle must each be at least 0.5 min, with a positive total duration.</span>';
+    return;
+  }
+  const p = cyclePlan(total, rec, idle);
+  let txt = `${fmtMinutes(total)} total &rarr; ${p.windows} recording window${p.windows === 1 ? '' : 's'} of ${fmtMinutes(rec)}, ` +
+            `${fmtMinutes(idle)} idle between (${fmtMinutes(p.recorded)} recorded).`;
+  if (p.last < rec - 1e-6) txt += ` The last window is cut to ${fmtMinutes(p.last)} by the total duration.`;
+  txt += ' Each window is saved as its own clip, grouped by deployment.';
+  el.innerHTML = txt;
 }
 
 function toggleWinchFields() {

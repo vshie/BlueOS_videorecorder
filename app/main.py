@@ -1141,9 +1141,20 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     else:
         safe_name = None
 
+    # Record/idle cycle: the scheduler tags every window of one deployment
+    # with the same _deployment_id (already "<name>_<start ts>") so the
+    # windows land together — one USB folder, a shared prefix on local SD.
+    deployment_id = (active_recipe_for_recording or {}).get("_deployment_id")
+    window_tag = ""
+    if deployment_id:
+        window_tag = f"w{int(active_recipe_for_recording.get('_window_index') or 1):02d}"
+
     use_usb = (not force_local) and (storage_preference == "usb") and usb_storage.is_usable()
     if use_usb:
-        subfolder = f"{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
+        if deployment_id:
+            subfolder = deployment_id
+        else:
+            subfolder = f"{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
         rec_dir = usb_storage.get_recording_dir(subfolder)
         usb_recording = True
         logger.info(f"Recording to USB: {rec_dir}")
@@ -1160,7 +1171,11 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     recording_base_dir = rec_dir
 
     if mode == "video":
-        if use_usb:
+        if deployment_id:
+            basename = f"{deployment_id}_{window_tag}_{timestamp[-6:]}"
+            if not use_usb:
+                basename = f"recipe_{basename}"
+        elif use_usb:
             basename = f"{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
         else:
             basename = f"recipe_{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
@@ -1338,6 +1353,8 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     elif mode == "stills":
         if use_usb:
             stills_dir = rec_dir
+        elif deployment_id:
+            stills_dir = os.path.join(VIDEO_DIR, f"stills_recipe_{deployment_id}")
         elif safe_name:
             stills_dir = os.path.join(VIDEO_DIR, f"stills_recipe_{safe_name}_{timestamp}")
         else:
@@ -1347,12 +1364,17 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
         current_video_file = None
 
         marker = os.path.join(stills_dir, "session.json")
-        current_events_file = os.path.join(stills_dir, "events.ndjson")
+        # Cycle windows share the folder, so each gets its own events file.
+        events_name = f"events_{window_tag}.ndjson" if window_tag else "events.ndjson"
+        current_events_file = os.path.join(stills_dir, events_name)
         open(current_events_file, "w").close()
         current_ass_file = None
 
+        session = {"started": timestamp, "interval_s": still_interval_s, "rotation": rotation}
+        if deployment_id:
+            session.update(deployment=deployment_id, window=window_tag)
         with open(marker, "w") as f:
-            json.dump({"started": timestamp, "interval_s": still_interval_s, "rotation": rotation}, f)
+            json.dump(session, f)
 
         start_time = datetime.now()
         recording = True
