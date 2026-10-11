@@ -50,9 +50,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # uartN` overlays enumerate at boot, so UART4 can appear as anything
     # from /dev/ttyAMA1 to /dev/ttyAMA4 depending on which other UART
     # overlays are enabled in /boot/config.txt. "auto" (the default)
-    # discovers UART4 by matching the sysfs of_node MMIO address
-    # (7e201800) first, then probes any other Pi UARTs and USB serial
-    # adapters so mixed / legacy setups still work.
+    # discovers the GPIO 8/9 UART by its sysfs of_node MMIO address
+    # (Pi 4 UART4 7e201800 / Pi 5 UART3 3c000) and probes only that plus
+    # USB serial adapters; boards without it fall back to a scan of every
+    # serial port.
     "serial_port": "auto",
     "board_number": 1,
     "baud_rate": 9600,
@@ -93,6 +94,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
 # include ttyAMA* so /dev/ttyAMA4 (UART4) auto-detects.
 _AUTO_SCAN_SKIP_PREFIXES = ("/dev/ttyS", "/dev/ttyprintk")
 
+# After a working port stops answering, reconnect attempts retry that port
+# alone this many times before falling back to a full port scan.
+LAST_GOOD_RETRIES = 3
+
 _SEQUENCE_RE = re.compile(r"^battery_(\d+)(?:_.*)?\.csv$", re.IGNORECASE)
 
 
@@ -120,10 +125,16 @@ class BatteryMonitor:
         hw: Any,
         config_getter: Callable[[], dict[str, Any] | None],
         time_synced_fn: Callable[[], bool | None] | None = None,
+        rs485_pinmux_fn: Callable[[], Any] | None = None,
     ) -> None:
         self._hw = hw
         self._config_getter = config_getter
         self._time_synced_fn = time_synced_fn or (lambda: None)
+        # Re-checks the RS-485 DE pin mux before each reconnect (Pi 5:
+        # deckhand_host_setup.ensure_rs485_pinmux). Skipped once the
+        # software DE toggle owns the pin as a plain GPIO output.
+        self._rs485_pinmux_fn = rs485_pinmux_fn
+        self._software_de_claimed = False
 
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -137,9 +148,10 @@ class BatteryMonitor:
         self._alarm_active = False
         # Which read path produced the last snapshot ("poll" | "broadcast").
         self._last_read_mode: str | None = None
-        # Ports that responded to a probe but with bad data, so we deprioritize
-        # them on the next scan instead of churning them every cycle.
-        self._port_failures: dict[str, int] = {}
+        # The port the BMS last answered on, and how many reconnects in a row
+        # have retried it alone (see LAST_GOOD_RETRIES).
+        self._last_good_device: str | None = None
+        self._last_good_attempts = 0
 
         # CSV state — assigned on first successful poll once we know log_dir
         self._csv_path: Path | None = None
@@ -294,19 +306,32 @@ class BatteryMonitor:
     def _connect(self, cfg: dict[str, Any]) -> None:
         """Find a serial port that answers as a Daly BMS and adopt it.
 
-        If `serial_port` config is "auto" (default) or empty, enumerate all
-        currently-visible serial devices, probe each one in turn, and use
-        the first that responds. Otherwise the configured path is the only
-        candidate. Ports that fail the probe are released (closed) so they
-        stay available to other consumers.
+        If `serial_port` config is "auto" (default) or empty, probe the
+        candidate ports (see _iter_candidate_ports) and use the first that
+        responds. After a working port drops out, the next
+        LAST_GOOD_RETRIES attempts retry that port alone before a full
+        scan. Otherwise the configured path is the only candidate. Ports
+        that fail the probe are released (closed) so they stay available to
+        other consumers.
         """
         self._disconnect()
+        self._ensure_rs485_pinmux()
 
         explicit = cfg.get("serial_port") or "auto"
         if explicit and explicit not in ("auto", "AUTO", "scan"):
             candidates = [explicit]
+        elif self._last_good_device and self._last_good_attempts < LAST_GOOD_RETRIES:
+            self._last_good_attempts += 1
+            candidates = [self._last_good_device]
+            logger.debug(
+                "Battery reconnect: retrying last good port %s (%d/%d)",
+                self._last_good_device, self._last_good_attempts, LAST_GOOD_RETRIES,
+            )
         else:
             candidates = self._iter_candidate_ports()
+            if self._last_good_device in candidates:
+                candidates.remove(self._last_good_device)
+                candidates.insert(0, self._last_good_device)
             if not candidates:
                 raise RuntimeError("No serial devices found to probe")
 
@@ -339,7 +364,8 @@ class BatteryMonitor:
                 continue
             self._reader = reader
             self._reader_device = device
-            self._port_failures.pop(device, None)
+            self._last_good_device = device
+            self._last_good_attempts = 0
             with self._lock:
                 self._connected = True
                 self._last_error = None
@@ -348,11 +374,6 @@ class BatteryMonitor:
                 device, board, baud, mode, len(candidates),
             )
             return
-
-        # None responded — record the failure pattern so we don't spam the
-        # log with the same useless port at the top of the list forever.
-        for device in candidates:
-            self._port_failures[device] = self._port_failures.get(device, 0) + 1
 
         msg = "; ".join(errors) if errors else "no candidates probed"
         raise RuntimeError(f"No Daly BMS found ({msg})")
@@ -368,6 +389,15 @@ class BatteryMonitor:
     # And once per tty path for the "kernel is now doing RTS for us" log,
     # so the probe loop doesn't repeat it on every reconnect.
     _kernel_rs485_logged: set[str] = set()
+
+    def _ensure_rs485_pinmux(self) -> None:
+        """Re-check the DE pin mux before probing (no-op without a hook)."""
+        if self._rs485_pinmux_fn is None or self._software_de_claimed:
+            return
+        try:
+            self._rs485_pinmux_fn()
+        except Exception as exc:
+            logger.debug("RS485 pin mux check failed: %s", exc)
 
     @staticmethod
     def _make_de_toggle_factory(
@@ -498,6 +528,9 @@ class BatteryMonitor:
         if not used_kernel_rs485 and de_toggle_factory is not None:
             de_toggle = de_toggle_factory()
             if de_toggle is not None:
+                # GPIO 11 is now a plain output; restoring its UART mux on
+                # a later reconnect would break this software toggle.
+                self._software_de_claimed = True
                 try:
                     reader._bms.set_direction_control(
                         de_toggle,
@@ -621,18 +654,20 @@ class BatteryMonitor:
 
     @staticmethod
     def _iter_candidate_ports() -> list[str]:
-        """Enumerate serial device paths to probe, Pi-UART first.
+        """Enumerate serial device paths that could be the BMS.
 
-        On the DeckHand PCB the BMS lives on Pi UART4 (GPIO 8/9). Because
-        the /dev/ttyAMA<N> index depends on device-tree overlay load
-        order, we resolve UART4 by MMIO address (7e201800 on BCM2711,
-        matches the same UART controller on BCM2712/RP1 legacy layout)
-        and put that tty first. We then fall back to all remaining ttyAMA
-        devices, /dev/serial0, and finally USB serial adapters, so legacy
-        setups (BMS on ttyAMA0 / USB-RS485) still auto-detect. Combines
-        pyserial's ``list_ports.comports()`` with a direct glob over /dev
-        so we don't miss devices that pyserial's enumeration drops (some
-        adapters lack udev info inside containers).
+        On the DeckHand PCB the BMS lives on the GPIO 8/9 UART (UART4 on a
+        Pi 4, UART3 on a Pi 5). Because the /dev/ttyAMA<N> index depends
+        on device-tree overlay load order, we resolve it by MMIO address.
+        When it exists we probe only it plus USB serial adapters (a
+        BLUART / USB-RS485 BMS link): the Pi's other UARTs are wired to
+        other things (debug console, autopilot), so they never get Daly
+        request frames or RS-485 RTS mode. Boards without that UART fall
+        back to every ttyAMA, /dev/serial0 and USB serial device, so legacy
+        setups still auto-detect. Combines pyserial's
+        ``list_ports.comports()`` with a direct glob over /dev so we don't
+        miss devices that pyserial's enumeration drops (some adapters lack
+        udev info inside containers).
         """
         import glob
 
@@ -662,17 +697,20 @@ class BatteryMonitor:
             )
             BatteryMonitor._uart4_logged = "__missing__"
 
-        for path in ("/dev/serial0",):
-            if os.path.exists(path):
-                _add(path)
-        for pattern in ("/dev/ttyAMA*",):
-            for path in sorted(glob.glob(pattern)):
-                _add(path)
+        if not uart:
+            for path in ("/dev/serial0",):
+                if os.path.exists(path):
+                    _add(path)
+            for pattern in ("/dev/ttyAMA*",):
+                for path in sorted(glob.glob(pattern)):
+                    _add(path)
 
         try:
             from serial.tools import list_ports
 
             for info in list_ports.comports():
+                if uart and info.device.startswith(("/dev/ttyAMA", "/dev/serial")):
+                    continue
                 _add(info.device)
         except Exception as exc:
             logger.debug("list_ports.comports() failed: %s", exc)

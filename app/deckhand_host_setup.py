@@ -633,6 +633,34 @@ def _apply_pi5_pinmux() -> list[str]:
     return applied
 
 
+def ensure_rs485_pinmux() -> bool | None:
+    """Make sure GPIO 11 is still RTS3 before a BMS (re)connect on a Pi 5.
+
+    Startup applies the mux once, but anything that later puts GPIO 11 back
+    to a plain output leaves the transceiver stuck transmitting, and the
+    kernel's RS-485 ioctl still "succeeds", so the battery monitor would
+    retry forever. Called before each reconnect attempt. Returns True if
+    the mux had been lost and was restored, False if it was already right,
+    None if not applicable (not a Pi 5 DeckHand) or the check failed.
+    """
+    if _STATUS.get("board") != "pi5" or not _STATUS.get("is_deckhand"):
+        return None
+    try:
+        rc, out, _ = _run_host_command("pinctrl get 11", timeout=3.0)
+    except Exception as exc:
+        logger.debug("host_setup: pinctrl get 11 failed: %s", exc)
+        return None
+    if rc == 0 and "RTS3" in out:
+        return False
+    if _apply_pi5_pinmux():
+        logger.warning(
+            "host_setup: GPIO 11 had lost its RTS3 mux (%s); restored for RS-485",
+            out.strip() or f"rc={rc}",
+        )
+        return True
+    return None
+
+
 # ----- reboot ------------------------------------------------------------
 
 def _trigger_reboot() -> None:

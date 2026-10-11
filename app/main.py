@@ -2422,6 +2422,7 @@ battery_monitor = BatteryMonitor(
     hw=hw,
     config_getter=_battery_config_getter,
     time_synced_fn=is_time_synced,
+    rs485_pinmux_fn=deckhand_host_setup.ensure_rs485_pinmux,
 )
 
 # MCP7940N RTC on the DeckHand PCB (I2C address 0x6F). Instantiated lazily
