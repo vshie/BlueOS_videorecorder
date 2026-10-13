@@ -130,24 +130,25 @@ class BoardDalyBMS(DalyBMS):
         self.serial_timeout = serial_timeout
         # Half-duplex direction control (populated by set_direction_control()).
         self._de_toggle: Any = None
-        self._de_release_delay_s: float = 0.001
+        self._de_release_delay_s: float = 0.0004
 
     def set_direction_control(
         self,
         toggle: Any,
-        release_delay_s: float = 0.001,
+        release_delay_s: float = 0.0004,
     ) -> None:
         """Register a driver-enable callback for half-duplex RS485.
 
         ``toggle(transmit: bool)`` is called with ``True`` immediately
         before ``serial.write()`` and ``False`` after the frame has been
         flushed to the wire and the extra release delay has elapsed.
-        ``release_delay_s`` covers the pyserial ``flush()`` + UART shift-
-        register drain time — 15 A5 bytes at 9600 baud take ~16 ms end to
-        end, and ``flush()`` blocks until the last byte is on the wire, so
-        a small extra pad (~1 ms) is enough to avoid clipping the trailing
-        CRC. Pass ``None`` to disable direction control (auto-direction
-        transceivers, USB adapters).
+        DE is released ``release_delay_s`` after the frame's computed
+        time on the wire (10 bits per byte at the configured baud), not
+        after ``flush()``: on the Pi 4's 5.10 kernel ``tcdrain`` returns
+        ~8 ms after the last stop bit, and a Daly BMS starts replying
+        within ~1 ms, so waiting on ``flush()`` cut the first 3-4 bytes
+        off every reply. Pass ``None`` to disable direction control
+        (auto-direction transceivers, USB adapters).
         """
         self._de_toggle = toggle
         self._de_release_delay_s = max(0.0, float(release_delay_s))
@@ -157,23 +158,26 @@ class BoardDalyBMS(DalyBMS):
 
         Returns the number of bytes written (same contract as
         pyserial.Serial.write). When a DE toggle is registered, drives
-        the transceiver into transmit before the write, waits for
-        ``flush()`` + the release delay to guarantee the last stop bit
-        has left the shift register, then hands the bus back to the
-        receiver.
+        the transceiver into transmit before the write, waits until the
+        frame's last stop bit should have left the UART plus the release
+        delay, then hands the bus back to the receiver.
         """
         toggle = self._de_toggle
         if toggle is None:
             return self.serial.write(message_bytes)
         toggle(True)
         try:
+            start = time.perf_counter()
             written = self.serial.write(message_bytes)
-            try:
-                self.serial.flush()
-            except Exception:
+            frame_s = len(message_bytes) * 10 / float(self.serial.baudrate or self.baudrate)
+            release_at = start + frame_s + self._de_release_delay_s
+            # Sleep most of the frame, then spin: time.sleep can overshoot
+            # by a millisecond or more, which is enough to miss the reply.
+            coarse = release_at - time.perf_counter() - 0.002
+            if coarse > 0:
+                time.sleep(coarse)
+            while time.perf_counter() < release_at:
                 pass
-            if self._de_release_delay_s > 0:
-                time.sleep(self._de_release_delay_s)
         finally:
             toggle(False)
         return written
@@ -205,30 +209,33 @@ class BoardDalyBMS(DalyBMS):
         return message_bytes
 
     @staticmethod
-    def _parse_response_frame(b: bytes, command_byte: int) -> bytes | None:
-        """Extract the 8-byte data payload from an A5 UART or RS485 response frame."""
-        if len(b) < 4:
-            return None
-        if b[0] == 0x00 and b[1] == 0xA5:
-            if len(b) < 14 or b[3] != command_byte:
-                return None
-            payload = b[5:13]
-            expected_crc = sum(b[:13]) & 0xFF
-            crc = b[13]
-        elif b[0] == 0xA5:
-            if len(b) < 13 or b[2] != command_byte:
-                return None
-            payload = b[4:12]
-            expected_crc = sum(b[:12]) & 0xFF
-            crc = b[12]
-        else:
-            return None
-        if expected_crc != crc:
-            logger.debug("response crc mismatch: %02x != %02x", expected_crc, crc)
-        return payload
+    def _take_response_frames(buf: bytearray, command_byte: int) -> list[bytes]:
+        """Pop every complete reply to ``command_byte`` off the front of ``buf``.
+
+        Packs answer with 13-byte UART frames (``A5 addr cmd 08 data[8] crc``);
+        the Doris RS485 adapter prefixes each with a 0x00, which doesn't change
+        the checksum, so syncing on 0xA5 handles both. Frames are found by
+        their start byte and checksum rather than fixed read sizes, so a
+        multi-frame reply (cell voltages) stays aligned. Returns the 8-byte
+        payloads; a trailing partial frame is left in ``buf``.
+        """
+        payloads: list[bytes] = []
+        i = 0
+        while i + 13 <= len(buf):
+            frame = buf[i : i + 13]
+            if frame[0] == 0xA5 and frame[2] == command_byte and frame[3] == 0x08 \
+                    and (sum(frame[:12]) & 0xFF) == frame[12]:
+                payloads.append(bytes(frame[4:12]))
+                i += 13
+            else:
+                i += 1
+        # Keep a partial frame that may still be arriving.
+        tail = buf.rfind(0xA5, max(i, len(buf) - 12))
+        del buf[: tail if tail >= 0 else len(buf)]
+        return payloads
 
     def _read(self, command, extra="", max_responses=1, return_list=False, write: bool = False):
-        """Parse RS485 A5 frames (leading 0x00, 15-byte wire length)."""
+        """Send one A5 request and collect up to ``max_responses`` reply frames."""
         self.logger.debug("-- %s %s------------------------", command, "write " if write else "")
         if not self.serial.is_open:
             self.serial.open()
@@ -250,19 +257,20 @@ class BoardDalyBMS(DalyBMS):
 
         command_byte = int(command, 16)
         response_data = []
-        for x in range(max_responses):
-            b = self.serial.read(14 if x else 15)
+        buf = bytearray()
+        while len(response_data) < max_responses:
+            # Ask for exactly the bytes the remaining frames need so read()
+            # returns as soon as they're in rather than waiting out the timeout.
+            want = 13 * (max_responses - len(response_data)) - len(buf)
+            b = self.serial.read(max(want, 1))
             if len(b) == 0:
-                self.logger.debug("%i empty response for command %s", x, command)
+                self.logger.debug("%i empty response for command %s", len(response_data), command)
                 break
-            self.logger.debug("%i %s %s", x, b.hex(), len(b))
-            payload = self._parse_response_frame(b, command_byte)
-            if payload is None:
-                self.logger.debug("invalid response frame for command %s", command)
-                continue
-            response_data.append(payload)
-            if len(response_data) == max_responses:
-                break
+            self.logger.debug("%i %s %s", len(response_data), b.hex(), len(b))
+            buf += b
+            response_data += self._take_response_frames(buf, command_byte)
+        if len(response_data) > max_responses:
+            response_data = response_data[:max_responses]
 
         if return_list or len(response_data) > 1:
             return response_data

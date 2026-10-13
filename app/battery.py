@@ -81,10 +81,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # DeckHand PCB). Set to null to disable direction toggling for boards
     # with auto-direction transceivers or external USB adapters.
     "rs485_de_gpio": 11,
-    # Time to hold DE HIGH after write() before flipping back to receive.
-    # 300 us covers a 15-byte @ 9600 baud frame's last-byte drain plus
-    # some slack for the transceiver's tPHZ (~50 ns).
-    "rs485_de_release_delay_s": 0.001,
+    # Extra time to hold DE HIGH past the frame's computed wire time before
+    # flipping back to receive. A Daly BMS replies within ~1 ms, so this must
+    # stay well under that: bench tests on a Pi 4 gave clean replies at
+    # 0.3-0.6 ms and clipped ones at 1 ms.
+    "rs485_de_release_delay_s": 0.0004,
 }
 
 # Serial paths we deliberately skip when auto-scanning. /dev/ttyS0 is the
@@ -467,7 +468,7 @@ class BatteryMonitor:
         mode: str = "auto",
         window: float = 3.0,
         de_toggle_factory: Callable[[], Callable[[bool], None] | None] | None = None,
-        de_release_delay_s: float = 0.001,
+        de_release_delay_s: float = 0.0004,
     ) -> Any | None:
         """Open `device`, send one quick BMS read, return the reader if it
         responds with plausible Daly data, else close and return None.
