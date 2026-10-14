@@ -84,8 +84,8 @@ Both paths produce the same result — the `[pi4]` block in `/boot/firmware/conf
 [pi4]
 dtoverlay=spi1-3cs
 dtoverlay=uart4
-dtoverlay=uart3-off
-dtoverlay=spi0-led-off
+dtoverlay=uart3-off # custom - DeckHand: keeps UART3 off GPIO 4/5
+dtoverlay=spi0-led-off # custom - DeckHand: keeps SPI0 off GPIO 10
 enable_uart=1
 ...
 gpio=11,24,25=op,pu,dh
@@ -106,7 +106,9 @@ Rationale for the overrides applied by the script:
 - **`dtoverlay=spi0-led-off`** is a belt-and-braces no-op that ensures the `spi0-led` overlay (which would claim GPIO 10 as SPI0 MOSI) never gets loaded.
 - We do **not** add our own `dtoverlay=spi1-1cs` — the reconciler always re-adds `dtoverlay=spi1-3cs` on boot, and that overlay also exposes `/dev/spidev1.0` on the same MOSI pin (GPIO 20). The WS2812 LED backend opens `/dev/spidev1.0` and doesn't care which SPI1 variant loaded it.
 
-**Critical: NO inline `#` comments on `dtoverlay=` lines.** The RPi firmware overlay parser treats the whole trailing string as part of the overlay name and silently rejects the line at boot. Empirically confirmed 2026-07-14: with `dtoverlay=uart4  # custom - DeckHand: …` the UART4 hardware was never enumerated by the kernel; the exact same line without the comment enumerated `/dev/ttyAMA4` immediately on the very next boot. The BlueOS reconciler does NOT strip any of the three DeckHand overlays above (none of them match its known `[pi4]` conflict patterns), so we can safely write them without the `# custom` protection marker.
+**No inline `#` comment on `dtoverlay=uart4`.** The RPi firmware overlay parser treats the whole trailing string as part of the overlay name and silently rejects the line at boot. Empirically confirmed 2026-07-14: with `dtoverlay=uart4  # custom - DeckHand: …` the UART4 hardware was never enumerated by the kernel; the exact same line without the comment enumerated `/dev/ttyAMA4` immediately on the very next boot. BlueOS wants `uart4` too, so it needs no protection.
+
+**The two `-off` lines DO carry `# custom`.** BlueOS 1.4.7+ rebuilds the `[pi4]` section on every boot and puts `dtoverlay=uart3` / `dtoverlay=spi0-led` back unless a matching line is marked `# custom`; without the marker the extension and BlueOS swap the lines on every boot and the reboot prompt never clears. The firmware skipping these commented lines is the intent: they only exist to keep the real overlays from loading.
 
 The MCP7940N RTC is driven by the extension in Python (no `dtoverlay=i2c-rtc` needed).
 

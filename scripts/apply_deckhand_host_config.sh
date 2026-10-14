@@ -39,10 +39,12 @@
 # UART4 was never enumerated by the kernel; the same line without the
 # comment enumerated UART4 immediately on the very next boot).
 #
-# The BlueOS reconciler does NOT strip ``dtoverlay=uart4``,
-# ``dtoverlay=uart3-off``, or ``dtoverlay=spi0-led-off`` because none of
-# them match its known conflict patterns for ``[pi4]``, so we can safely
-# write them WITHOUT the ``# custom`` marker.
+# The BlueOS reconciler wants ``dtoverlay=uart4`` too, so it stays plain.
+# The two ``-off`` lines DO carry ``# custom``: BlueOS 1.4.7+ rebuilds the
+# [pi4] section every boot and restores ``uart3`` / ``spi0-led`` unless a
+# matching line is ``# custom`` protected. The firmware skipping those
+# commented lines is harmless; they exist only to keep the real overlays
+# from loading.
 
 set -e
 
@@ -82,13 +84,13 @@ for i in range(start + 1, len(lines)):
         break
 
 # Canonical DeckHand overrides. Each entry: (regex-that-matches-any-variant,
-# canonical-line-to-write). Canonical lines carry NO inline comment (see
-# the header of this script for why); the regex matches both plain and
-# legacy commented forms so a re-apply cleans up old writes in place.
+# canonical-line-to-write). uart4 carries NO inline comment; the -off lines
+# carry the ``# custom`` marker (see the header of this script for why). The
+# regexes match every variant so a re-apply rewrites old forms in place.
 WANTED = [
     (r"^dtoverlay=uart4(?:,\S+)?(?:\s+#.*)?$",     "dtoverlay=uart4"),
-    (r"^dtoverlay=uart3(?:-off)?(?:\s+#.*)?$",     "dtoverlay=uart3-off"),
-    (r"^dtoverlay=spi0-led(?:-off)?(?:\s+#.*)?$",  "dtoverlay=spi0-led-off"),
+    (r"^dtoverlay=uart3(?:-off)?(?:\s+#.*)?$",     "dtoverlay=uart3-off # custom - DeckHand: keeps UART3 off GPIO 4/5"),
+    (r"^dtoverlay=spi0-led(?:-off)?(?:\s+#.*)?$",  "dtoverlay=spi0-led-off # custom - DeckHand: keeps SPI0 off GPIO 10"),
 ]
 
 section = lines[start + 1 : end]

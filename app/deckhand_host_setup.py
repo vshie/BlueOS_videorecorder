@@ -21,14 +21,14 @@ Runs on every extension start. Non-destructive on non-DeckHand hardware:
         dtoverlay=spi0-led-off   (belt-and-braces — keep SPI0 off GPIO 10
                                   even if a downstream dtparam=spi=on
                                   gets added by another agent)
-     These lines are DELIBERATELY written WITHOUT the usual
-     ``# custom - ...`` inline marker: the RPi firmware ``dtoverlay=``
-     parser silently rejects lines whose value has trailing whitespace
-     followed by ``#`` (empirically verified 2026-07-14: with the marker
-     UART4 was not enumerated at boot; without it, UART4 came up
-     immediately). The BlueOS reconciler doesn't strip these three
-     overlays anyway — none of them match any of its known
-     conflicting-configuration patterns for ``[pi4]``.
+     uart4 is DELIBERATELY written WITHOUT the usual ``# custom - ...``
+     inline marker: the RPi firmware ``dtoverlay=`` parser silently
+     rejects lines whose value has trailing whitespace followed by ``#``
+     (empirically verified 2026-07-14: with the marker UART4 was not
+     enumerated at boot; without it, UART4 came up immediately). The two
+     ``-off`` lines DO carry the marker: BlueOS 1.4.7+ otherwise
+     restores ``uart3`` / ``spi0-led`` on every boot, and the firmware
+     skipping them is exactly the intent.
 
      Two other pieces of state we DON'T persist in config.txt on purpose:
        * ``dtoverlay=spi1-1cs`` — the reconciler auto-adds ``spi1-3cs``
@@ -121,12 +121,11 @@ MAX_PATCH_ATTEMPTS = 3
 # the RPi firmware overlay parser — we rewrite those to the plain
 # form on next apply).
 #
-# CANONICAL LINES CARRY NO INLINE COMMENT: with an inline `# custom`
-# marker, the RPi firmware ``dtoverlay=`` parser treats the whole
-# trailing string as part of the overlay name and silently skips the
-# line at boot. The BlueOS reconciler doesn't strip any of these three
-# lines anyway (none of them match its `[pi4]` conflict patterns for
-# Navigator hardware), so we don't need marker protection.
+# uart4 CARRIES NO INLINE COMMENT: with an inline `# custom` marker,
+# the RPi firmware ``dtoverlay=`` parser treats the whole trailing
+# string as part of the overlay name and silently skips the line at
+# boot. BlueOS wants uart4 too, so it needs no protection. The two
+# ``-off`` lines are the opposite case (see below).
 #
 # uart4 is DELIBERATELY plain (no ``,ctsrts``) — the DeckHand's rotation
 # sensor lives on GPIO 10, which ``ctsrts`` would steal for CTS4.
@@ -137,14 +136,25 @@ MAX_PATCH_ATTEMPTS = 3
 # in our overrides — the reconciler adds it but the SPI0 driver just
 # fails to bind because GPIO 9 (SPI0_MISO) is already taken by UART4
 # (RXD4), which is benign.
+UART3_OFF_LINE = "dtoverlay=uart3-off # custom - DeckHand: keeps UART3 off GPIO 4/5"
+SPI0_LED_OFF_LINE = "dtoverlay=spi0-led-off # custom - DeckHand: keeps SPI0 off GPIO 10"
+
 WANTED_OVERLAYS: list[tuple[str, str]] = [
     # The regex intentionally matches BOTH `dtoverlay=uart4` and any
     # ``dtoverlay=uart4  # custom - ...`` from previous versions of the
     # extension, so a re-apply from an old install cleans up the broken
     # form in place.
     (r"^dtoverlay=uart4(?:,\S+)?(?:\s+#.*)?$",         "dtoverlay=uart4"),
-    (r"^dtoverlay=uart3(?:-off)?(?:\s+#.*)?$",         "dtoverlay=uart3-off"),
-    (r"^dtoverlay=spi0-led(?:-off)?(?:\s+#.*)?$",      "dtoverlay=spi0-led-off"),
+    # These two DO carry the ``# custom`` marker, unlike uart4. BlueOS
+    # 1.4.7+ rebuilds the [pi4] section from its Navigator list on every
+    # boot (normalize_section_order) and puts ``dtoverlay=uart3`` /
+    # ``spi0-led`` back unless a line matching them is ``# custom``
+    # protected; the old ``-off`` prefix trick no longer survives that.
+    # The firmware skipping the commented line is harmless here: the
+    # line only exists to keep the real overlay from being loaded, and
+    # no ``uart3-off`` / ``spi0-led-off`` overlay exists anyway.
+    (r"^dtoverlay=uart3(?:-off)?(?:\s+#.*)?$",         UART3_OFF_LINE),
+    (r"^dtoverlay=spi0-led(?:-off)?(?:\s+#.*)?$",      SPI0_LED_OFF_LINE),
 ]
 
 # Runtime devices we expect to exist on a booted DeckHand host. Each entry
@@ -438,10 +448,8 @@ def _needed_changes(
     the first ``[section_name]`` section. Empty list = config is already
     correct.
 
-    We also flag any *broken* forms of our overlays — i.e. the same
-    overlay name with a trailing ``#`` inline comment, which the RPi
-    firmware silently rejects at boot. On next apply we'll rewrite
-    those lines to the plain form.
+    We also flag non-canonical forms of our overlays (wrong or missing
+    inline marker) so the next apply rewrites them in place.
     """
     wanted = WANTED_OVERLAYS if wanted is None else wanted
     lines = config_text.splitlines()
@@ -458,9 +466,9 @@ def _needed_changes(
         if not matched:
             problems.append(f"missing: {canonical}")
         elif canonical not in matched:
-            # Line is present but in a form the firmware parser rejects
-            # (typically the legacy ``... # custom - ...`` variant we
-            # used to write). Needs to be rewritten to the plain form.
+            # Line is present but not in its canonical form (e.g. a legacy
+            # ``uart4 # custom`` the firmware rejects, or a ``-off`` line
+            # missing the marker BlueOS needs to leave it alone).
             problems.append(f"needs rewrite -> {canonical}")
     return problems
 
