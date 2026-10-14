@@ -57,6 +57,7 @@ from env_sensors import EnvSensorMonitor
 from rtc_sync import RtcSyncManager
 import deckhand_host_setup
 import audio
+import model_override
 
 # ── Constants ────────────────────────────────────────────────────────────
 VIDEO_DIR = "/app/videorecordings"
@@ -428,6 +429,11 @@ def load_config():
         # green → awb_auto_mode=0, blue → awb_auto_mode=1. Applied on RadCam
         # boot and again before every onceAWB trigger.
         "radcam_awb_scene": DEFAULT_AWB_SCENE,
+        # Show the DropCam 3D model in BlueOS (Digital Twin, Vehicle Setup)
+        # by installing it as /userdata/modeloverrides/ALL.glb. The hash is
+        # the model we last installed, so we only ever replace our own file.
+        "blueos_model_override": True,
+        "blueos_model_hash": None,
         "battery": {
             "enabled": True,
             "serial_port": "auto",
@@ -2182,6 +2188,44 @@ def route_telemetry():
 
 # ── Audio (USB-camera mic pipeline toggle) ──────────────────────────────
 
+def _model_override_settings():
+    cfg = load_config()
+    return bool(cfg.get("blueos_model_override", True)), cfg.get("blueos_model_hash")
+
+
+def _save_model_override_hash(sha):
+    cfg = load_config()
+    cfg["blueos_model_hash"] = sha
+    save_config(cfg)
+
+
+@app.route("/blueos_model", methods=["GET"])
+def route_blueos_model_get():
+    """Whether the DropCam 3D model is installed as BlueOS's vehicle model."""
+    enabled, _ = _model_override_settings()
+    return jsonify({"success": True, "enabled": enabled, **model_override.get_status()})
+
+
+@app.route("/blueos_model", methods=["POST"])
+def route_blueos_model_set():
+    """Turn the BlueOS vehicle-model override on or off and apply it now."""
+    data = request.get_json(silent=True) or {}
+    if "enabled" not in data:
+        return jsonify({"success": False, "message": "enabled required"}), 400
+    cfg = load_config()
+    cfg["blueos_model_override"] = bool(data["enabled"])
+    save_config(cfg)
+    try:
+        status = model_override.ensure(cfg["blueos_model_override"], cfg.get("blueos_model_hash"),
+                                       _save_model_override_hash)
+    except Exception as e:
+        logger.warning(f"BlueOS model override failed: {e}")
+        return jsonify({"success": False, "enabled": cfg["blueos_model_override"],
+                        "state": "error", "detail": str(e)}), 502
+    return jsonify({"success": status.get("state") != "error",
+                    "enabled": cfg["blueos_model_override"], **status})
+
+
 @app.route("/audio", methods=["GET"])
 def route_audio_get():
     """Report audio configuration + whether the USB camera's mic is
@@ -3241,6 +3285,11 @@ def _boot():
             )
     except Exception as e:
         logger.warning(f"DeckHand host setup skipped: {e}")
+
+    # Install the DropCam 3D model as BlueOS's vehicle model (same model for
+    # 4k Cam and USB camera units). Runs in the background and retries until
+    # BlueOS's web server answers; never replaces a user's own ALL.glb.
+    model_override.ensure_in_background(_model_override_settings, _save_model_override_hash)
 
     # Unmute the USB camera's built-in mic once at startup. The Camera
     # ALSA card boots with `Mic Capture Switch = off` even though

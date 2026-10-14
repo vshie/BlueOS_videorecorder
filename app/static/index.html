@@ -976,6 +976,7 @@ document.querySelectorAll('.tab').forEach(t => {
     document.getElementById('tab-' + t.dataset.tab).classList.add('active');
     document.body.classList.toggle('calib-tab', t.dataset.tab === 'calibration');
     if (t.dataset.tab === 'recipes') loadRecipes();
+    if (t.dataset.tab === 'setup') loadBlueosModel();
     if (t.dataset.tab === 'calibration') {
       loadLensCalibration();
       mirrorLivePreviewToCalib();
@@ -2771,6 +2772,21 @@ function loadSetup() {
   <pre id="ensureRtspDetails" class="mono" style="display:none;margin-top:6px;font-size:.78em;background:#fff;padding:6px;border:1px solid #ddd;border-radius:4px;overflow-x:auto"></pre>
 </div>
 
+<div class="card" style="margin:8px 0 16px;background:#fafafa;border-left:4px solid #1a73e8">
+  <h3 style="margin-top:0">DropCam 3D Model in BlueOS</h3>
+  <p style="margin:4px 0">
+    Shows the DropCam in BlueOS's Digital Twin (home page) and Vehicle Setup pages instead of a BlueROV,
+    by installing it as <code>userdata/modeloverrides/ALL.glb</code>. Same model for 4k Cam and USB camera units.
+    A custom <code>ALL.glb</code> you installed yourself is never replaced.
+  </p>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+    <label style="display:flex;align-items:center;gap:6px;margin:0">
+      <input type="checkbox" id="blueosModelEnable" onchange="setBlueosModel(this.checked)"> Show DropCam model in BlueOS
+    </label>
+    <span id="blueosModelStatus" class="mono" style="font-size:.85em;color:#555"></span>
+  </div>
+</div>
+
 <h3>1. Initial BlueOS Setup</h3>
 <ul>
   <li>Flash BlueOS to a microSD card (32 GB+ recommended, high-endurance).</li>
@@ -2892,6 +2908,33 @@ async function ensureRtspStream() {
   }
 }
 
+function showBlueosModel(d) {
+  const cb = document.getElementById('blueosModelEnable');
+  const stat = document.getElementById('blueosModelStatus');
+  if (!cb || !stat || !d) return;
+  if (typeof d.enabled === 'boolean') cb.checked = d.enabled;
+  const look = {installed: ['✓', '#2e7d32'], disabled: ['', '#555'], pending: ['…', '#555'],
+                custom_present: ['⚠', '#c77700'], error: ['✗', '#c83232']}[d.state] || ['', '#555'];
+  stat.textContent = (look[0] ? look[0] + ' ' : '') + (d.detail || d.message || '');
+  stat.style.color = look[1];
+}
+
+async function loadBlueosModel() {
+  showBlueosModel(await api('/blueos_model'));
+}
+
+async function setBlueosModel(enabled) {
+  const cb = document.getElementById('blueosModelEnable');
+  cb.disabled = true;
+  showBlueosModel({state: 'pending', detail: enabled ? 'Installing…' : 'Removing…'});
+  try {
+    showBlueosModel(await api('/blueos_model', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled})}));
+  } finally {
+    cb.disabled = false;
+  }
+}
+
 /* ── Environment card (2 Hz refresh matches sensor sample rate) ─── */
 function updateEnvCard(env) {
   const envCard = document.getElementById('envCard');
@@ -2930,6 +2973,7 @@ async function pollEnv() {
 
 /* ── Init ──────────────────────────────────── */
 loadSetup();
+loadBlueosModel();
 loadRecipes();
 loadVideoList();
 pollStatus();
