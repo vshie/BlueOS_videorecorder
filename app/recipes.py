@@ -65,16 +65,16 @@ RECIPE_SCHEMA_DEFAULTS = {
     "led_color": "red",
     "led_blink": "slow",
     "still_prefix": "",
-    "radcam_focus_finder": False,
+    "cam4k_focus_finder": False,
     "focus_sweep_start_us": 870,
     "focus_sweep_end_us": 2130,
     "focus_finder_zoom_us": 935,
-    "radcam_focus_us": 900,
-    "radcam_zoom_us": 935,
-    # One-push AWB via RadCam setImageAdjustmentEx (same path as
-    # radcam-manager / towfish). Interval 0 with enable=False is a no-op.
-    "radcam_awb_enable": True,
-    "radcam_awb_interval_s": 120,
+    "cam4k_focus_us": 900,
+    "cam4k_zoom_us": 935,
+    # One-push AWB via 4k Cam setImageAdjustmentEx (same path as
+    # 4k Cam Manager / towfish). Interval 0 with enable=False is a no-op.
+    "cam4k_awb_enable": True,
+    "cam4k_awb_interval_s": 120,
     "release_enable": False,
     "release_offset_s": 0,
     # Winch vertical profiling (oscillates the release servo during the
@@ -224,9 +224,9 @@ DEFAULT_RECIPES = [
     },
 ]
 
-RADCAM_DEFAULT_RECIPES = [
+CAM4K_DEFAULT_RECIPES = [
     {
-        "id": "radcam-focus-finder",
+        "id": "cam4k-focus-finder",
         "name": "4k Cam Focus Finder",
         "mode": "video",
         "still_interval_s": 1.0,
@@ -244,7 +244,7 @@ RADCAM_DEFAULT_RECIPES = [
         "led_color": "cyan",
         "led_blink": "fast",
         "still_prefix": "",
-        "radcam_focus_finder": True,
+        "cam4k_focus_finder": True,
         "focus_sweep_start_us": 870,
         "focus_sweep_end_us": 2130,
         "focus_finder_zoom_us": 935,
@@ -303,7 +303,7 @@ def validate_recipe(data):
     for fld, lo, hi in [
         ("still_interval_s", 0.1, 3600),
         ("auto_start_delay_minutes", 0, 60),
-        # RadCam tilt travels 865-2250 µs; DropCam stays in the 1000-2000 subset.
+        # 4k Cam tilt travels 865-2250 µs; DropCam stays in the 1000-2000 subset.
         ("servo_start_us", 865, 2250),
         ("servo_end_us", 865, 2250),
         ("servo_pause_points", 0, 50),
@@ -435,29 +435,29 @@ def validate_recipe(data):
             "light_mode must be 'off' or 'always' when the record/idle cycle is enabled"
         )
 
-    if "radcam_focus_finder" in data:
-        clean["radcam_focus_finder"] = bool(data["radcam_focus_finder"])
+    if "cam4k_focus_finder" in data:
+        clean["cam4k_focus_finder"] = bool(data["cam4k_focus_finder"])
 
-    if "radcam_awb_enable" in data:
-        clean["radcam_awb_enable"] = bool(data["radcam_awb_enable"])
+    if "cam4k_awb_enable" in data:
+        clean["cam4k_awb_enable"] = bool(data["cam4k_awb_enable"])
 
-    if "radcam_awb_interval_s" in data:
+    if "cam4k_awb_interval_s" in data:
         try:
-            awb_iv = float(data["radcam_awb_interval_s"])
+            awb_iv = float(data["cam4k_awb_interval_s"])
         except (ValueError, TypeError):
-            errors.append("radcam_awb_interval_s must be a number")
+            errors.append("cam4k_awb_interval_s must be a number")
         else:
             if awb_iv < 10 or awb_iv > 3600:
-                errors.append("radcam_awb_interval_s must be between 10 and 3600")
+                errors.append("cam4k_awb_interval_s must be between 10 and 3600")
             else:
-                clean["radcam_awb_interval_s"] = int(round(awb_iv))
+                clean["cam4k_awb_interval_s"] = int(round(awb_iv))
 
     for fld, lo, hi in [
         ("focus_sweep_start_us", 870, 2130),
         ("focus_sweep_end_us", 870, 2130),
         ("focus_finder_zoom_us", 935, 1850),
-        ("radcam_focus_us", 870, 2130),
-        ("radcam_zoom_us", 935, 1850),
+        ("cam4k_focus_us", 870, 2130),
+        ("cam4k_zoom_us", 935, 1850),
     ]:
         if fld in data:
             try:
@@ -475,27 +475,70 @@ def validate_recipe(data):
     return clean, errors
 
 
-def init_default_recipes(radcam=False):
+# Saved before the RadCam -> 4k Cam rename: settings keys were ``radcam_*``
+# and the focus-finder recipe was ``radcam-focus-finder``.
+_LEGACY_PREFIX, _NEW_PREFIX = "radcam_", "cam4k_"
+LEGACY_RECIPE_IDS = {"radcam-focus-finder": "cam4k-focus-finder"}
+
+
+def rename_legacy_keys(d):
+    """Rename ``radcam_*`` keys to ``cam4k_*`` in place. Returns True if any changed."""
+    old_keys = [k for k in d if k.startswith(_LEGACY_PREFIX)]
+    for k in old_keys:
+        d.setdefault(_NEW_PREFIX + k[len(_LEGACY_PREFIX):], d[k])
+        del d[k]
+    return bool(old_keys)
+
+
+def migrate_legacy_recipes():
+    """Rewrite recipe files saved with the pre-rename names."""
+    _ensure_dir()
+    for fname in sorted(os.listdir(RECIPES_DIR)):
+        if not fname.endswith(".json") or fname == "dropcam_config.json":
+            continue
+        old_id = fname[:-5]
+        new_id = LEGACY_RECIPE_IDS.get(old_id, old_id)
+        path = os.path.join(RECIPES_DIR, fname)
+        try:
+            with open(path, "r") as f:
+                r = json.load(f)
+        except Exception:
+            continue
+        if not rename_legacy_keys(r) and new_id == old_id:
+            continue
+        r["id"] = new_id
+        new_path = _recipe_path(new_id)
+        tmp = new_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(r, f, indent=2)
+        os.replace(tmp, new_path)
+        if new_path != path:
+            os.remove(path)
+        logger.info(f"Migrated recipe {old_id} to 4k Cam naming")
+
+
+def init_default_recipes(cam4k=False):
     """Create default recipe files if the recipes dir is empty.
 
-    When radcam=True, also ensure the RadCam-specific recipes exist.
+    When cam4k=True, also ensure the 4k Cam-specific recipes exist.
     """
     _ensure_dir()
+    migrate_legacy_recipes()
     existing = list_recipes()
     if not existing:
         for recipe in DEFAULT_RECIPES:
             save_recipe(recipe, recipe["id"])
         logger.info(f"Initialized {len(DEFAULT_RECIPES)} default recipes")
 
-    if radcam:
+    if cam4k:
         existing_ids = {r["id"] for r in list_recipes()}
         added = 0
-        for recipe in RADCAM_DEFAULT_RECIPES:
+        for recipe in CAM4K_DEFAULT_RECIPES:
             if recipe["id"] not in existing_ids:
                 save_recipe(recipe, recipe["id"])
                 added += 1
         if added:
-            logger.info(f"Initialized {added} RadCam default recipe(s)")
+            logger.info(f"Initialized {added} 4k Cam default recipe(s)")
 
 
 def list_recipes():

@@ -16,14 +16,14 @@ unchanged, only the silkscreen and this file's constants moved):
     are wired 1:1 to J105 header pins (silkscreen labels shown below), and
     the same driver code runs identically on Pi 4 and Pi 5:
         Ch 0 = TILT      (camera tilt servo; DropCam 1000-2000 us,
-                          RadCam 865-2250 us)
+                          4k Cam 865-2250 us)
         Ch 1 = LUMEN     (lumen light, 1000 us = off, 2000 us = full)
         Ch 2 = RELEASE   (continuous-rotation release drive; 1500 = stop,
                           1000 = wind, 2000 = unwind)
         Ch 3 = EXTSERVO  (external / aux servo, 1000-2000 us)
-        Ch 4 = FOCUS     (RadCam focus, 870-2130 us)
-        Ch 5 = ZOOM      (RadCam zoom, 935-1850 us)
-        Ch 6 = PAN       (RadCam pan, 1000-2000 us)
+        Ch 4 = FOCUS     (4k Cam focus, 870-2130 us)
+        Ch 5 = ZOOM      (4k Cam zoom, 935-1850 us)
+        Ch 6 = PAN       (4k Cam pan, 1000-2000 us)
         Ch 7 = SPARE     (unused header pin reserved for future actuators)
   - GPIO 4  (Pin 7):  PCA9685 ~OE (active-low, 10 k pull-up; held HIGH by
                       default, so we must drive it LOW at init to enable
@@ -71,9 +71,9 @@ SERVO_GPIO = 0        # TILT     (camera tilt servo)
 LIGHT_GPIO = 1        # LUMEN    (lumen light PWM)
 RELEASE_GPIO = 2      # RELEASE  (continuous-rotation drive)
 EXT_SERVO_GPIO = 3    # EXTSERVO (external aux servo)
-FOCUS_GPIO = 4        # FOCUS    (RadCam focus)
-ZOOM_GPIO = 5         # ZOOM     (RadCam zoom)
-PAN_GPIO = 6          # PAN      (RadCam pan)
+FOCUS_GPIO = 4        # FOCUS    (4k Cam focus)
+ZOOM_GPIO = 5         # ZOOM     (4k Cam zoom)
+PAN_GPIO = 6          # PAN      (4k Cam pan)
 SPARE_GPIO = 7        # SPARE    (unused / reserved)
 
 # PCA9685 output-enable pin on the Pi. Active low; a 10 k pull-up keeps
@@ -164,19 +164,19 @@ SERVO_MIN_US = 1000
 SERVO_MAX_US = 2000
 SERVO_MID_US = 1500
 
-# RadCam measured actuator limits (µs). Tilt shares the TILT PCA channel but
+# 4k Cam measured actuator limits (µs). Tilt shares the TILT PCA channel but
 # travels farther than a standard hobby servo; focus/zoom are lens drives.
-RADCAM_TILT_MIN_US = 865
-RADCAM_TILT_MAX_US = 2250
-RADCAM_FOCUS_MIN_US = 870
-RADCAM_FOCUS_MAX_US = 2130
-RADCAM_ZOOM_MIN_US = 935
-RADCAM_ZOOM_MAX_US = 1850
+CAM4K_TILT_MIN_US = 865
+CAM4K_TILT_MAX_US = 2250
+CAM4K_FOCUS_MIN_US = 870
+CAM4K_FOCUS_MAX_US = 2130
+CAM4K_ZOOM_MIN_US = 935
+CAM4K_ZOOM_MAX_US = 1850
 
-# Nod gesture tilt mapping (field-verified on DeckHand / RadCam): higher PWM
+# Nod gesture tilt mapping (field-verified on DeckHand / 4k Cam): higher PWM
 # = camera nose-down. Sequence uses full extents both ways, then parks centre.
-TILT_DOWN_US_RADCAM = RADCAM_TILT_MAX_US     # 2250
-TILT_UP_US_RADCAM = RADCAM_TILT_MIN_US       # 865
+TILT_DOWN_US_CAM4K = CAM4K_TILT_MAX_US     # 2250
+TILT_UP_US_CAM4K = CAM4K_TILT_MIN_US       # 865
 TILT_DOWN_US_DROPCAM = SERVO_MAX_US          # 2000
 TILT_UP_US_DROPCAM = SERVO_MIN_US            # 1000
 
@@ -188,10 +188,10 @@ NOD_TOP_HOLD_S = 0.12
 NOD_RETURN_S = 0.35
 
 
-def _nod_extents(radcam=False):
+def _nod_extents(cam4k=False):
     """Return (down_us, up_us) full tilt extents for the nod."""
-    if radcam:
-        return TILT_DOWN_US_RADCAM, TILT_UP_US_RADCAM
+    if cam4k:
+        return TILT_DOWN_US_CAM4K, TILT_UP_US_CAM4K
     return TILT_DOWN_US_DROPCAM, TILT_UP_US_DROPCAM
 
 # Release servo positions (microseconds).  The release uses a continuous-
@@ -585,9 +585,9 @@ class HardwareController:
     # ── Camera Servo ─────────────────────────────────────────────────────
 
     def set_servo(self, position_us):
-        # Allow the wider RadCam tilt window; DropCam UI/recipes stay inside
+        # Allow the wider 4k Cam tilt window; DropCam UI/recipes stay inside
         # the classic 1000-2000 µs band which is a subset of this range.
-        position_us = max(RADCAM_TILT_MIN_US, min(RADCAM_TILT_MAX_US, int(position_us)))
+        position_us = max(CAM4K_TILT_MIN_US, min(CAM4K_TILT_MAX_US, int(position_us)))
         with self._lock:
             self._servo_position = position_us
         if self._servo and self._servo.available:
@@ -617,7 +617,7 @@ class HardwareController:
                 time.sleep(step_delay)
         return False
 
-    def nod_gesture(self, *, radcam=False, return_us=None, stop_event=None):
+    def nod_gesture(self, *, cam4k=False, return_us=None, stop_event=None):
         """Tilt nod from current pose: down → up → down → centre.
 
         Never pre-positions to the up extent (that looked like an upward
@@ -627,7 +627,7 @@ class HardwareController:
         False if interrupted via ``stop_event``.
         """
         self.stop_sweep()
-        down_us, up_us = _nod_extents(radcam=radcam)
+        down_us, up_us = _nod_extents(cam4k=cam4k)
         park = SERVO_MID_US if return_us is None else int(return_us)
         start_us = self.get_servo_position()
 
@@ -963,13 +963,13 @@ class HardwareController:
     # hysteresis registers no interrupt at all, so its CPU cost is constant
     # no matter how noisy the line gets — the storm is structurally
     # impossible.  This runs identically on Pi 4 and Pi 5 through lgpio.
-    # init_rotation_sensor() is still opt-in (RadCam-mode boards may leave
+    # init_rotation_sensor() is still opt-in (4k Cam-mode boards may leave
     # the pin unconfigured).
 
     def init_rotation_sensor(self, enable=True):
         """Set up the release-shaft rotation sensor on ROTATION_SENSOR_GPIO.
 
-        Idempotent.  When ``enable=False`` (e.g. RadCam mode where the pin
+        Idempotent.  When ``enable=False`` (e.g. 4k Cam mode where the pin
         is repurposed for something else) this is a no-op and any running
         polling thread is torn down.  Uses the shared lgpio GpioLine so it
         works identically on Pi 4 and Pi 5. Returns True if the sensor is
@@ -1539,7 +1539,7 @@ class HardwareController:
         """Return True if ``gpio`` would collide with the rotation sensor.
 
         Historical: on the direct-wired prototype boards GPIO 26 was
-        dual-purpose (RadCam zoom output / DropCam rotation sensor input),
+        dual-purpose (4k Cam zoom output / DropCam rotation sensor input),
         so every aux-PWM write consulted this guard to avoid clobbering
         the sensor. On the DeckHand PCB the rotation sensor is a Pi
         header GPIO (10 on Rev-A) and every aux channel is a PCA9685
@@ -1560,9 +1560,9 @@ class HardwareController:
         if channel not in AUX_PWM_GPIOS:
             raise ValueError(f"Unknown aux PWM channel: {channel}")
         if channel == "focus":
-            lo, hi = RADCAM_FOCUS_MIN_US, RADCAM_FOCUS_MAX_US
+            lo, hi = CAM4K_FOCUS_MIN_US, CAM4K_FOCUS_MAX_US
         elif channel == "zoom":
-            lo, hi = RADCAM_ZOOM_MIN_US, RADCAM_ZOOM_MAX_US
+            lo, hi = CAM4K_ZOOM_MIN_US, CAM4K_ZOOM_MAX_US
         else:
             lo, hi = SERVO_MIN_US, SERVO_MAX_US
         position_us = max(lo, min(hi, int(position_us)))

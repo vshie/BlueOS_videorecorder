@@ -40,8 +40,8 @@ from scheduler import (
     normalize_awb_scene,
     DEFAULT_AWB_SCENE,
     AWB_SCENE_MODE,
-    RADCAM_AWB_URL,
-    RADCAM_AWB_BODY,
+    CAM4K_AWB_URL,
+    CAM4K_AWB_BODY,
 )
 from system_telemetry import (
     get_cpu_temperature, get_cpu_voltage, get_cpu_clock_mhz,
@@ -50,6 +50,7 @@ from system_telemetry import (
 from recipes import (
     init_default_recipes, list_recipes, get_recipe,
     save_recipe, delete_recipe, calculate_sweep_time,
+    rename_legacy_keys, LEGACY_RECIPE_IDS,
 )
 import usb_storage
 from battery import BatteryMonitor
@@ -66,11 +67,11 @@ _OLD_CONFIG_FILE = os.path.join(VIDEO_DIR, "dropcam_config.json")
 VIDEO_DEVICE = "/dev/video2"
 AUDIO_DEVICE = "hw:Camera,0"
 RTSP_ENDPOINT = "rtsp://admin:blue@192.168.2.10:554/stream_0"
-RADCAM_IP = "192.168.2.10"
-# Cached encode for RadCam stream_0 ("H264" or "H265"). Probed via ffprobe
+CAM4K_IP = "192.168.2.10"
+# Cached encode for 4k Cam stream_0 ("H264" or "H265"). Probed via ffprobe
 # at recording start; defaults to H264 to match the current field camera
 # (towfish also reconfigured stream_0 from H.265 → H.264).
-radcam_encode = "H264"
+cam4k_encode = "H264"
 
 # BlueOS mavlink-camera-manager.  The DropCam no longer reads the USB camera
 # directly (BlueOS owns it); instead we consume the H264 RTSP stream that the
@@ -141,7 +142,7 @@ recording_rotation = 0
 usb_recording = False
 usb_failover_count = 0
 recording_base_dir = None
-radcam_mode = False
+cam4k_mode = False
 
 # Last RTSP endpoint + codec discovered from the BlueOS camera manager, e.g.
 # ("rtsp://127.0.0.1:8554/video_stream__dev_video3", "H264").  Refreshed on
@@ -405,30 +406,30 @@ def load_config():
         "rotation_degrees": 0,
         "storage_preference": "usb",
         # DropCam-only: mux the USB camera's built-in mic into the video
-        # MP4. The RadCam pipeline is video-only regardless of this flag
+        # MP4. The 4k Cam pipeline is video-only regardless of this flag
         # since a bare external RTSP camera has no local mic.
         "audio_enabled": True,
-        # Last-applied lens PWM — restored on RadCam boot / detect.
+        # Last-applied lens PWM — restored on 4k Cam boot / detect.
         # Limits: focus 870-2130, zoom 935-1850, tilt 865-2250.
-        "radcam_focus_us": 900,
-        "radcam_zoom_us": 935,
-        "radcam_pan_us": 1500,
-        "radcam_ext_servo_us": 1500,
+        "cam4k_focus_us": 900,
+        "cam4k_zoom_us": 935,
+        "cam4k_pan_us": 1500,
+        "cam4k_ext_servo_us": 1500,
         # Four named (medium × zoom-end) focus/zoom pairs from Lens Cal.
         # Workflow: park zoom at min (or max), dial focus sharp, Save that slot.
-        "radcam_lens_slot": "air_min",
-        "radcam_air_min_focus_us": 900,
-        "radcam_air_min_zoom_us": 935,
-        "radcam_air_max_focus_us": 900,
-        "radcam_air_max_zoom_us": 1850,
-        "radcam_water_min_focus_us": 900,
-        "radcam_water_min_zoom_us": 935,
-        "radcam_water_max_focus_us": 900,
-        "radcam_water_max_zoom_us": 1850,
-        # Water-environment AWB scene for one-push WB (radcam-manager Green/Blue).
-        # green → awb_auto_mode=0, blue → awb_auto_mode=1. Applied on RadCam
+        "cam4k_lens_slot": "air_min",
+        "cam4k_air_min_focus_us": 900,
+        "cam4k_air_min_zoom_us": 935,
+        "cam4k_air_max_focus_us": 900,
+        "cam4k_air_max_zoom_us": 1850,
+        "cam4k_water_min_focus_us": 900,
+        "cam4k_water_min_zoom_us": 935,
+        "cam4k_water_max_focus_us": 900,
+        "cam4k_water_max_zoom_us": 1850,
+        # Water-environment AWB scene for one-push WB (4k Cam Manager Green/Blue).
+        # green → awb_auto_mode=0, blue → awb_auto_mode=1. Applied on 4k Cam
         # boot and again before every onceAWB trigger.
-        "radcam_awb_scene": DEFAULT_AWB_SCENE,
+        "cam4k_awb_scene": DEFAULT_AWB_SCENE,
         # Show the DropCam 3D model in BlueOS (Digital Twin, Vehicle Setup)
         # by installing it as /userdata/modeloverrides/ALL.glb. The hash is
         # the model we last installed, so we only ever replace our own file.
@@ -466,7 +467,14 @@ def load_config():
                 raw = f.read().strip()
             if raw:
                 saved = json.loads(raw)
+                # Configs saved before the RadCam -> 4k Cam rename.
+                migrated = rename_legacy_keys(saved)
+                if saved.get("active_recipe_id") in LEGACY_RECIPE_IDS:
+                    saved["active_recipe_id"] = LEGACY_RECIPE_IDS[saved["active_recipe_id"]]
+                    migrated = True
                 defaults.update(saved)
+                if migrated:
+                    save_config(defaults)
             else:
                 logger.warning("Config file exists but is empty (possible power-cut corruption)")
     except json.JSONDecodeError as e:
@@ -493,17 +501,17 @@ _cfg = load_config()
 image_rotation = _cfg.get("rotation_degrees", 0)
 storage_preference = _cfg.get("storage_preference", "usb")
 audio_enabled = bool(_cfg.get("audio_enabled", True))
-radcam_awb_scene = normalize_awb_scene(_cfg.get("radcam_awb_scene", DEFAULT_AWB_SCENE))
+cam4k_awb_scene = normalize_awb_scene(_cfg.get("cam4k_awb_scene", DEFAULT_AWB_SCENE))
 
 # ── ASS subtitle generation (system telemetry) ──────────────────────────
 
 def create_ass_file(video_path):
     base = os.path.splitext(video_path)[0]
     ass_path = base + ".ass"
-    title = "4k Cam Telemetry" if radcam_mode else "DropCam Telemetry"
+    title = "4k Cam Telemetry" if cam4k_mode else "DropCam Telemetry"
     # ASS Fontsize/margins are in PlayRes pixels. 4K uses 2× the 1080p
     # style so on-screen subtitle size matches DropCam footage.
-    if radcam_mode:
+    if cam4k_mode:
         res_x, res_y = 3840, 2160
         fontsize, outline, shadow = 40, 4, 2
         margin_l, margin_r, margin_v = 20, 20, 40
@@ -576,7 +584,7 @@ def update_ass_file():
                 parts.append(f"Time:{now_str}")
                 parts.append(f"Servo:{servo}us")
                 parts.append(f"Light:{light}%")
-                if radcam_mode:
+                if cam4k_mode:
                     parts.append(f"Focus:{hw.get_aux_pwm('focus')}us")
                     parts.append(f"Zoom:{hw.get_aux_pwm('zoom')}us")
                 try:
@@ -740,12 +748,12 @@ def _humanize_gst_error(msg):
     """Map a raw GStreamer error line to a short, operator-friendly hint."""
     low = msg.lower()
     cam = ("4k Cam RTSP stream"
-           if radcam_mode else
+           if cam4k_mode else
            "USB camera connection/power")
     if ("could not read from resource" in low
             or "failed to allocate a buffer" in low
             or "internal data stream error" in low):
-        if radcam_mode:
+        if cam4k_mode:
             return ("Camera stopped delivering video. Check the 4k Cam "
                     "network link and that stream_0 is reachable "
                     f"({RTSP_ENDPOINT}).")
@@ -758,13 +766,13 @@ def _humanize_gst_error(msg):
     return msg
 
 
-def probe_radcam_encode(url: str = RTSP_ENDPOINT, timeout_s: float = 5.0) -> str:
-    """Return ``H264`` or ``H265`` for the RadCam RTSP stream.
+def probe_cam4k_encode(url: str = RTSP_ENDPOINT, timeout_s: float = 5.0) -> str:
+    """Return ``H264`` or ``H265`` for the 4k Cam RTSP stream.
 
     Uses ffprobe over TCP. Always refreshes — the operator can flip the
     camera between H.264 and H.265 without restarting the extension.
     """
-    global radcam_encode
+    global cam4k_encode
     try:
         r = subprocess.run(
             [
@@ -779,21 +787,21 @@ def probe_radcam_encode(url: str = RTSP_ENDPOINT, timeout_s: float = 5.0) -> str
         )
         name = (r.stdout or "").strip().lower()
         if "265" in name or "hevc" in name:
-            radcam_encode = "H265"
+            cam4k_encode = "H265"
         elif "264" in name or "avc" in name:
-            radcam_encode = "H264"
+            cam4k_encode = "H264"
         else:
             logger.warning(
-                f"RadCam codec probe returned unexpected codec_name={name!r}; "
-                f"keeping {radcam_encode}"
+                f"4k Cam codec probe returned unexpected codec_name={name!r}; "
+                f"keeping {cam4k_encode}"
             )
     except Exception as e:
-        logger.warning(f"RadCam codec probe failed ({e}); keeping {radcam_encode}")
-    return radcam_encode
+        logger.warning(f"4k Cam codec probe failed ({e}); keeping {cam4k_encode}")
+    return cam4k_encode
 
 
-def _radcam_depay(encode: str) -> str:
-    """GStreamer depay/parse chain for a RadCam H264 or H265 RTSP stream."""
+def _cam4k_depay(encode: str) -> str:
+    """GStreamer depay/parse chain for a 4k Cam H264 or H265 RTSP stream."""
     # No byte-stream caps before mp4mux — those break linking with
     # fragment-duration mp4mux on this GStreamer build (towfish used them
     # only with splitmuxsink).
@@ -802,8 +810,8 @@ def _radcam_depay(encode: str) -> str:
     return "rtph264depay ! h264parse config-interval=-1"
 
 
-def _build_radcam_pipeline(filepath: str, encode: str, proto=None) -> str:
-    """Remux RadCam RTSP into a fragmented MP4 (power-cut safe).
+def _build_cam4k_pipeline(filepath: str, encode: str, proto=None) -> str:
+    """Remux 4k Cam RTSP into a fragmented MP4 (power-cut safe).
 
     H.265 on this camera is unreliable over TCP interleaved RTSP (same
     finding that pushed towfish to H.264 / hauv-v2 to UDP). Use UDP for
@@ -812,7 +820,7 @@ def _build_radcam_pipeline(filepath: str, encode: str, proto=None) -> str:
     """
     if proto is None:
         proto = "udp" if encode == "H265" else "tcp"
-    depay = _radcam_depay(encode)
+    depay = _cam4k_depay(encode)
     # do-retransmission is H.265/UDP hygiene from the towfish recorder.
     retrans = " do-retransmission=false" if proto == "udp" else ""
     return (
@@ -961,7 +969,7 @@ def recording_health_watchdog():
                     if file_stall_count >= STALL_ABORT_INTERVALS:
                         secs = file_stall_count * WATCHDOG_INTERVAL_S
                         hint = ("4k Cam RTSP link"
-                                if radcam_mode else
+                                if cam4k_mode else
                                 "camera/USB connection")
                         _abort_recording(
                             f"Recording aborted: no video data written for ~{secs}s "
@@ -976,7 +984,7 @@ def recording_health_watchdog():
             if gst_process and gst_process.poll() is not None:
                 log_event("process_died", f"GStreamer exit code {gst_process.returncode}")
                 hint = ("4k Cam RTSP link"
-                        if radcam_mode else
+                        if cam4k_mode else
                         "camera/USB connection")
                 _abort_recording(
                     f"Recording aborted: encoder process exited (code "
@@ -1002,13 +1010,13 @@ def recording_health_watchdog():
 def _capture_still(output_path, rotation=0):
     """Capture a single JPEG frame from the active RTSP stream.
 
-    Both RadCam and DropCam now pull from an RTSP source (DropCam via the
+    Both 4k Cam and DropCam now pull from an RTSP source (DropCam via the
     BlueOS camera manager).  The manager's pipeline is lazy, so the first
     DESCRIBE after an idle period can return 503 while it warms up — we retry
     a few times before giving up.
     """
     tmp = output_path + ".tmp.jpg"
-    if radcam_mode:
+    if cam4k_mode:
         url = RTSP_ENDPOINT
     else:
         url, _ = discover_blueos_stream(refresh=False)
@@ -1135,7 +1143,7 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     global watchdog_thread, stop_watchdog_thread, file_stall_count
     global stills_thread, stop_stills_thread, stills_dir, stills_count
     global usb_recording, recording_base_dir, recording_rotation
-    global recording_error, radcam_encode
+    global recording_error, cam4k_encode
 
     recording_error = ""
     recording_rotation = int(rotation) % 360
@@ -1186,18 +1194,18 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
         else:
             basename = f"recipe_{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
 
-        if radcam_mode:
+        if cam4k_mode:
             filename = basename + ".mp4"
             filepath = os.path.join(rec_dir, filename)
             current_video_file = filepath
-            encode = probe_radcam_encode()
-            radcam_proto = "udp" if encode == "H265" else "tcp"
+            encode = probe_cam4k_encode()
+            cam4k_proto = "udp" if encode == "H265" else "tcp"
             # Brief settle so the probe's RTSP session is fully torn down
             # before gst-launch opens its own (helps flaky H.265 cameras).
             time.sleep(0.5)
-            pipeline = _build_radcam_pipeline(filepath, encode, radcam_proto)
+            pipeline = _build_cam4k_pipeline(filepath, encode, cam4k_proto)
             logger.info(
-                f"RadCam recording pipeline encode={encode} proto={radcam_proto}"
+                f"4k Cam recording pipeline encode={encode} proto={cam4k_proto}"
             )
         else:
             # DropCam: record the BlueOS camera-manager RTSP stream (BlueOS
@@ -1281,10 +1289,10 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
                     f"{depay} ! queue ! mp4mux fragment-duration=5000 ! "
                     f"filesink location={filepath}"
                 )
-        # RadCam startup retries: (1) flip transport UDP↔TCP, (2) re-probe
+        # 4k Cam startup retries: (1) flip transport UDP↔TCP, (2) re-probe
         # codec and rebuild. Use a local ``proc`` so a concurrent /status
         # poll cannot clear ``gst_process`` mid-check.
-        radcam_attempt = 0
+        cam4k_attempt = 0
         while True:
             command = ["gst-launch-1.0", "-e"] + shlex.split(pipeline)
             try:
@@ -1299,36 +1307,36 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
                     err_text = err.decode(errors="replace")
                     logger.error(f"GStreamer failed: {err_text}")
                 else:
-                    time.sleep(3 if radcam_mode else 2)
+                    time.sleep(3 if cam4k_mode else 2)
                     if proc.poll() is not None:
                         _out, err = proc.communicate()
                         err_text = err.decode(errors="replace")
                         logger.error(f"GStreamer died during startup: {err_text}")
                 if err_text is not None:
-                    if radcam_mode and radcam_attempt < 2:
-                        radcam_attempt += 1
-                        if radcam_attempt == 1:
-                            alt_proto = "tcp" if radcam_proto == "udp" else "udp"
+                    if cam4k_mode and cam4k_attempt < 2:
+                        cam4k_attempt += 1
+                        if cam4k_attempt == 1:
+                            alt_proto = "tcp" if cam4k_proto == "udp" else "udp"
                             logger.warning(
-                                f"RadCam {radcam_encode}/{radcam_proto} died at "
+                                f"4k Cam {cam4k_encode}/{cam4k_proto} died at "
                                 f"startup; retrying with proto={alt_proto}"
                             )
-                            radcam_proto = alt_proto
-                            pipeline = _build_radcam_pipeline(
-                                filepath, radcam_encode, radcam_proto
+                            cam4k_proto = alt_proto
+                            pipeline = _build_cam4k_pipeline(
+                                filepath, cam4k_encode, cam4k_proto
                             )
                         else:
                             # Re-probe (codec may have changed) and use that
                             # result directly — do not flip away from it.
-                            enc = probe_radcam_encode()
-                            radcam_proto = "udp" if enc == "H265" else "tcp"
+                            enc = probe_cam4k_encode()
+                            cam4k_proto = "udp" if enc == "H265" else "tcp"
                             logger.warning(
-                                f"RadCam startup still failing; re-probe "
-                                f"encode={enc} proto={radcam_proto}"
+                                f"4k Cam startup still failing; re-probe "
+                                f"encode={enc} proto={cam4k_proto}"
                             )
                             time.sleep(0.5)
-                            pipeline = _build_radcam_pipeline(
-                                filepath, enc, radcam_proto
+                            pipeline = _build_cam4k_pipeline(
+                                filepath, enc, cam4k_proto
                             )
                         start_time = None
                         continue
@@ -1480,7 +1488,7 @@ def _run_ffmpeg_remux(ts_path, mp4_path, ts_size, rotation=0):
 def _apply_rotation_metadata_mp4(mp4_path, rotation):
     """Stamp display-rotation metadata onto a finished .mp4 in place (lossless).
 
-    Used for the RadCam path, where GStreamer writes the .mp4 directly and it
+    Used for the 4k Cam path, where GStreamer writes the .mp4 directly and it
     never passes through the TS→MP4 remux.  Rewrites the container with
     ``-c copy`` (no re-encode) into a temp file, then atomically replaces the
     original.  Returns the path on success, or the original path on failure /
@@ -1768,7 +1776,7 @@ def _stop_recording_internal():
             video_path = _remux_to_mp4(video_path, was_usb=was_usb,
                                        usb_rec_dir=usb_rec_dir, rotation=saved_rotation)
         elif video_path.endswith(".mp4") and saved_rotation:
-            # DropCam and RadCam both write the .mp4 directly, so stamp rotation now.
+            # DropCam and 4k Cam both write the .mp4 directly, so stamp rotation now.
             video_path = _apply_rotation_metadata_mp4(video_path, saved_rotation)
         dur, st = get_video_duration(video_path)
         if dur and ass_path and os.path.exists(ass_path):
@@ -1797,10 +1805,10 @@ def index():
 
 @app.route("/register_service")
 def register_service():
-    # Keep the sidebar/product name stable as DropCam even when a RadCam is
+    # Keep the sidebar/product name stable as DropCam even when a 4k Cam is
     # the active camera — only the UI theme and description change.
     desc = ("4K RTSP recorder (H264/H265) with servo, focus, and zoom control"
-            if radcam_mode
+            if cam4k_mode
             else "Standalone drop camera recorder with servo and light control")
     return jsonify({
         "name": "DropCam",
@@ -1894,7 +1902,7 @@ def route_status():
             "recording_to": "usb" if usb_recording else "local",
             "usb_failover_count": usb_failover_count,
             "storage_preference": storage_preference,
-            "radcam_mode": radcam_mode,
+            "cam4k_mode": cam4k_mode,
         })
         resp.headers["Cache-Control"] = "no-store"
         return resp
@@ -2151,10 +2159,10 @@ def route_telemetry():
             data["winch_wind_rpm"] = WINCH_WIND_RPM
         except Exception:
             pass
-        data["radcam_mode"] = radcam_mode
-        data["radcam_awb_scene"] = radcam_awb_scene
-        data["radcam_awb_scene_mode"] = AWB_SCENE_MODE.get(radcam_awb_scene)
-        if radcam_mode:
+        data["cam4k_mode"] = cam4k_mode
+        data["cam4k_awb_scene"] = cam4k_awb_scene
+        data["cam4k_awb_scene_mode"] = AWB_SCENE_MODE.get(cam4k_awb_scene)
+        if cam4k_mode:
             data["aux_pwm"] = hw.get_all_aux_pwm()
         try:
             data["battery"] = battery_monitor.get_data_summary()
@@ -2246,10 +2254,10 @@ def route_audio_get():
                     "gst_device": dev.gst_device,
                 } if dev else None
             ),
-            # RadCam never records audio (no local mic on an external
+            # 4k Cam never records audio (no local mic on an external
             # RTSP camera), so surface that so the UI can gray out the
-            # toggle in RadCam mode instead of confusing the operator.
-            "supported_in_mode": not radcam_mode,
+            # toggle in 4k Cam mode instead of confusing the operator.
+            "supported_in_mode": not cam4k_mode,
         })
     except Exception as e:
         logger.error(f"Audio status error: {e}")
@@ -2279,29 +2287,29 @@ def route_audio_set():
     return jsonify({"success": True, "audio_enabled": audio_enabled})
 
 
-# ── RadCam water-environment AWB scene (Green / Blue) ───────────────────
+# ── 4k Cam water-environment AWB scene (Green / Blue) ───────────────────
 
 def _apply_and_persist_awb_scene(scene, apply_to_camera=True):
     """Normalize, persist, push to scheduler, and optionally set on camera."""
-    global radcam_awb_scene
+    global cam4k_awb_scene
     scene = normalize_awb_scene(scene)
-    radcam_awb_scene = scene
+    cam4k_awb_scene = scene
     cfg = load_config()
-    cfg["radcam_awb_scene"] = scene
+    cfg["cam4k_awb_scene"] = scene
     save_config(cfg)
     try:
         scheduler.set_awb_scene(scene)
     except Exception:
         pass
     applied = False
-    if apply_to_camera and radcam_mode:
+    if apply_to_camera and cam4k_mode:
         applied = apply_awb_scene(scene)
     return scene, applied
 
 
-@app.route("/radcam_awb_scene", methods=["GET"])
-def route_radcam_awb_scene_get():
-    scene = normalize_awb_scene(radcam_awb_scene)
+@app.route("/cam4k_awb_scene", methods=["GET"])
+def route_cam4k_awb_scene_get():
+    scene = normalize_awb_scene(cam4k_awb_scene)
     return jsonify({
         "success": True,
         "scene": scene,
@@ -2313,12 +2321,12 @@ def route_radcam_awb_scene_get():
     })
 
 
-@app.route("/radcam_awb_scene", methods=["POST"])
-def route_radcam_awb_scene_set():
+@app.route("/cam4k_awb_scene", methods=["POST"])
+def route_cam4k_awb_scene_set():
     """Set Green/Blue water WB scene (persisted). Applied to camera immediately
     in 4k Cam mode so the next one-push uses the selected scene."""
     data = request.get_json(silent=True) or {}
-    raw = data.get("scene", data.get("radcam_awb_scene"))
+    raw = data.get("scene", data.get("cam4k_awb_scene"))
     if raw is None:
         return jsonify({"success": False, "message": "scene required (green|blue)"}), 400
     if str(raw).strip().lower() not in AWB_SCENE_MODE:
@@ -2343,19 +2351,19 @@ def route_radcam_awb_scene_set():
 
 @app.route("/awb_trigger", methods=["POST"])
 def route_awb_trigger():
-    if not radcam_mode:
+    if not cam4k_mode:
         return jsonify({
             "success": False,
             "message": "4k Cam not active — one-push AWB is only available in 4k Cam mode",
         }), 400
     import urllib.request
     import urllib.error
-    scene = normalize_awb_scene(radcam_awb_scene)
+    scene = normalize_awb_scene(cam4k_awb_scene)
     scene_applied = apply_awb_scene(scene)
     try:
         req = urllib.request.Request(
-            RADCAM_AWB_URL,
-            data=json.dumps(RADCAM_AWB_BODY).encode("utf-8"),
+            CAM4K_AWB_URL,
+            data=json.dumps(CAM4K_AWB_BODY).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -2579,10 +2587,10 @@ def route_nod():
     return_us = data.get("return_us")
     if return_us is not None:
         return_us = int(return_us)
-    ok = hw.nod_gesture(radcam=radcam_mode, return_us=return_us)
+    ok = hw.nod_gesture(cam4k=cam4k_mode, return_us=return_us)
     return jsonify({
         "success": bool(ok),
-        "radcam_mode": radcam_mode,
+        "cam4k_mode": cam4k_mode,
         "position_us": hw.get_servo_position(),
     })
 
@@ -2760,7 +2768,7 @@ def route_aux_pwm_set():
     # persist=false while jogging, then write named air/water presets explicitly.
     if data.get("persist", True):
         cfg = load_config()
-        config_key = f"radcam_{channel}_us"
+        config_key = f"cam4k_{channel}_us"
         cfg[config_key] = int(applied)
         save_config(cfg)
     return jsonify({"success": True, "channel": channel, "position_us": applied})
@@ -2777,11 +2785,11 @@ def _lens_preset_from_cfg(cfg, slot):
     if slot not in LENS_PRESET_SLOTS:
         raise ValueError(f"Unknown lens preset slot: {slot}")
     medium, zoom_end = slot.split("_", 1)  # air|water, min|max
-    legacy_focus = cfg.get(f"radcam_{medium}_focus_us", cfg.get("radcam_focus_us", 900))
-    legacy_zoom = cfg.get(f"radcam_{medium}_zoom_us", cfg.get("radcam_zoom_us", 935))
+    legacy_focus = cfg.get(f"cam4k_{medium}_focus_us", cfg.get("cam4k_focus_us", 900))
+    legacy_zoom = cfg.get(f"cam4k_{medium}_zoom_us", cfg.get("cam4k_zoom_us", 935))
     return {
-        "focus_us": int(cfg.get(f"radcam_{medium}_{zoom_end}_focus_us", legacy_focus)),
-        "zoom_us": int(cfg.get(f"radcam_{medium}_{zoom_end}_zoom_us", legacy_zoom)),
+        "focus_us": int(cfg.get(f"cam4k_{medium}_{zoom_end}_focus_us", legacy_focus)),
+        "zoom_us": int(cfg.get(f"cam4k_{medium}_{zoom_end}_zoom_us", legacy_zoom)),
     }
 
 
@@ -2803,10 +2811,10 @@ def _normalize_lens_slot(raw):
     return None
 
 
-@app.route("/radcam_lens", methods=["GET"])
-def route_radcam_lens_get():
+@app.route("/cam4k_lens", methods=["GET"])
+def route_cam4k_lens_get():
     cfg = load_config()
-    slot = _normalize_lens_slot(cfg.get("radcam_lens_slot") or cfg.get("radcam_lens_medium"))
+    slot = _normalize_lens_slot(cfg.get("cam4k_lens_slot") or cfg.get("cam4k_lens_medium"))
     if slot is None:
         slot = "air_min"
     return jsonify({
@@ -2820,8 +2828,8 @@ def route_radcam_lens_get():
     })
 
 
-@app.route("/radcam_lens", methods=["POST"])
-def route_radcam_lens_set():
+@app.route("/cam4k_lens", methods=["POST"])
+def route_cam4k_lens_set():
     """Save or apply one of the four lens presets (air/water × min/max zoom).
 
     Body:
@@ -2861,13 +2869,13 @@ def route_radcam_lens_set():
             return jsonify({"success": False, "message": str(e)}), 400
         focus_us = hw.get_aux_pwm("focus")
         zoom_us = hw.get_aux_pwm("zoom")
-        cfg[f"radcam_{medium}_{zoom_end}_focus_us"] = focus_us
-        cfg[f"radcam_{medium}_{zoom_end}_zoom_us"] = zoom_us
-        cfg["radcam_focus_us"] = focus_us
-        cfg["radcam_zoom_us"] = zoom_us
-        cfg["radcam_lens_slot"] = slot
+        cfg[f"cam4k_{medium}_{zoom_end}_focus_us"] = focus_us
+        cfg[f"cam4k_{medium}_{zoom_end}_zoom_us"] = zoom_us
+        cfg["cam4k_focus_us"] = focus_us
+        cfg["cam4k_zoom_us"] = zoom_us
+        cfg["cam4k_lens_slot"] = slot
         save_config(cfg)
-        logger.info(f"Saved RadCam lens preset {slot}: focus={focus_us} zoom={zoom_us}")
+        logger.info(f"Saved 4k Cam lens preset {slot}: focus={focus_us} zoom={zoom_us}")
     else:  # apply
         preset = _lens_preset_from_cfg(cfg, slot)
         try:
@@ -2877,11 +2885,11 @@ def route_radcam_lens_set():
             return jsonify({"success": False, "message": str(e)}), 400
         focus_us = hw.get_aux_pwm("focus")
         zoom_us = hw.get_aux_pwm("zoom")
-        cfg["radcam_focus_us"] = focus_us
-        cfg["radcam_zoom_us"] = zoom_us
-        cfg["radcam_lens_slot"] = slot
+        cfg["cam4k_focus_us"] = focus_us
+        cfg["cam4k_zoom_us"] = zoom_us
+        cfg["cam4k_lens_slot"] = slot
         save_config(cfg)
-        logger.info(f"Applied RadCam lens preset {slot}: focus={focus_us} zoom={zoom_us}")
+        logger.info(f"Applied 4k Cam lens preset {slot}: focus={focus_us} zoom={zoom_us}")
 
     return jsonify({
         "success": True,
@@ -2892,28 +2900,28 @@ def route_radcam_lens_set():
     })
 
 
-# ── RadCam detection (manual) ────────────────────────────────────────────
+# ── 4k Cam detection (manual) ────────────────────────────────────────────
 
-@app.route("/detect_radcam", methods=["POST"])
-def route_detect_radcam():
-    global radcam_mode, radcam_awb_scene
-    if radcam_mode:
+@app.route("/detect_cam4k", methods=["POST"])
+def route_detect_cam4k():
+    global cam4k_mode, cam4k_awb_scene
+    if cam4k_mode:
         return jsonify({"success": True, "message": "Already in 4k Cam mode"})
-    if not _ping_radcam():
-        return jsonify({"success": False, "message": f"4k Cam not reachable at {RADCAM_IP}"}), 404
-    radcam_mode = True
+    if not _ping_cam4k():
+        return jsonify({"success": False, "message": f"4k Cam not reachable at {CAM4K_IP}"}), 404
+    cam4k_mode = True
     logger.info(f"Manual 4k Cam detection succeeded — switching to 4k Cam mode")
     cfg = load_config()
-    hw.set_aux_pwm("focus", cfg.get("radcam_focus_us", 900))
-    hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 935))
-    hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
-    hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
-    radcam_awb_scene = normalize_awb_scene(cfg.get("radcam_awb_scene", radcam_awb_scene))
-    apply_awb_scene(radcam_awb_scene)
-    init_default_recipes(radcam=True)
+    hw.set_aux_pwm("focus", cfg.get("cam4k_focus_us", 900))
+    hw.set_aux_pwm("zoom", cfg.get("cam4k_zoom_us", 935))
+    hw.set_aux_pwm("pan", cfg.get("cam4k_pan_us", 1500))
+    hw.set_aux_pwm("ext_servo", cfg.get("cam4k_ext_servo_us", 1500))
+    cam4k_awb_scene = normalize_awb_scene(cfg.get("cam4k_awb_scene", cam4k_awb_scene))
+    apply_awb_scene(cam4k_awb_scene)
+    init_default_recipes(cam4k=True)
     try:
-        scheduler.set_radcam_mode(True)
-        scheduler.set_awb_scene(radcam_awb_scene)
+        scheduler.set_cam4k_mode(True)
+        scheduler.set_awb_scene(cam4k_awb_scene)
     except Exception:
         pass
     register_service()
@@ -3151,43 +3159,43 @@ CAMERA_BOOT_RETRIES = 10
 CAMERA_RETRY_INTERVAL_S = 3
 
 
-def _ping_radcam():
-    """Probe the RadCam RTSP port (TCP 554).
+def _ping_cam4k():
+    """Probe the 4k Cam RTSP port (TCP 554).
 
     The container image has no ``ping`` binary, and ICMP is unrelated to what
     recording/preview actually need. A short TCP connect to the RTSP port
     matches the real consumers (GStreamer / camera-manager).
     """
     try:
-        with socket.create_connection((RADCAM_IP, 554), timeout=2.0):
+        with socket.create_connection((CAM4K_IP, 554), timeout=2.0):
             return True
     except OSError as e:
-        logger.debug(f"RadCam TCP probe {RADCAM_IP}:554 failed: {e}")
+        logger.debug(f"4k Cam TCP probe {CAM4K_IP}:554 failed: {e}")
         return False
 
 
 def _wait_for_camera():
     """Block until a camera source is available.
 
-    Pings the RadCam first (fast); otherwise waits for the BlueOS camera
+    Pings the 4k Cam first (fast); otherwise waits for the BlueOS camera
     manager to publish an RTSP video stream for the USB camera.
     """
-    global radcam_mode
+    global cam4k_mode
 
-    logger.info(f"Checking for RadCam at {RADCAM_IP}...")
-    if _ping_radcam():
-        radcam_mode = True
+    logger.info(f"Checking for 4k Cam at {CAM4K_IP}...")
+    if _ping_cam4k():
+        cam4k_mode = True
         try:
-            enc = probe_radcam_encode()
+            enc = probe_cam4k_encode()
         except Exception:
-            enc = radcam_encode
+            enc = cam4k_encode
         logger.info(
-            f"RadCam detected at {RADCAM_IP} — entering RadCam mode "
+            f"4k Cam detected at {CAM4K_IP} — entering 4k Cam mode "
             f"({enc} 4K RTSP)"
         )
         return True
 
-    radcam_mode = False
+    cam4k_mode = False
     # Auto-fix the common first-boot case: MCM picked up the USB H264 camera
     # and exposed it as UDP, which the extension cannot consume.  This is
     # idempotent — once /dev/video2 is RTSP it short-circuits to a no-op,
@@ -3209,7 +3217,7 @@ def _wait_for_camera():
         logger.info(f"Waiting for BlueOS camera stream (attempt {attempt}/{CAMERA_BOOT_RETRIES})...")
         time.sleep(CAMERA_RETRY_INTERVAL_S)
 
-    logger.warning("No camera source found (BlueOS RTSP or RadCam)")
+    logger.warning("No camera source found (BlueOS RTSP or 4k Cam)")
     return False
 
 
@@ -3238,7 +3246,7 @@ boot_error = None
 
 def _boot():
     """Initialize hardware, default recipes, USB storage, and auto-start if configured."""
-    global storage_preference, radcam_awb_scene
+    global storage_preference, cam4k_awb_scene
     logger.info("=== DropCam boot sequence starting ===")
 
     # Defensive pin-mux recovery on Pi 4 (BCM2711). BlueOS's autopilot_manager
@@ -3295,7 +3303,7 @@ def _boot():
     # ALSA card boots with `Mic Capture Switch = off` even though
     # `Mic Capture Volume` sits at 100% — recordings end up silent
     # otherwise. Idempotent no-op if the camera isn't plugged in or if
-    # this isn't a DropCam (RadCam has no local mic). See app/audio.py.
+    # this isn't a DropCam (4k Cam has no local mic). See app/audio.py.
     try:
         audio.ensure_mic_unmuted()
     except Exception as e:
@@ -3349,8 +3357,8 @@ def _boot():
         hw=hw,
         capture_still_fn=_sweep_snapshot,
         log_event_fn=log_event,
-        radcam_mode=radcam_mode,
-        awb_scene=radcam_awb_scene,
+        cam4k_mode=cam4k_mode,
+        awb_scene=cam4k_awb_scene,
     )
 
     hw.led_idle()
@@ -3366,38 +3374,38 @@ def _boot():
 
     camera_ok = _wait_for_camera()
 
-    if radcam_mode:
-        logger.info("Applying saved RadCam PWM settings from config")
-        hw.set_aux_pwm("focus", cfg.get("radcam_focus_us", 900))
-        hw.set_aux_pwm("zoom", cfg.get("radcam_zoom_us", 935))
-        hw.set_aux_pwm("pan", cfg.get("radcam_pan_us", 1500))
-        hw.set_aux_pwm("ext_servo", cfg.get("radcam_ext_servo_us", 1500))
+    if cam4k_mode:
+        logger.info("Applying saved 4k Cam PWM settings from config")
+        hw.set_aux_pwm("focus", cfg.get("cam4k_focus_us", 900))
+        hw.set_aux_pwm("zoom", cfg.get("cam4k_zoom_us", 935))
+        hw.set_aux_pwm("pan", cfg.get("cam4k_pan_us", 1500))
+        hw.set_aux_pwm("ext_servo", cfg.get("cam4k_ext_servo_us", 1500))
         # Water WB scene before any recipe one-push AWB can fire.
-        radcam_awb_scene = normalize_awb_scene(
-            cfg.get("radcam_awb_scene", radcam_awb_scene)
+        cam4k_awb_scene = normalize_awb_scene(
+            cfg.get("cam4k_awb_scene", cam4k_awb_scene)
         )
         logger.info(
-            "Applying RadCam AWB scene from config: %s (awb_auto_mode=%d)",
-            radcam_awb_scene, AWB_SCENE_MODE[radcam_awb_scene],
+            "Applying 4k Cam AWB scene from config: %s (awb_auto_mode=%d)",
+            cam4k_awb_scene, AWB_SCENE_MODE[cam4k_awb_scene],
         )
-        apply_awb_scene(radcam_awb_scene)
-        scheduler.set_awb_scene(radcam_awb_scene)
-        init_default_recipes(radcam=True)
+        apply_awb_scene(cam4k_awb_scene)
+        scheduler.set_awb_scene(cam4k_awb_scene)
+        init_default_recipes(cam4k=True)
 
     # Boot nod — visible "alive" cue once hardware is ready, before any
     # auto-start recipe countdown begins.
     try:
         logger.info("Boot tilt nod")
-        hw.nod_gesture(radcam=radcam_mode, return_us=1500)
+        hw.nod_gesture(cam4k=cam4k_mode, return_us=1500)
     except Exception as e:
         logger.warning(f"Boot tilt nod failed: {e}")
 
-    # Release-shaft rotation sensor lives on GPIO 26 (shared with the RadCam
+    # Release-shaft rotation sensor lives on GPIO 26 (shared with the 4k Cam
     # zoom aux output), so only set it up in DropCam mode.  It's optional —
     # if pigpiod / the sensor isn't available, init returns False and the
     # rest of the system keeps running with rotation_count=0.
     try:
-        if not radcam_mode:
+        if not cam4k_mode:
             hw.init_rotation_sensor(enable=True)
     except Exception as e:
         logger.warning(f"Rotation sensor init failed: {e}")
@@ -3424,7 +3432,7 @@ def _boot():
     else:
         logger.info("No active recipe configured (active_recipe_id is null), waiting for manual control")
 
-    mode_label = "RadCam" if radcam_mode else "DropCam"
+    mode_label = "4k Cam" if cam4k_mode else "DropCam"
     logger.info(f"=== {mode_label} boot sequence complete ===")
 
     import atexit

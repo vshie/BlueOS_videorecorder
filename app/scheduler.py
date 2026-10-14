@@ -22,13 +22,13 @@ DISK_FREE_MINIMUM_MB = 1024  # 1 GB
 RECORDING_START_RETRIES = 5
 RECORDING_RETRY_INTERVAL_S = 5
 
-# Same POSTs radcam-manager / towfish use for WB scene + one-push.
+# Same POSTs 4k Cam Manager / towfish use for WB scene + one-push.
 # cgi_action GET path returns "error user/pwd" on current firmware.
-RADCAM_IMAGE_URL = "http://192.168.2.10/action/setImageAdjustment"
-RADCAM_AWB_URL = "http://192.168.2.10/action/setImageAdjustmentEx"
-RADCAM_AWB_BODY = {"onceAWB": 1}
+CAM4K_IMAGE_URL = "http://192.168.2.10/action/setImageAdjustment"
+CAM4K_AWB_URL = "http://192.168.2.10/action/setImageAdjustmentEx"
+CAM4K_AWB_BODY = {"onceAWB": 1}
 
-# Water-environment AWB scene (radcam-manager Green/Blue buttons).
+# Water-environment AWB scene (4k Cam Manager Green/Blue buttons).
 # Maps to camera awb_auto_mode; scene only applies with auto_awb=0 (Auto).
 AWB_SCENE_MODE = {"green": 0, "blue": 1}
 DEFAULT_AWB_SCENE = "blue"
@@ -40,7 +40,7 @@ def normalize_awb_scene(scene) -> str:
 
 
 def apply_awb_scene(scene) -> bool:
-    """Set RadCam Auto WB + water scene (green/blue). Never raises."""
+    """Set 4k Cam Auto WB + water scene (green/blue). Never raises."""
     scene = normalize_awb_scene(scene)
     body = {
         "auto_awb": 0,  # Auto (Manual=1); scene is ignored in Manual
@@ -49,7 +49,7 @@ def apply_awb_scene(scene) -> bool:
     try:
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
-            RADCAM_IMAGE_URL,
+            CAM4K_IMAGE_URL,
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -63,15 +63,15 @@ def apply_awb_scene(scene) -> bool:
                 pass
             if code is None or code == 0:
                 logger.info(
-                    "RadCam AWB scene set: %s (auto_awb=0, awb_auto_mode=%d)",
+                    "4k Cam AWB scene set: %s (auto_awb=0, awb_auto_mode=%d)",
                     scene, AWB_SCENE_MODE[scene],
                 )
                 return True
-            logger.warning("RadCam AWB scene failed: code %s: %s", code, body_text[:120])
+            logger.warning("4k Cam AWB scene failed: code %s: %s", code, body_text[:120])
     except urllib.error.HTTPError as e:
-        logger.warning("RadCam AWB scene failed: HTTP %s", e.code)
+        logger.warning("4k Cam AWB scene failed: HTTP %s", e.code)
     except Exception as e:
-        logger.warning("RadCam AWB scene failed: %s", e)
+        logger.warning("4k Cam AWB scene failed: %s", e)
     return False
 
 LED_COLOR_MAP = {
@@ -109,7 +109,7 @@ class Scheduler:
         self._release_thread = None
         self._winch_thread = None
         self._awb_thread = None
-        self._radcam_mode = False
+        self._cam4k_mode = False
         self._awb_scene = DEFAULT_AWB_SCENE
         # Record / idle cycle progress (0 when the recipe doesn't cycle).
         self._cycle_window = 0
@@ -117,7 +117,7 @@ class Scheduler:
         self._deadline = None  # monotonic end of the whole deployment
 
     def configure(self, *, start_fn, stop_fn, disk_free_fn, hw,
-                  capture_still_fn=None, log_event_fn=None, radcam_mode=False,
+                  capture_still_fn=None, log_event_fn=None, cam4k_mode=False,
                   awb_scene=None):
         self._start_recording_fn = start_fn
         self._stop_recording_fn = stop_fn
@@ -129,13 +129,13 @@ class Scheduler:
         # always None, silently dropping every winch/release event.
         self._log_event_fn = log_event_fn
         self._hw = hw
-        self._radcam_mode = bool(radcam_mode)
+        self._cam4k_mode = bool(cam4k_mode)
         if awb_scene is not None:
             self._awb_scene = normalize_awb_scene(awb_scene)
 
-    def set_radcam_mode(self, enabled):
-        """Update tilt-nod extents after a late RadCam detect."""
-        self._radcam_mode = bool(enabled)
+    def set_cam4k_mode(self, enabled):
+        """Update tilt-nod extents after a late 4k Cam detect."""
+        self._cam4k_mode = bool(enabled)
 
     def set_awb_scene(self, scene):
         """Update the water-environment AWB scene used before each one-push."""
@@ -243,7 +243,7 @@ class Scheduler:
                     start_us = int(recipe.get("servo_start_us", 1500))
                     self._set_state("nodding")
                     self._hw.nod_gesture(
-                        radcam=self._radcam_mode,
+                        cam4k=self._cam4k_mode,
                         return_us=start_us,
                         stop_event=self._stop,
                     )
@@ -300,14 +300,14 @@ class Scheduler:
                 # starts driving the pin as a servo output, the sensor
                 # callback goes silent, and closed-loop winch legs run away
                 # to the safety cap (~9 rev instead of 3).
-                if "radcam_focus_us" in recipe and self._hw.is_aux_pwm_available("focus"):
-                    self._hw.set_aux_pwm("focus", recipe["radcam_focus_us"])
-                    logger.info(f"Recipe applied focus={recipe['radcam_focus_us']} us")
-                if "radcam_zoom_us" in recipe and self._hw.is_aux_pwm_available("zoom"):
-                    self._hw.set_aux_pwm("zoom", recipe["radcam_zoom_us"])
-                    logger.info(f"Recipe applied zoom={recipe['radcam_zoom_us']} us")
+                if "cam4k_focus_us" in recipe and self._hw.is_aux_pwm_available("focus"):
+                    self._hw.set_aux_pwm("focus", recipe["cam4k_focus_us"])
+                    logger.info(f"Recipe applied focus={recipe['cam4k_focus_us']} us")
+                if "cam4k_zoom_us" in recipe and self._hw.is_aux_pwm_available("zoom"):
+                    self._hw.set_aux_pwm("zoom", recipe["cam4k_zoom_us"])
+                    logger.info(f"Recipe applied zoom={recipe['cam4k_zoom_us']} us")
 
-            if recipe.get("radcam_focus_finder") and self._hw:
+            if recipe.get("cam4k_focus_finder") and self._hw:
                 zoom_us = recipe.get("focus_finder_zoom_us", 935)
                 self._hw.set_aux_pwm("zoom", zoom_us)
                 start_us = recipe.get("focus_sweep_start_us", 870)
@@ -323,18 +323,18 @@ class Scheduler:
                             f"{duration_s}s at zoom {zoom_us} us")
 
             # Default on (towfish behaviour) when the recipe omits the key.
-            if recipe.get("radcam_awb_enable", True):
-                interval_s = float(recipe.get("radcam_awb_interval_s", 120) or 120)
+            if recipe.get("cam4k_awb_enable", True):
+                interval_s = float(recipe.get("cam4k_awb_interval_s", 120) or 120)
                 interval_s = max(10.0, min(3600.0, interval_s))
                 self._awb_thread = threading.Thread(
                     target=self._awb_loop,
                     args=(interval_s, duration_s),
-                    name="radcam-awb-loop",
+                    name="cam4k-awb-loop",
                     daemon=True,
                 )
                 self._awb_thread.start()
                 logger.info(
-                    "RadCam AWB loop started (onceAWB=1 every %.0fs for %.0fs)",
+                    "4k Cam AWB loop started (onceAWB=1 every %.0fs for %.0fs)",
                     interval_s, duration_s,
                 )
 
@@ -657,12 +657,12 @@ class Scheduler:
         """Apply water WB scene, then POST onceAWB=1. Never raises."""
         scene = self.get_awb_scene()
         if not apply_awb_scene(scene):
-            self._log("radcam_awb_scene_failed", scene)
+            self._log("cam4k_awb_scene_failed", scene)
             # Still attempt one-push; scene may already be correct on camera.
         try:
-            data = json.dumps(RADCAM_AWB_BODY).encode("utf-8")
+            data = json.dumps(CAM4K_AWB_BODY).encode("utf-8")
             req = urllib.request.Request(
-                RADCAM_AWB_URL,
+                CAM4K_AWB_URL,
                 data=data,
                 headers={"Content-Type": "application/json"},
                 method="POST",
@@ -675,16 +675,16 @@ class Scheduler:
                 except Exception:
                     pass
                 if code is None or code == 0:
-                    logger.info("RadCam AWB (onceAWB=1) OK scene=%s", scene)
-                    self._log("radcam_awb_ok", f"onceAWB=1 scene={scene}")
+                    logger.info("4k Cam AWB (onceAWB=1) OK scene=%s", scene)
+                    self._log("cam4k_awb_ok", f"onceAWB=1 scene={scene}")
                     return True
                 err = f"code {code}: {body_text[:120]}"
         except urllib.error.HTTPError as e:
             err = f"HTTP {e.code}"
         except Exception as e:
             err = str(e)
-        logger.warning("RadCam AWB failed: %s", err)
-        self._log("radcam_awb_failed", err)
+        logger.warning("4k Cam AWB failed: %s", err)
+        self._log("cam4k_awb_failed", err)
         return False
 
     def _awb_loop(self, interval_s, duration_s):

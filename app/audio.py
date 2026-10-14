@@ -24,7 +24,7 @@ Two quirks force the two small utilities in this module:
      returns both the numeric card index (for amixer) and the
      ``hw:<name>,<device>`` handle (for GStreamer).
 
-Excluded from RadCam mode: the RadCam is a bare external RTSP
+Excluded from 4k Cam mode: the 4k Cam is a bare external RTSP
 camera with no local mic, and its recording pipeline is video-only
 by construction.
 """

@@ -1,4 +1,4 @@
-"""Environment sensor monitor for DropCam / RadCam.
+"""Environment sensor monitor for DropCam / 4k Cam.
 
 Samples a Blue Robotics Bar30 (MS5837-30BA on I2C-6, address 0x76) and a
 water-temperature sensor on I2C-1 at 2 Hz while running. The temperature
