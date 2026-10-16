@@ -127,8 +127,33 @@ input[type=range].tilt-reversed{direction:rtl}
    pre-rotation dimension so the rotated box still fits the card area. */
 .snapshot-area.rot-quarter .live-video{max-width:none;max-height:none;width:auto;height:100%}
 .snapshot-placeholder{color:#999;font-size:.88em;padding:12px}
-.snapshot-status{position:absolute;left:6px;bottom:6px;font-size:.72em;color:rgba(255,255,255,.85);background:rgba(0,0,0,.45);padding:2px 6px;border-radius:4px;pointer-events:none;max-width:80%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.snapshot-status{position:absolute;left:6px;top:6px;font-size:.72em;color:rgba(255,255,255,.85);background:rgba(0,0,0,.45);padding:2px 6px;border-radius:4px;pointer-events:none;max-width:80%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .snapshot-status.hidden{display:none}
+/* Depth / water-temp overlay, styled like a subtitle: white text with a dark
+   outline, lower-left, sized from the preview height so it stays the same
+   proportion in the card and in fullscreen. The live status chip moves to the
+   top-left so the two never overlap. */
+.snapshot-area{container-type:size}
+.video-osd{position:absolute;left:2.5%;bottom:4%;z-index:2;pointer-events:none;
+  font-family:Arial,Helvetica,sans-serif;font-weight:600;color:#fff;white-space:nowrap;
+  font-size:14px;font-size:clamp(12px,3.4cqh,34px);line-height:1.25;letter-spacing:.02em;
+  text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 0 4px rgba(0,0,0,.8)}
+.video-osd span+span{margin-left:1.2em}
+.video-osd.hidden,.video-osd span.hidden{display:none}
+.fs-btn{position:absolute;right:8px;bottom:8px;z-index:3;width:34px;height:34px;padding:0;
+  display:flex;align-items:center;justify-content:center;border:none;border-radius:6px;
+  background:rgba(0,0,0,.45);color:#fff;cursor:pointer;opacity:.75;transition:opacity .15s}
+.fs-btn:hover{opacity:1;background:rgba(0,0,0,.65)}
+.fs-btn svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.fs-btn .fs-exit{display:none}
+.snapshot-area:fullscreen .fs-btn .fs-enter,.snapshot-area.pseudo-fs .fs-btn .fs-enter{display:none}
+.snapshot-area:fullscreen .fs-btn .fs-exit,.snapshot-area.pseudo-fs .fs-btn .fs-exit{display:block}
+/* Fullscreen: black letterbox, video fills the screen. pseudo-fs is the
+   fallback when the browser refuses the Fullscreen API. */
+.snapshot-area:fullscreen{background:#000;border-radius:0;width:100vw;height:100vh;aspect-ratio:auto;min-height:0}
+.snapshot-area.pseudo-fs{position:fixed;inset:0;z-index:2000;background:#000;border-radius:0;width:auto;height:auto;aspect-ratio:auto;min-height:0}
+.snapshot-area:fullscreen .live-video,.snapshot-area.pseudo-fs .live-video{width:100%;height:100%;max-width:100%;max-height:100%;object-fit:contain;border:none;border-radius:0}
+.snapshot-area.rot-quarter:fullscreen .live-video,.snapshot-area.rot-quarter.pseudo-fs .live-video{width:100vh;height:100vw;max-width:none;max-height:none}
 
 /* Recipe list */
 .recipe-item{display:flex;align-items:center;padding:7px 10px;border:1px solid #e0e0e0;border-radius:6px;margin-bottom:5px;background:#fafafa}
@@ -524,6 +549,11 @@ body.calib-tab .file-manager-wrapper{display:none}
       <div class="snapshot-placeholder" id="snapPlaceholder">Waiting for camera...</div>
       <video id="liveVideo" class="live-video hidden" playsinline autoplay muted></video>
       <div class="snapshot-status hidden" id="liveStatus"></div>
+      <div class="video-osd hidden"><span class="osd-depth hidden">D: --</span><span class="osd-temp hidden">T: --</span></div>
+      <button type="button" class="fs-btn" onclick="toggleFullscreen('snapArea')" title="Full screen">
+        <svg class="fs-enter" viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>
+        <svg class="fs-exit" viewBox="0 0 24 24"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+      </button>
     </div>
   </div>
 
@@ -864,6 +894,11 @@ body.calib-tab .file-manager-wrapper{display:none}
       <div class="snapshot-area calib-preview-area" id="calibSnapArea">
         <div class="snapshot-placeholder" id="calibSnapPlaceholder">Open this tab after the Status preview is live…</div>
         <video id="calibLiveVideo" class="live-video hidden" playsinline autoplay muted></video>
+        <div class="video-osd hidden"><span class="osd-depth hidden">D: --</span><span class="osd-temp hidden">T: --</span></div>
+        <button type="button" class="fs-btn" onclick="toggleFullscreen('calibSnapArea')" title="Full screen">
+          <svg class="fs-enter" viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>
+          <svg class="fs-exit" viewBox="0 0 24 24"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+        </button>
       </div>
       <p class="calib-hint">Full-width preview for judging sharpness. Jog focus/zoom below, then Save the matching air/water min/max slot.</p>
     </div>
@@ -2937,6 +2972,7 @@ async function setBlueosModel(enabled) {
 
 /* ── Environment card (2 Hz refresh matches sensor sample rate) ─── */
 function updateEnvCard(env) {
+  updateVideoOsd(env);
   const envCard = document.getElementById('envCard');
   if (!envCard) return;
   if (!env || !env.present) {
@@ -2965,6 +3001,98 @@ function updateEnvCard(env) {
   document.getElementById('envSensorLabel').textContent =
     env.temp_label ? 'Water: ' + env.temp_label : (bar30 ? 'Bar30 only' : '');
 }
+
+/* ── Preview overlay: D: depth, T: water temp ───────────────────
+   Temperature is the Celsius probe only (TMP119 or TSYS01), never the
+   Bar30's internal sensor. Each field shows only when its sensor exists,
+   and the overlay only while the video is live. */
+function updateVideoOsd(env) {
+  const depthOn = !!(env && env.present && env.bar30_present);
+  const tempOn = !!(env && env.present && env.temp_present);
+  const dText = 'D: ' + (depthOn && env.depth_m != null ? env.depth_m.toFixed(1) + ' m' : '--');
+  const tText = 'T: ' + (tempOn && env.temp_c != null ? env.temp_c.toFixed(1) + ' °C' : '--');
+  [['snapArea', 'liveVideo'], ['calibSnapArea', 'calibLiveVideo']].forEach(([areaId, videoId]) => {
+    const area = document.getElementById(areaId);
+    const video = document.getElementById(videoId);
+    const osd = area && area.querySelector('.video-osd');
+    if (!osd) return;
+    const d = osd.querySelector('.osd-depth');
+    const t = osd.querySelector('.osd-temp');
+    d.textContent = dText;
+    t.textContent = tText;
+    d.classList.toggle('hidden', !depthOn);
+    t.classList.toggle('hidden', !tempOn);
+    osd.classList.toggle('hidden', !(depthOn || tempOn) || video.classList.contains('hidden'));
+    placeVideoOsd(area, video, osd);
+  });
+}
+
+/* Pin the overlay to the visible picture, not the box around it, so it
+   never lands on the letterbox bars (fullscreen on a non-16:9 screen,
+   rotated preview). Font size tracks the picture height like a subtitle. */
+function placeVideoOsd(area, video, osd) {
+  if (osd.classList.contains('hidden') || !video.videoWidth || !video.videoHeight) return;
+  const box = video.getBoundingClientRect();   // includes the rotation transform
+  const outer = area.getBoundingClientRect();
+  if (!box.width || !box.height) return;
+  const quarter = area.classList.contains('rot-quarter');
+  const vw = quarter ? video.videoHeight : video.videoWidth;
+  const vh = quarter ? video.videoWidth : video.videoHeight;
+  const s = Math.min(box.width / vw, box.height / vh);
+  const w = vw * s, h = vh * s;
+  const left = box.left + (box.width - w) / 2;
+  const bottom = box.top + (box.height + h) / 2;
+  osd.style.left = Math.round(left - outer.left + 0.025 * w) + 'px';
+  osd.style.bottom = Math.round(outer.bottom - bottom + 0.04 * h) + 'px';
+  osd.style.fontSize = Math.round(Math.min(48, Math.max(12, 0.034 * h))) + 'px';
+}
+
+function placeAllVideoOsds() {
+  [['snapArea', 'liveVideo'], ['calibSnapArea', 'calibLiveVideo']].forEach(([areaId, videoId]) => {
+    const area = document.getElementById(areaId);
+    const osd = area && area.querySelector('.video-osd');
+    if (osd) placeVideoOsd(area, document.getElementById(videoId), osd);
+  });
+}
+window.addEventListener('resize', placeAllVideoOsds);
+document.addEventListener('fullscreenchange', placeAllVideoOsds);
+document.addEventListener('webkitfullscreenchange', placeAllVideoOsds);
+
+/* ── Fullscreen preview ─────────────────────────────────────────
+   Fullscreens the whole preview box so the overlay comes along. If the
+   browser refuses (e.g. an iframe without allowfullscreen), fall back to
+   filling the page; Esc or the button exits. */
+function _fsElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+async function toggleFullscreen(areaId) {
+  const area = document.getElementById(areaId);
+  if (_fsElement()) {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    return;
+  }
+  if (area.classList.contains('pseudo-fs')) {
+    area.classList.remove('pseudo-fs');
+    requestAnimationFrame(placeAllVideoOsds);
+    return;
+  }
+  const req = area.requestFullscreen || area.webkitRequestFullscreen;
+  try {
+    if (!req) throw new Error('Fullscreen API unavailable');
+    await req.call(area);
+  } catch (_) {
+    area.classList.add('pseudo-fs');
+    requestAnimationFrame(placeAllVideoOsds);
+  }
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.snapshot-area.pseudo-fs').forEach(a => a.classList.remove('pseudo-fs'));
+    requestAnimationFrame(placeAllVideoOsds);
+  }
+});
 
 async function pollEnv() {
   const env = await api('/env');
