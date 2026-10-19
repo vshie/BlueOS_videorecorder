@@ -75,6 +75,12 @@ h3{font-size:.88em;margin:8px 0 4px;color:#555;text-transform:uppercase;letter-s
 .status-dot.degraded{background:#f9a825;animation:pulse 0.5s infinite}
 .status-dot.complete{background:#1a73e8}
 .status-dot.failed{background:#e53935}
+/* Battery charging indicator, beside the Battery Current value */
+.charging-tag{display:inline-flex;align-items:center;gap:4px;margin-left:8px;font-size:.62em;font-weight:600;color:#2e7d32;vertical-align:middle}
+.charging-tag.hidden{display:none}
+.charging-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#2e7d32;box-shadow:0 0 6px rgba(67,160,71,.7)}
+body.cam4k .charging-tag{color:#39ff88}
+body.cam4k .charging-dot{background:#39ff88;box-shadow:0 0 8px rgba(57,255,136,.7)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
 /* Buttons */
@@ -593,7 +599,7 @@ body.calib-tab .file-manager-wrapper{display:none}
       <div class="telem-item cam4k-only"><div class="telem-label">Zoom</div><div class="telem-value" id="tZoom">--</div></div>
       <div class="telem-item"><div class="telem-label">Battery V</div><div class="telem-value" id="tBattV">--</div></div>
       <div class="telem-item"><div class="telem-label">Battery SOC</div><div class="telem-value" id="tBattSoc">--</div></div>
-      <div class="telem-item"><div class="telem-label">Battery Current</div><div class="telem-value" id="tBattI">--</div></div>
+      <div class="telem-item"><div class="telem-label">Battery Current</div><div class="telem-value"><span id="tBattI">--</span><span class="charging-tag hidden" id="tBattCharging"><span class="charging-dot"></span>charging</span></div></div>
       <div class="telem-item"><div class="telem-label">Awake</div><div class="telem-value" id="tBattAge" style="font-size:.85em">--</div></div>
       <div class="telem-item"><div class="telem-label">Health</div><div class="telem-value" id="tHealth">--</div></div>
     </div>
@@ -1346,6 +1352,7 @@ async function pollTelemetry() {
   const battVEl = document.getElementById('tBattV');
   const battSocEl = document.getElementById('tBattSoc');
   const battIEl = document.getElementById('tBattI');
+  const battChgEl = document.getElementById('tBattCharging');
   const battAgeEl = document.getElementById('tBattAge');
   const b = d.battery;
   if (b && b.connected) {
@@ -1358,6 +1365,9 @@ async function pollTelemetry() {
     }
     battSocEl.textContent = b.soc_percent != null ? b.soc_percent.toFixed(0) + '%' : '--';
     battIEl.textContent = b.current_a != null ? b.current_a.toFixed(2) + ' A' : '--';
+    // Positive current = energy flowing into the battery. The small threshold
+    // keeps the BMS's ~0.1 A reading noise around zero from flickering it on.
+    battChgEl.classList.toggle('hidden', !(b.current_a != null && b.current_a > BATT_CHARGING_MIN_A));
     battAgeEl.textContent = b.awake_uptime || b.since_full_charge || '--';
   } else {
     battVEl.textContent = b && b.last_error ? 'N/C' : '--';
@@ -1365,6 +1375,7 @@ async function pollTelemetry() {
     battVEl.style.fontWeight = '';
     battSocEl.textContent = '--';
     battIEl.textContent = '--';
+    battChgEl.classList.add('hidden');
     battAgeEl.textContent = '--';
   }
 
@@ -2969,6 +2980,8 @@ async function setBlueosModel(enabled) {
     cb.disabled = false;
   }
 }
+
+const BATT_CHARGING_MIN_A = 0.05;
 
 /* ── Environment card (2 Hz refresh matches sensor sample rate) ─── */
 function updateEnvCard(env) {
