@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.request
 
@@ -115,6 +115,13 @@ class Scheduler:
         self._cycle_window = 0
         self._cycle_windows_total = 0
         self._deadline = None  # monotonic end of the whole deployment
+        # Wall-clock schedule (night window / run until stopped) progress.
+        self._phase = None
+        self._light_pct = 0
+        self._next_change_utc = None
+        self._zone = None
+        self._open_ended = False
+        self._now = lambda: datetime.now(timezone.utc)
 
     def configure(self, *, start_fn, stop_fn, disk_free_fn, hw,
                   capture_still_fn=None, log_event_fn=None, cam4k_mode=False,
@@ -189,6 +196,10 @@ class Scheduler:
             self._cycle_window = 0
             self._cycle_windows_total = 0
             self._deadline = None
+            self._phase = None
+            self._light_pct = 0
+            self._next_change_utc = None
+            self._open_ended = False
         self._active_recipe = None
 
     def get_state(self):
@@ -196,6 +207,9 @@ class Scheduler:
             total_remaining = None
             if self._deadline is not None:
                 total_remaining = round(max(0.0, self._deadline - time.monotonic()), 1)
+            next_change = None
+            if self._next_change_utc is not None and self._zone is not None:
+                next_change = self._next_change_utc.astimezone(self._zone).strftime("%H:%M")
             return {
                 "state": self._state,
                 "remaining_s": round(self._remaining_s, 1),
@@ -203,6 +217,11 @@ class Scheduler:
                 "cycle_window": self._cycle_window,
                 "cycle_windows_total": self._cycle_windows_total,
                 "total_remaining_s": total_remaining,
+                # Wall-clock schedule only (None / False otherwise).
+                "phase": self._phase,
+                "light_pct": self._light_pct,
+                "next_change_local": next_change,
+                "open_ended": self._open_ended,
             }
 
     def is_running(self):
@@ -252,9 +271,29 @@ class Scheduler:
             if self._stop.is_set():
                 return
 
-            duration_s = recipe.get("duration_minutes", 30) * 60
-            cycling = bool(recipe.get("cycle_enable"))
-            if cycling:
+            from recipes import uses_schedule
+            scheduled = uses_schedule(recipe)
+            open_ended = bool(recipe.get("run_until_stopped"))
+            duration_s = float("inf") if open_ended else recipe.get("duration_minutes", 30) * 60
+            cycling = bool(recipe.get("cycle_enable")) and not scheduled
+            if scheduled:
+                from recipes import recipe_zone
+                safe_name = re.sub(r"[^a-zA-Z0-9_-]", "",
+                                   str(recipe.get("name", "recipe")).replace(" ", "_"))
+                deployment_id = f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                with self._lock:
+                    self._cycle_windows_total = 0
+                    self._cycle_window = 1
+                    self._open_ended = open_ended
+                    self._zone = recipe_zone(recipe)
+                logger.info(
+                    "Scheduled deployment %s: night=%s %s-%s %s, %s",
+                    deployment_id, bool(recipe.get("night_enable")),
+                    recipe.get("night_start"), recipe.get("night_end"),
+                    recipe.get("time_zone"),
+                    "until stopped" if open_ended else f"{recipe.get('duration_minutes')} min",
+                )
+            elif cycling:
                 from recipes import calculate_cycle_plan
                 plan = calculate_cycle_plan(
                     recipe.get("duration_minutes", 30),
@@ -275,14 +314,14 @@ class Scheduler:
                 )
 
             def window_recipe(index):
-                if not cycling:
+                if not (cycling or scheduled):
                     return recipe
                 return dict(recipe, _deployment_id=deployment_id, _window_index=index)
 
             if not self._start_recording_with_retries(window_recipe(1)):
                 return
             with self._lock:
-                self._deadline = time.monotonic() + duration_s
+                self._deadline = None if open_ended else time.monotonic() + duration_s
             if cycling:
                 self._log("cycle_window_started", f"window=1/{self._cycle_windows_total}")
 
@@ -390,7 +429,10 @@ class Scheduler:
                     f"delay {delay_s:.0f}s, recording {duration_s:.0f}s"
                 )
 
-            if cycling:
+            if scheduled:
+                if not self._run_schedule(recipe, window_recipe):
+                    return  # a later clip failed to start; error state is set
+            elif cycling:
                 if not self._run_cycle(recipe, window_recipe):
                     return  # a later window failed to start; error state is set
             else:
@@ -398,7 +440,7 @@ class Scheduler:
 
             if not self._stop.is_set():
                 logger.info("Scheduler: duration reached, stopping recording")
-                if not cycling:
+                if not (cycling or scheduled):
                     self._stop_recording_fn()
                 self._set_state("complete")
                 if self._hw:
@@ -478,6 +520,105 @@ class Scheduler:
                 if light_on_while_recording:
                     self._hw.light_on(brightness)
                 self._apply_recipe_led(recipe)
+
+    def _run_schedule(self, recipe, window_recipe):
+        """Follow the wall-clock schedule: day settings, the night window,
+        and continuous recording split into clips (recipes.next_segment).
+
+        Clip 1 is already recording when this is called. Every later record
+        segment is a new clip in the same deployment folder; the light
+        follows each segment. Runs until the deadline, or forever when
+        open-ended (Stop / disk full / power loss end it). Returns False if
+        a clip failed to start.
+        """
+        from recipes import MIN_CLIP_S, PhaseTracker, next_segment
+
+        tracker = PhaseTracker()
+        recording = True
+        first = True
+        clip = 1
+        while not self._stop.is_set():
+            now = self._now()
+            end_utc = None
+            if self._deadline is not None:
+                left = self._deadline - time.monotonic()
+                if left <= 0:
+                    break
+                end_utc = now + timedelta(seconds=left)
+            seg = next_segment(now, recipe, tracker, end_utc)
+            seg_s = (seg["end"] - now).total_seconds()
+            with self._lock:
+                self._phase = seg["phase"]
+                self._next_change_utc = seg["next_change"]
+            if seg["phase_changed"]:
+                self._log("phase_changed", f"phase={seg['phase']}")
+                logger.info("Schedule: %s phase", seg["phase"])
+
+            if seg["kind"] == "record" and (first or seg_s >= MIN_CLIP_S):
+                if not first:
+                    if recording:
+                        self._stop_recording_fn()
+                    clip += 1
+                    with self._lock:
+                        self._cycle_window = clip
+                    if not self._start_recording_with_retries(window_recipe(clip)):
+                        return False
+                    self._log("cycle_window_started", f"window={clip} phase={seg['phase']}")
+                    self._apply_recipe_led(recipe)
+                recording = True
+                self._set_light(seg["light_pct"])
+                self._wait_until("recording", seg["end"], check_disk=True)
+            else:
+                if recording:
+                    self._stop_recording_fn()
+                    recording = False
+                    self._log("cycle_idle_started", f"after_window={clip} phase={seg['phase']}")
+                self._set_light(0)
+                self._wait_until("cycle_idle", seg["end"])
+            first = False
+
+        if recording and not self._stop.is_set():
+            self._stop_recording_fn()
+        return True
+
+    def _set_light(self, pct):
+        with self._lock:
+            self._light_pct = pct
+        if not self._hw:
+            return
+        if pct > 0:
+            self._hw.light_on(pct)
+        else:
+            self._hw.light_off()
+
+    def _disk_low(self):
+        """Stop everything when free space drops below the minimum."""
+        if not self._get_disk_free_fn:
+            return False
+        free = self._get_disk_free_fn()
+        if free is None or free >= DISK_FREE_MINIMUM_MB:
+            return False
+        logger.warning(f"Disk space low ({free} MB), stopping recording")
+        self._stop_recording_fn()
+        self._set_state("disk_full")
+        if self._hw:
+            self._hw.led_warning()
+        self._stop.set()
+        return True
+
+    def _wait_until(self, state, end_utc, check_disk=False):
+        """Like _countdown, but against the wall clock, so a late RTC sync
+        or other clock step moves the boundary with it. A backwards step
+        that would stretch the wait returns early so the caller replans."""
+        planned_s = (end_utc - self._now()).total_seconds()
+        while not self._stop.is_set():
+            remaining = (end_utc - self._now()).total_seconds()
+            self._set_state(state, max(0.0, remaining))
+            if remaining <= 0 or remaining > planned_s + 5:
+                break
+            if check_disk and self._disk_low():
+                return
+            self._stop.wait(min(1.0, remaining))
 
     def _schedule_release(self, duration_s, offset_s, recipe):
         """Schedule the closed-loop release (fast unwind at 2000 us until
@@ -734,16 +875,8 @@ class Scheduler:
             if remaining <= 0:
                 break
 
-            if check_disk and self._get_disk_free_fn:
-                free = self._get_disk_free_fn()
-                if free is not None and free < DISK_FREE_MINIMUM_MB:
-                    logger.warning(f"Disk space low ({free} MB), stopping recording")
-                    self._stop_recording_fn()
-                    self._set_state("disk_full")
-                    if self._hw:
-                        self._hw.led_warning()
-                    self._stop.set()
-                    return
+            if check_disk and self._disk_low():
+                return
 
             self._stop.wait(min(1.0, remaining))
 

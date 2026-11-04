@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-install-su
     swig \
     libjpeg-dev \
     zlib1g-dev \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # GStreamer
@@ -77,7 +78,7 @@ WORKDIR /app
 # rpi_ws281x (Pi 4) + a self-contained SPI driver (Pi 5) that only needs
 # spidev (gpio_backend.py). smbus2 talks to the PCA9685 and the MCP7940N
 # RTC (rtc_sync.py).
-RUN pip3 install flask requests pigpio rpi_ws281x spidev smbus2 Pillow dalybms pyserial
+RUN pip3 install flask requests pigpio rpi_ws281x spidev smbus2 Pillow dalybms pyserial python-dateutil
 
 RUN mkdir -p /app/videorecordings
 

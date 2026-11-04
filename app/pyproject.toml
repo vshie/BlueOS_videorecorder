@@ -27,4 +27,6 @@ dependencies = [
     "Pillow",
     "dalybms",
     "pyserial",
+    # Recipe night schedules are in local time; Python 3.8 has no zoneinfo.
+    "python-dateutil",
 ]

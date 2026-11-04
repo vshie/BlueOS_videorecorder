@@ -10,6 +10,9 @@ import logging
 import os
 import re
 import uuid
+from datetime import datetime, timedelta
+
+from dateutil import tz
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +96,21 @@ RECIPE_SCHEMA_DEFAULTS = {
     "cycle_enable": False,
     "cycle_record_minutes": 10.0,
     "cycle_idle_minutes": 50.0,
+    # Open-ended deployment: ignore duration_minutes and keep going until
+    # Stop, disk full, or the battery dies (e.g. a whale-fall timelapse).
+    "run_until_stopped": False,
+    # Night schedule.  Between night_start and night_end (local time in
+    # time_zone; may wrap midnight) the recorder repeats "record
+    # night_record_minutes with the light at night_light_brightness_pct,
+    # then night_idle_minutes off".  Outside it, the day settings above
+    # apply (continuous, or the record/idle cycle).
+    "night_enable": False,
+    "night_start": "19:00",
+    "night_end": "06:00",
+    "night_record_minutes": 5.0,
+    "night_idle_minutes": 10.0,
+    "night_light_brightness_pct": 80,
+    "time_zone": "UTC",
 }
 
 # Shortest record or idle window a cycle may use (minutes).
@@ -100,6 +118,15 @@ CYCLE_MIN_MINUTES = 0.5
 # Light modes that make sense across idle gaps; the others follow sweep
 # pause points, which a duty cycle doesn't line up with.
 CYCLE_LIGHT_MODES = ("off", "always")
+
+# Continuous recording under a schedule is split into clips of this length
+# so a multi-day run doesn't produce one enormous file.
+CONTINUOUS_CLIP_MINUTES = 60.0
+# A record segment shorter than this (cut by a phase boundary) is skipped
+# rather than starting a clip that would stop again immediately.
+MIN_CLIP_S = 5.0
+
+_HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 # Allowed window for release-trigger offset relative to recording finish.
 # Negative = fire before the recording ends, positive = fire after.
@@ -159,6 +186,132 @@ def calculate_cycle_plan(duration_minutes, record_minutes, idle_minutes):
         "record_total_minutes": round(record_total, 2),
         "last_window_minutes": round(last, 2),
     }
+
+
+def uses_schedule(recipe):
+    """True when the scheduler should run the wall-clock schedule loop."""
+    return bool(recipe.get("night_enable") or recipe.get("run_until_stopped"))
+
+
+def recipe_zone(recipe):
+    return tz.gettz(str(recipe.get("time_zone") or "UTC")) or tz.UTC
+
+
+def _hhmm(value):
+    m = _HHMM_RE.match(str(value).strip())
+    if not m:
+        raise ValueError(value)
+    return int(m.group(1)), int(m.group(2))
+
+
+def night_window_at(now_utc, recipe):
+    """Return (is_night, next_boundary_utc) for an aware UTC datetime.
+
+    The night runs from night_start to night_end in the recipe's time
+    zone, wrapping past midnight when night_end <= night_start.
+    """
+    zone = recipe_zone(recipe)
+    sh, sm = _hhmm(recipe.get("night_start", "19:00"))
+    eh, em = _hhmm(recipe.get("night_end", "06:00"))
+    wraps = (eh, em) <= (sh, sm)
+    today = now_utc.astimezone(zone).date()
+    nights = []
+    for offset in (-1, 0, 1, 2):
+        d = today + timedelta(days=offset)
+        start = datetime(d.year, d.month, d.day, sh, sm, tzinfo=zone)
+        e = d + timedelta(days=1) if wraps else d
+        end = datetime(e.year, e.month, e.day, eh, em, tzinfo=zone)
+        nights.append((start, end))
+    for start, end in nights:
+        if start <= now_utc < end:
+            return True, end.astimezone(tz.UTC)
+    nxt = min(start for start, _ in nights if start > now_utc)
+    return False, nxt.astimezone(tz.UTC)
+
+
+def phase_settings(recipe, phase):
+    """(record_minutes, idle_minutes, light_pct) for 'day' or 'night'.
+
+    idle 0 means continuous recording, split into CONTINUOUS_CLIP_MINUTES
+    clips.
+    """
+    if phase == "night":
+        rec = float(recipe.get("night_record_minutes", 5))
+        idle = float(recipe.get("night_idle_minutes", 10))
+        light = int(recipe.get("night_light_brightness_pct", 80))
+    else:
+        light = (int(recipe.get("light_brightness_pct", 0))
+                 if recipe.get("light_mode", "off") == "always" else 0)
+        if recipe.get("cycle_enable"):
+            rec = float(recipe.get("cycle_record_minutes", 10))
+            idle = float(recipe.get("cycle_idle_minutes", 50))
+        else:
+            rec, idle = CONTINUOUS_CLIP_MINUTES, 0.0
+    if idle <= 0:
+        rec, idle = CONTINUOUS_CLIP_MINUTES, 0.0
+    return rec, idle, light
+
+
+class PhaseTracker:
+    """Remembers when the current day/night phase began.  Record/idle
+    windows are timed from that moment, so entering night starts a
+    recording window straight away."""
+
+    def __init__(self):
+        self.phase = None
+        self.anchor = None
+
+
+def next_segment(now_utc, recipe, tracker, end_utc=None):
+    """Work out the segment running at now_utc.
+
+    Returns a dict: kind ('record'|'idle'), phase ('day'|'night'),
+    continuous (bool), light_pct, end (aware UTC, capped at the day/night
+    boundary and end_utc), next_change (that boundary, or None) and
+    phase_changed.
+    """
+    if recipe.get("night_enable"):
+        is_night, boundary = night_window_at(now_utc, recipe)
+        phase = "night" if is_night else "day"
+    else:
+        phase, boundary = "day", None
+    changed = phase != tracker.phase
+    # A clock that jumped backwards would put the anchor in the future.
+    if changed or tracker.anchor is None or tracker.anchor > now_utc:
+        tracker.phase, tracker.anchor = phase, now_utc
+    rec, idle, light = phase_settings(recipe, phase)
+    period_s = (rec + idle) * 60.0
+    elapsed = (now_utc - tracker.anchor).total_seconds()
+    k = int(elapsed // period_s)
+    window_start = tracker.anchor + timedelta(seconds=k * period_s)
+    if elapsed - k * period_s < rec * 60.0:
+        kind, end = "record", window_start + timedelta(minutes=rec)
+    else:
+        kind, end = "idle", window_start + timedelta(seconds=period_s)
+    for cap in (boundary, end_utc):
+        if cap is not None and cap < end:
+            end = cap
+    return {
+        "kind": kind,
+        "phase": phase,
+        "continuous": idle <= 0,
+        "light_pct": light if kind == "record" else 0,
+        "end": end,
+        "next_change": boundary,
+        "phase_changed": changed,
+    }
+
+
+def simulate_schedule(start_utc, end_utc, recipe):
+    """List the segments a schedule produces between two UTC times."""
+    tracker = PhaseTracker()
+    out, now = [], start_utc
+    while now < end_utc:
+        seg = next_segment(now, recipe, tracker, end_utc)
+        seg["start"] = now
+        out.append(seg)
+        now = seg["end"]
+    return out
 
 
 DEFAULT_RECIPES = [
@@ -221,6 +374,30 @@ DEFAULT_RECIPES = [
         "led_color": "green",
         "led_blink": "slow",
         "still_prefix": "",
+    },
+]
+
+# Added to every unit that doesn't have them yet (DEFAULT_RECIPES only seed
+# an empty recipes folder).
+SCHEDULE_DEFAULT_RECIPES = [
+    {
+        "id": "whale-fall-timelapse",
+        "name": "Whale Fall Timelapse",
+        "mode": "video",
+        "duration_minutes": 60,
+        "auto_start_delay_minutes": 1,
+        "servo_fixed": True,
+        "light_brightness_pct": 0,
+        "light_mode": "off",
+        "led_color": "blue",
+        "led_blink": "slow",
+        "run_until_stopped": True,
+        "night_enable": True,
+        "night_start": "19:00",
+        "night_end": "06:00",
+        "night_record_minutes": 5,
+        "night_idle_minutes": 10,
+        "night_light_brightness_pct": 80,
     },
 ]
 
@@ -435,6 +612,56 @@ def validate_recipe(data):
             "light_mode must be 'off' or 'always' when the record/idle cycle is enabled"
         )
 
+    for fld in ("run_until_stopped", "night_enable"):
+        if fld in data:
+            clean[fld] = bool(data[fld])
+
+    for fld in ("night_start", "night_end"):
+        if fld in data:
+            try:
+                h, m = _hhmm(data[fld])
+            except ValueError:
+                errors.append(f"{fld} must be a time like 19:00")
+            else:
+                clean[fld] = f"{h:02d}:{m:02d}"
+    if clean["night_enable"] and clean["night_start"] == clean["night_end"]:
+        errors.append("night start and end times must differ")
+
+    for fld, lo in (("night_record_minutes", CYCLE_MIN_MINUTES), ("night_idle_minutes", 0.0)):
+        if fld in data:
+            try:
+                val = parse_duration_to_minutes(data[fld])
+            except ValueError:
+                errors.append(f"{fld} must be a number of minutes")
+                continue
+            if val < lo or val > 24 * 60:
+                errors.append(f"{fld} must be between {lo} and {24 * 60} minutes")
+            else:
+                clean[fld] = round(val, 2)
+
+    if "night_light_brightness_pct" in data:
+        try:
+            nl = float(data["night_light_brightness_pct"])
+        except (ValueError, TypeError):
+            errors.append("night_light_brightness_pct must be a number")
+        else:
+            if nl < 0 or nl > 100:
+                errors.append("night_light_brightness_pct must be between 0 and 100")
+            else:
+                clean["night_light_brightness_pct"] = int(nl)
+
+    if "time_zone" in data:
+        name = str(data["time_zone"] or "").strip()
+        if not name or tz.gettz(name) is None:
+            errors.append(f"unknown time zone '{name}' (use a name like America/Los_Angeles)")
+        else:
+            clean["time_zone"] = name
+
+    if clean["night_enable"] and clean["light_mode"] not in CYCLE_LIGHT_MODES:
+        errors.append(
+            "daytime light_mode must be 'off' or 'always' when the night schedule is on"
+        )
+
     if "cam4k_focus_finder" in data:
         clean["cam4k_focus_finder"] = bool(data["cam4k_focus_finder"])
 
@@ -468,6 +695,17 @@ def validate_recipe(data):
                     clean[fld] = val
             except (ValueError, TypeError):
                 errors.append(f"{fld} must be a number")
+
+    if clean["run_until_stopped"]:
+        # These are all timed from the total duration, which an open-ended
+        # run doesn't have.
+        for fld, what in (("release_enable", "release"),
+                          ("winch_enable", "winch profiling"),
+                          ("cam4k_focus_finder", "focus finder")):
+            if clean[fld]:
+                errors.append(f"{what} can't be used with 'run until stopped'")
+        if not clean["servo_fixed"]:
+            errors.append("a tilt sweep can't be used with 'run until stopped'")
 
     if "id" in data:
         clean["id"] = str(data["id"])
@@ -529,6 +767,12 @@ def init_default_recipes(cam4k=False):
         for recipe in DEFAULT_RECIPES:
             save_recipe(recipe, recipe["id"])
         logger.info(f"Initialized {len(DEFAULT_RECIPES)} default recipes")
+
+    existing_ids = {r["id"] for r in list_recipes()}
+    for recipe in SCHEDULE_DEFAULT_RECIPES:
+        if recipe["id"] not in existing_ids:
+            save_recipe(recipe, recipe["id"])
+            logger.info(f"Added default recipe '{recipe['name']}'")
 
     if cam4k:
         existing_ids = {r["id"] for r in list_recipes()}

@@ -665,6 +665,7 @@ body.calib-tab .file-manager-wrapper{display:none}
             <label style="font-weight:normal;margin:0;cursor:pointer"><input type="radio" name="rDurationUnit" id="rDurationUnitHr" value="hours" onchange="onRecipeDurationUnitChange()"> Hours</label>
           </span>
         </div>
+        <label style="font-weight:normal;margin-top:4px;cursor:pointer"><input type="checkbox" id="rUntilStopped" onchange="toggleScheduleFields()"> Run until stopped (retrieved, battery dies or storage full)</label>
       </div>
       <div class="form-group narrow">
         <label>Auto-Start Delay (min)</label>
@@ -682,7 +683,7 @@ body.calib-tab .file-manager-wrapper{display:none}
     </div>
 
     <div class="form-row">
-      <div class="form-group narrow">
+      <div class="form-group">
         <label><input type="checkbox" id="rCycleEnable" onchange="toggleCycleFields()"> Repeat: record, then idle</label>
       </div>
       <div class="form-group narrow cycle-field">
@@ -695,6 +696,43 @@ body.calib-tab .file-manager-wrapper{display:none}
       </div>
     </div>
     <div id="cycleCalc" class="text-muted cycle-field" style="font-size:.85em"></div>
+
+    <div class="form-row" style="margin-top:8px">
+      <div class="form-group">
+        <label><input type="checkbox" id="rNightEnable" onchange="toggleScheduleFields()"> Night schedule (different recording and light at night)</label>
+      </div>
+    </div>
+    <div id="nightFields" style="display:none">
+      <div class="form-row">
+        <div class="form-group narrow">
+          <label>Night from</label>
+          <input type="time" id="rNightStart" value="19:00" oninput="updateScheduleCalc()">
+        </div>
+        <div class="form-group narrow">
+          <label>to</label>
+          <input type="time" id="rNightEnd" value="06:00" oninput="updateScheduleCalc()">
+        </div>
+        <div class="form-group narrow">
+          <label>Record (min)</label>
+          <input type="number" id="rNightRecord" value="5" min="0.5" step="any" oninput="updateScheduleCalc()">
+        </div>
+        <div class="form-group narrow">
+          <label>Off (min, 0 = continuous)</label>
+          <input type="number" id="rNightIdle" value="10" min="0" step="any" oninput="updateScheduleCalc()">
+        </div>
+        <div class="form-group narrow">
+          <label>Night light: <span id="rNightLightVal" class="mono">80</span>%</label>
+          <input type="range" id="rNightLight" min="0" max="100" step="5" value="80" oninput="document.getElementById('rNightLightVal').textContent=this.value;updateScheduleCalc()">
+        </div>
+        <div class="form-group">
+          <label>Time zone</label>
+          <input type="text" id="rTimeZone" value="UTC" placeholder="e.g. America/Los_Angeles" style="width:14em" oninput="updateScheduleCalc()">
+          <div id="rTimeZoneHint" style="font-size:.8em;color:#c86400;margin-top:2px;display:none"></div>
+        </div>
+      </div>
+      <div class="text-muted" style="font-size:.82em">Outside the night window the settings above apply (continuous, or the record/idle repeat) with the Lumen Light settings below. At night the light is on only while recording.</div>
+    </div>
+    <div id="scheduleCalc" class="text-muted" style="font-size:.85em;margin-top:6px;display:none"></div>
 
     <div style="background:#e8f0fe;border-left:3px solid #1a73e8;padding:8px 12px;font-size:.85em;border-radius:4px;margin:10px 0;color:#333">
       <strong>When storage is low:</strong> If free disk space falls below 1 GB, the active recording will stop automatically and the status LED will flash yellow. The recipe will not resume &mdash; you must manually restart.
@@ -817,7 +855,7 @@ body.calib-tab .file-manager-wrapper{display:none}
     <div class="form-row">
       <div class="form-group narrow">
         <label>Light Mode</label>
-        <select id="rLightMode" onchange="onLightModeChange()">
+        <select id="rLightMode" onchange="onLightModeChange();updateScheduleCalc()">
           <option value="off">Off</option>
           <option value="always" id="rLightModeAlways">Always On</option>
           <option value="pause_only" class="no-cycle">Pause Points Only</option>
@@ -826,7 +864,7 @@ body.calib-tab .file-manager-wrapper{display:none}
       </div>
       <div class="form-group narrow">
         <label>Brightness: <span id="rLightBrightVal" class="mono">0</span>%</label>
-        <input type="range" id="rLightBright" min="0" max="100" step="5" value="0" oninput="document.getElementById('rLightBrightVal').textContent=this.value">
+        <input type="range" id="rLightBright" min="0" max="100" step="5" value="0" oninput="document.getElementById('rLightBrightVal').textContent=this.value;updateScheduleCalc()">
       </div>
     </div>
     <div id="rLightCycleHint" class="text-muted cycle-field" style="font-size:.82em">
@@ -1117,6 +1155,19 @@ async function pollStatus() {
   if (sched.state === 'delay') {
     schedEl.textContent = `Starting "${sched.recipe_name}" in ${Math.ceil(sched.remaining_s)}s...`;
     document.getElementById('btnScheduleStop').disabled = false;
+  } else if (sched.phase && (sched.state === 'recording' || sched.state === 'cycle_idle')) {
+    const Phase = sched.phase === 'night' ? 'Night' : 'Day';
+    const parts = [];
+    if (sched.state === 'recording') {
+      parts.push(`${Phase} — recording "${sched.recipe_name}" clip ${sched.cycle_window}` +
+                 (sched.light_pct > 0 ? ` (light ${sched.light_pct}%)` : ''));
+    } else {
+      parts.push(`${Phase} — light off, next clip in ${Math.ceil(sched.remaining_s / 60)} min`);
+    }
+    if (sched.next_change_local) parts.push(`${sched.phase === 'night' ? 'night ends' : 'night starts'} ${sched.next_change_local}`);
+    parts.push(sched.open_ended ? 'until stopped' : `${fmtMinutes((sched.total_remaining_s || 0) / 60)} total remaining`);
+    schedEl.textContent = parts.join(' · ');
+    document.getElementById('btnScheduleStop').disabled = false;
   } else if (sched.state === 'recording') {
     if (sched.cycle_windows_total) {
       schedEl.textContent = `Recording "${sched.recipe_name}" — window ${sched.cycle_window}/${sched.cycle_windows_total}, ` +
@@ -1383,6 +1434,7 @@ async function pollTelemetry() {
   // from /telemetry; a faster pollEnv() loop drives the numbers at 2 Hz.
   updateEnvCard(d.environment);
 
+  unitTimeSynced = d.time_synced;
   if (d.time_synced === false) {
     document.getElementById('timeBanner').classList.remove('hidden');
   } else {
@@ -2367,13 +2419,22 @@ async function loadRecipes() {
   renderRecipeList();
   populateRecipeDropdown();
 }
+function recipeMeta(r) {
+  const parts = [];
+  if (r.cycle_enable) parts.push(`${fmtRecipeDurationInput(r.cycle_record_minutes)}/${fmtRecipeDurationInput(r.cycle_idle_minutes)} min cycle`);
+  if (r.night_enable) parts.push(`night ${r.night_start}–${r.night_end} ` +
+    (r.night_idle_minutes > 0 ? `${fmtRecipeDurationInput(r.night_record_minutes)}/${fmtRecipeDurationInput(r.night_idle_minutes)} min` : 'continuous'));
+  parts.push(r.run_until_stopped ? 'until stopped' : (r.cycle_enable || r.night_enable ? fmtMinutes(r.duration_minutes) : `${r.duration_minutes} min`));
+  return parts.join(' | ');
+}
+
 function renderRecipeList() {
   const el = document.getElementById('recipeList');
   if (allRecipes.length === 0) { el.innerHTML = '<div class="text-muted">No recipes. Create one to get started.</div>'; return; }
   el.innerHTML = allRecipes.map(r => `
     <div class="recipe-item">
       <span class="name">${esc(r.name)}</span>
-      <span class="meta">${r.mode} | ${r.cycle_enable ? `${fmtRecipeDurationInput(r.cycle_record_minutes)}/${fmtRecipeDurationInput(r.cycle_idle_minutes)} min cycle | ${fmtMinutes(r.duration_minutes)}` : `${r.duration_minutes} min`}</span>
+      <span class="meta">${r.mode} | ${recipeMeta(r)}</span>
       <div class="recipe-actions">
         <button class="btn-sm" onclick="editRecipe('${r.id}')">Edit</button>
         <button class="btn-sm btn-danger" onclick="deleteRecipeUI('${r.id}')">Del</button>
@@ -2452,6 +2513,7 @@ function newRecipe() {
   document.getElementById('rCycleEnable').checked = false;
   document.getElementById('rCycleRecord').value = '10';
   document.getElementById('rCycleIdle').value = '50';
+  fillScheduleFields({});
   document.getElementById('rDelay').value = '1';
   document.getElementById('rRotation').value = '0';
   document.getElementById('rServoFixed').checked = true;
@@ -2499,6 +2561,7 @@ function newRecipe() {
   toggleReleaseFields();
   toggleWinchFields();
   toggleCycleFields();
+  toggleScheduleFields();
   updateSweepCalc();
   updateWinchCalc();
 }
@@ -2518,6 +2581,7 @@ async function editRecipe(id) {
   document.getElementById('rCycleEnable').checked = !!r.cycle_enable;
   document.getElementById('rCycleRecord').value = fmtRecipeDurationInput(r.cycle_record_minutes != null ? r.cycle_record_minutes : 10);
   document.getElementById('rCycleIdle').value = fmtRecipeDurationInput(r.cycle_idle_minutes != null ? r.cycle_idle_minutes : 50);
+  fillScheduleFields(r);
   document.getElementById('rDelay').value = r.auto_start_delay_minutes;
   document.getElementById('rRotation').value = r.rotation_degrees;
   document.getElementById('rServoFixed').checked = r.servo_fixed;
@@ -2565,6 +2629,7 @@ async function editRecipe(id) {
   toggleReleaseFields();
   toggleWinchFields();
   toggleCycleFields();
+  toggleScheduleFields();
   updateSweepCalc();
   updateWinchCalc();
 }
@@ -2572,7 +2637,9 @@ async function editRecipe(id) {
 function cancelEditor() { document.getElementById('recipeEditor').classList.add('hidden'); }
 
 async function saveCurrentRecipe() {
-  const dm = getRecipeDurationMinutesFromForm();
+  const untilStopped = document.getElementById('rUntilStopped').checked;
+  let dm = getRecipeDurationMinutesFromForm();
+  if (untilStopped && (Number.isNaN(dm) || dm <= 0)) dm = 60;  // ignored by the scheduler
   if (Number.isNaN(dm) || dm <= 0) {
     alert('Enter a valid duration (positive number).');
     return;
@@ -2586,6 +2653,14 @@ async function saveCurrentRecipe() {
     cycle_enable: document.getElementById('rCycleEnable').checked,
     cycle_record_minutes: +document.getElementById('rCycleRecord').value,
     cycle_idle_minutes: +document.getElementById('rCycleIdle').value,
+    run_until_stopped: untilStopped,
+    night_enable: document.getElementById('rNightEnable').checked,
+    night_start: document.getElementById('rNightStart').value,
+    night_end: document.getElementById('rNightEnd').value,
+    night_record_minutes: +document.getElementById('rNightRecord').value,
+    night_idle_minutes: +document.getElementById('rNightIdle').value,
+    night_light_brightness_pct: +document.getElementById('rNightLight').value,
+    time_zone: document.getElementById('rTimeZone').value.trim(),
     auto_start_delay_minutes: +document.getElementById('rDelay').value,
     rotation_degrees: +document.getElementById('rRotation').value,
     servo_fixed: document.getElementById('rServoFixed').checked,
@@ -2658,7 +2733,8 @@ function toggleCycleFields() {
   // Pause-point / snapshot light modes follow the servo sweep, which doesn't
   // line up with idle breaks; the backend rejects them for cycling recipes.
   const sel = document.getElementById('rLightMode');
-  sel.querySelectorAll('option.no-cycle').forEach(o => { o.hidden = on; o.disabled = on; });
+  const night = document.getElementById('rNightEnable').checked;
+  sel.querySelectorAll('option.no-cycle').forEach(o => { o.hidden = on || night; o.disabled = on || night; });
   if (on && sel.selectedOptions[0] && sel.selectedOptions[0].classList.contains('no-cycle')) sel.value = 'always';
   document.getElementById('rLightModeAlways').textContent = on ? 'On while recording' : 'Always On';
   updateCycleCalc();
@@ -2695,6 +2771,14 @@ function cyclePlan(totalMin, recordMin, idleMin) {
 function updateCycleCalc() {
   const el = document.getElementById('cycleCalc');
   if (!el || !document.getElementById('rCycleEnable').checked) { if (el) el.textContent = ''; return; }
+  if (scheduleActive()) {
+    const rec = parseFloat(document.getElementById('rCycleRecord').value);
+    const idle = parseFloat(document.getElementById('rCycleIdle').value);
+    el.innerHTML = (rec >= 0.5 && idle >= 0.5) ? '' :
+      '<span style="color:#c83232">Record and idle must each be at least 0.5 min.</span>';
+    updateScheduleCalc();
+    return;
+  }
   const total = getRecipeDurationMinutesFromForm();
   const rec = parseFloat(document.getElementById('rCycleRecord').value);
   const idle = parseFloat(document.getElementById('rCycleIdle').value);
@@ -2707,6 +2791,138 @@ function updateCycleCalc() {
             `${fmtMinutes(idle)} idle between (${fmtMinutes(p.recorded)} recorded).`;
   if (p.last < rec - 1e-6) txt += ` The last window is cut to ${fmtMinutes(p.last)} by the total duration.`;
   txt += ' Each window is saved as its own clip, grouped by deployment.';
+  el.innerHTML = txt;
+}
+
+/* ── Day / night schedule (mirrors recipes.next_segment) ─────────── */
+const CONTINUOUS_CLIP_MINUTES = 60;
+let unitTimeSynced = null;  // from /telemetry; the schedule follows the unit clock
+
+function browserTimeZone() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (_) { return 'UTC'; }
+}
+
+function fillScheduleFields(r) {
+  const v = (x, d) => (x != null ? x : d);
+  document.getElementById('rUntilStopped').checked = !!r.run_until_stopped;
+  document.getElementById('rNightEnable').checked = !!r.night_enable;
+  document.getElementById('rNightStart').value = v(r.night_start, '19:00');
+  document.getElementById('rNightEnd').value = v(r.night_end, '06:00');
+  document.getElementById('rNightRecord').value = fmtRecipeDurationInput(v(r.night_record_minutes, 5));
+  document.getElementById('rNightIdle').value = fmtRecipeDurationInput(v(r.night_idle_minutes, 10));
+  document.getElementById('rNightLight').value = v(r.night_light_brightness_pct, 80);
+  document.getElementById('rNightLightVal').textContent = v(r.night_light_brightness_pct, 80);
+  // A saved schedule keeps its zone; anything else starts from this browser's.
+  document.getElementById('rTimeZone').value =
+    (r.night_enable && r.time_zone) ? r.time_zone : browserTimeZone();
+}
+
+// Options that are timed from the total duration can't run open-ended.
+const UNTIL_STOPPED_CONFLICTS = [
+  ['rReleaseEnable', toggleReleaseFields],
+  ['rWinchEnable', () => toggleWinchFields()],
+  ['rFocusFinder', toggleFocusFinderFields],
+];
+
+function toggleScheduleFields() {
+  const until = document.getElementById('rUntilStopped').checked;
+  const night = document.getElementById('rNightEnable').checked;
+  document.getElementById('rDuration').disabled = until;
+  document.querySelectorAll('input[name=rDurationUnit]').forEach(el => el.disabled = until);
+  document.getElementById('nightFields').style.display = night ? '' : 'none';
+  UNTIL_STOPPED_CONFLICTS.forEach(([id, toggle]) => {
+    const cb = document.getElementById(id);
+    if (until && cb.checked) { cb.checked = false; toggle(); }
+    cb.disabled = until;
+    cb.parentElement.title = until ? "Not available with 'Run until stopped'" : '';
+  });
+  const fixed = document.getElementById('rServoFixed');
+  if (until && !fixed.checked) { fixed.checked = true; toggleServoFields(); }
+  fixed.disabled = until;
+  // With a night window the light-mode limits match the record/idle cycle.
+  const sel = document.getElementById('rLightMode');
+  const cycleOn = document.getElementById('rCycleEnable').checked;
+  sel.querySelectorAll('option.no-cycle').forEach(o => { o.hidden = night || cycleOn; o.disabled = night || cycleOn; });
+  if (night && sel.selectedOptions[0] && sel.selectedOptions[0].classList.contains('no-cycle')) sel.value = 'always';
+  document.getElementById('rCycleEnable').parentElement.lastChild.textContent =
+    night ? ' Daytime: repeat record, then idle (off = continuous)' : ' Repeat: record, then idle';
+  updateCycleCalc();
+  updateScheduleCalc();
+}
+
+// The night times are local to the recipe's zone; flag one that differs
+// from this browser's (e.g. the built-in recipe ships in UTC).
+function updateTimeZoneHint() {
+  const hint = document.getElementById('rTimeZoneHint');
+  const zone = document.getElementById('rTimeZone').value.trim();
+  const mine = browserTimeZone();
+  const show = document.getElementById('rNightEnable').checked && zone !== mine;
+  hint.style.display = show ? '' : 'none';
+  if (show) {
+    hint.innerHTML = `This browser is in ${esc(mine)}. ` +
+      `<a href="#" onclick="document.getElementById('rTimeZone').value=browserTimeZone();updateScheduleCalc();return false">Use ${esc(mine)}</a>`;
+  }
+}
+
+function scheduleActive() {
+  return document.getElementById('rUntilStopped').checked || document.getElementById('rNightEnable').checked;
+}
+
+function hhmmMinutes(v) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(v || '');
+  return m ? (+m[1]) * 60 + (+m[2]) : NaN;
+}
+
+function updateScheduleCalc() {
+  const el = document.getElementById('scheduleCalc');
+  if (!el) return;
+  if (!scheduleActive()) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+  updateTimeZoneHint();
+  const until = document.getElementById('rUntilStopped').checked;
+  const night = document.getElementById('rNightEnable').checked;
+  const cycleOn = document.getElementById('rCycleEnable').checked;
+  const lightMode = document.getElementById('rLightMode').value;
+  const dayLight = lightMode === 'always' ? +document.getElementById('rLightBright').value : 0;
+  const lightTxt = pct => pct > 0 ? `light ${pct}%` : 'light off';
+  const err = msg => { el.innerHTML = `<span style="color:#c83232">${msg}</span>`; };
+
+  let day;
+  if (cycleOn) {
+    const rec = parseFloat(document.getElementById('rCycleRecord').value);
+    const idle = parseFloat(document.getElementById('rCycleIdle').value);
+    day = `${fmtMinutes(rec)} recording (${lightTxt(dayLight)}), then ${fmtMinutes(idle)} off, repeating`;
+  } else {
+    day = `continuous recording, ${lightTxt(dayLight)} (saved as ${CONTINUOUS_CLIP_MINUTES}-min clips)`;
+  }
+  let txt = `<strong>${night ? 'Day' : 'Recording'}:</strong> ${day}.`;
+
+  if (night) {
+    const s = hhmmMinutes(document.getElementById('rNightStart').value);
+    const e = hhmmMinutes(document.getElementById('rNightEnd').value);
+    const rec = parseFloat(document.getElementById('rNightRecord').value);
+    const idle = parseFloat(document.getElementById('rNightIdle').value);
+    const pct = +document.getElementById('rNightLight').value;
+    const zone = document.getElementById('rTimeZone').value.trim() || 'UTC';
+    if (Number.isNaN(s) || Number.isNaN(e) || s === e) return err('Set different night start and end times.');
+    if (!(rec >= 0.5) || !(idle >= 0)) return err('Night record must be at least 0.5 min, and off time 0 or more.');
+    const nightMin = e > s ? e - s : e + 1440 - s;
+    const fmtT = m => document.getElementById(m).value;
+    txt += ` <strong>Night</strong> ${fmtT('rNightStart')}–${fmtT('rNightEnd')} (${esc(zone)}, ${fmtMinutes(nightMin)}): `;
+    if (idle === 0) {
+      txt += `continuous recording, ${lightTxt(pct)}.`;
+    } else {
+      const p = cyclePlan(nightMin, rec, idle);
+      txt += `${fmtMinutes(rec)} recording with ${lightTxt(pct)}, then ${fmtMinutes(idle)} off &rarr; ` +
+             `${p.windows} clip${p.windows === 1 ? '' : 's'} per night (${fmtMinutes(p.recorded)} of footage).`;
+    }
+  }
+  txt += until ? ` ${night ? 'Repeats every day' : 'Keeps going'} until stopped, the battery dies or storage is full.`
+               : ` Runs for ${fmtMinutes(getRecipeDurationMinutesFromForm())} in total.`;
+  txt += ' All clips go in one deployment folder.';
+  if (night && unitTimeSynced === false) {
+    txt += ' <span style="color:#c83232">The unit clock is not synced: the night times follow the unit clock, so sync it (open BlueOS from a device with the correct time) before deploying.</span>';
+  }
   el.innerHTML = txt;
 }
 
