@@ -141,6 +141,9 @@ recording_rotation = 0
 
 usb_recording = False
 usb_failover_count = 0
+# True while _usb_failover is restarting the recording on the SD card, so the
+# scheduler doesn't read the brief gap as the recorder having dropped out.
+usb_failover_active = False
 recording_base_dir = None
 cam4k_mode = False
 
@@ -858,8 +861,17 @@ def gst_stderr_monitor(process):
 
 # ── Health watchdog ──────────────────────────────────────────────────────
 
-def _usb_failover():
+def _usb_failover(reason="USB storage lost during recording"):
     """Kill current recording on USB and restart on local SD card."""
+    global usb_failover_active
+    usb_failover_active = True
+    try:
+        _usb_failover_body(reason)
+    finally:
+        usb_failover_active = False
+
+
+def _usb_failover_body(reason):
     global gst_process, recording, start_time, current_video_file
     global current_ass_file, current_events_file
     global ass_thread, stop_ass_thread
@@ -867,8 +879,8 @@ def _usb_failover():
     global stills_thread, stop_stills_thread, stills_dir
     global usb_recording, usb_failover_count, recording_base_dir
 
-    logger.warning("USB failover: storage lost, switching to local SD")
-    log_event("usb_failover", "USB storage lost during recording, restarting on local SD")
+    logger.warning(f"USB failover: {reason}, switching to local SD")
+    log_event("usb_failover", f"{reason}, restarting on local SD")
     usb_failover_count += 1
 
     saved_recipe = active_recipe_for_recording
@@ -994,6 +1006,10 @@ def recording_health_watchdog():
 
             check_path = recording_base_dir or VIDEO_DIR
             disk_free = get_disk_free_mb(check_path)
+            if disk_free is not None and disk_free < 1024 and usb_recording:
+                # Stick is full: carry on on the SD card instead of stopping.
+                _usb_failover(f"USB nearly full ({disk_free} MB free)")
+                return
             if disk_free is not None and disk_free < 1024:
                 logger.warning(f"Disk space low: {disk_free} MB, stopping")
                 log_event("disk_full", f"{disk_free} MB remaining")
@@ -1113,6 +1129,22 @@ def start_recording_with_recipe(recipe):
         still_interval_s=recipe.get("still_interval_s", 1.0),
         rotation=image_rotation,
     )
+
+
+def recorder_active():
+    """True while recording, including a USB -> SD failover in progress."""
+    return recording or usb_failover_active
+
+
+def _scheduler_disk_free_mb():
+    """Free space for the scheduler's disk guard, which ends the deployment.
+
+    None for a USB recording: when the stick fills, the watchdog moves the
+    recording to the SD card instead, and the guard then watches the SD card.
+    """
+    if usb_recording:
+        return None
+    return get_disk_free_mb(VIDEO_DIR)
 
 
 def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
@@ -3353,7 +3385,8 @@ def _boot():
     scheduler.configure(
         start_fn=start_recording_with_recipe,
         stop_fn=_stop_recording_internal,
-        disk_free_fn=get_disk_free_mb,
+        disk_free_fn=_scheduler_disk_free_mb,
+        is_recording_fn=recorder_active,
         hw=hw,
         capture_still_fn=_sweep_snapshot,
         log_event_fn=log_event,

@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 DISK_FREE_MINIMUM_MB = 1024  # 1 GB
 RECORDING_START_RETRIES = 5
 RECORDING_RETRY_INTERVAL_S = 5
+# Wait before restarting a clip the recorder dropped mid-segment; doubles for
+# each clip in a row that died within CLIP_DROP_QUICK_S, up to the max.
+CLIP_RESTART_DELAY_S = 5
+CLIP_RESTART_DELAY_MAX_S = 300
+CLIP_DROP_QUICK_S = 120
 
 # Same POSTs 4k Cam Manager / towfish use for WB scene + one-push.
 # cgi_action GET path returns "error user/pwd" on current firmware.
@@ -99,6 +104,7 @@ class Scheduler:
         self._start_recording_fn = None
         self._stop_recording_fn = None
         self._get_disk_free_fn = None
+        self._is_recording_fn = None
         self._capture_still_fn = None
         self._log_event_fn = None
         self._hw = None
@@ -124,11 +130,12 @@ class Scheduler:
         self._now = lambda: datetime.now(timezone.utc)
 
     def configure(self, *, start_fn, stop_fn, disk_free_fn, hw,
-                  capture_still_fn=None, log_event_fn=None, cam4k_mode=False,
-                  awb_scene=None):
+                  is_recording_fn=None, capture_still_fn=None,
+                  log_event_fn=None, cam4k_mode=False, awb_scene=None):
         self._start_recording_fn = start_fn
         self._stop_recording_fn = stop_fn
         self._get_disk_free_fn = disk_free_fn
+        self._is_recording_fn = is_recording_fn
         self._capture_still_fn = capture_still_fn
         # Inject main's log_event so scheduler-thread events land in the active
         # recording's events.ndjson.  Re-importing main here would load a second
@@ -537,6 +544,8 @@ class Scheduler:
         recording = True
         first = True
         clip = 1
+        clip_started = time.monotonic()
+        quick_drops = 0
         while not self._stop.is_set():
             now = self._now()
             end_utc = None
@@ -563,11 +572,26 @@ class Scheduler:
                         self._cycle_window = clip
                     if not self._start_recording_with_retries(window_recipe(clip)):
                         return False
+                    clip_started = time.monotonic()
                     self._log("cycle_window_started", f"window={clip} phase={seg['phase']}")
                     self._apply_recipe_led(recipe)
                 recording = True
                 self._set_light(seg["light_pct"])
-                self._wait_until("recording", seg["end"], check_disk=True)
+                self._wait_until("recording", seg["end"], check_disk=True,
+                                 watch_recorder=True)
+                if self._recorder_dropped():
+                    # The watchdog stopped the clip (encoder exit, stall, file
+                    # size limit).  Start a new one rather than sit out the
+                    # rest of the segment; the recorder picks USB or SD again.
+                    ran_s = time.monotonic() - clip_started
+                    quick_drops = quick_drops + 1 if ran_s < CLIP_DROP_QUICK_S else 0
+                    delay_s = min(CLIP_RESTART_DELAY_MAX_S,
+                                  CLIP_RESTART_DELAY_S * 2 ** max(0, quick_drops - 1))
+                    logger.warning("Schedule: clip %d stopped after %.0fs; "
+                                   "starting a new clip in %ds", clip, ran_s, delay_s)
+                    self._log("clip_dropped", f"window={clip} ran_s={ran_s:.0f}")
+                    recording = False
+                    self._stop.wait(delay_s)
             else:
                 if recording:
                     self._stop_recording_fn()
@@ -606,10 +630,17 @@ class Scheduler:
         self._stop.set()
         return True
 
-    def _wait_until(self, state, end_utc, check_disk=False):
+    def _recorder_dropped(self):
+        """True when the recorder stopped without the scheduler asking."""
+        return (self._is_recording_fn is not None
+                and not self._stop.is_set()
+                and not self._is_recording_fn())
+
+    def _wait_until(self, state, end_utc, check_disk=False, watch_recorder=False):
         """Like _countdown, but against the wall clock, so a late RTC sync
         or other clock step moves the boundary with it. A backwards step
-        that would stretch the wait returns early so the caller replans."""
+        that would stretch the wait returns early so the caller replans.
+        With watch_recorder, also returns early if the recorder drops out."""
         planned_s = (end_utc - self._now()).total_seconds()
         while not self._stop.is_set():
             remaining = (end_utc - self._now()).total_seconds()
@@ -617,6 +648,8 @@ class Scheduler:
             if remaining <= 0 or remaining > planned_s + 5:
                 break
             if check_disk and self._disk_low():
+                return
+            if watch_recorder and self._recorder_dropped():
                 return
             self._stop.wait(min(1.0, remaining))
 

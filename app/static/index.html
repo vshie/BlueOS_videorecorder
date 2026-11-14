@@ -1235,7 +1235,7 @@ async function pollStatus() {
     sDot.style.background = '#f9a825';
     sLabel.textContent = 'Storage: Local SD';
     sFree.textContent = d.disk_free_mb != null ? (d.disk_free_mb/1024).toFixed(1) + ' GB free' : '';
-    sDetail.textContent = 'USB detected but < 20 GB free — using local storage.';
+    sDetail.textContent = 'USB detected but < 2 GB free — using local storage.';
   } else {
     sDot.className = 'status-dot idle';
     sDot.style.background = '';
