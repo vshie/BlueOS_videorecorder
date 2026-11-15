@@ -538,6 +538,14 @@ class Scheduler:
         open-ended (Stop / disk full / power loss end it). Returns False if
         a clip failed to start.
         """
+        try:
+            return self._schedule_loop(recipe, window_recipe)
+        finally:
+            # Disk full, a clip that won't start or an error can end the
+            # loop during a night clip; don't leave the light burning.
+            self._set_light(0)
+
+    def _schedule_loop(self, recipe, window_recipe):
         from recipes import MIN_CLIP_S, PhaseTracker, next_segment
 
         tracker = PhaseTracker()
