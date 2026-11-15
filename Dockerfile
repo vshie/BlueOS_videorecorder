@@ -60,8 +60,10 @@ RUN cd /tmp && tar xf pigpio.tar.gz \
 # lg needs the GPIO v2 char-device uAPI (GPIO_V2_*), which only exists in
 # linux/gpio.h from kernel >= 5.10. The ubuntu:20.04 base ships 5.4 headers,
 # so drop in the v6.6 uapi gpio.h (matching the Pi 5's runtime kernel) before
-# building. The compiled binary runs fine on the Pi's 6.6 kernel.
-ADD https://raw.githubusercontent.com/torvalds/linux/v6.6/include/uapi/linux/gpio.h /usr/include/linux/gpio.h
+# building. The compiled binary runs fine on the Pi's 6.6 kernel. The header
+# is vendored (docker/linux-6.6-gpio.h, unmodified from the v6.6 tag): fetching
+# it from raw.githubusercontent.com at build time fails CI on HTTP 429.
+COPY docker/linux-6.6-gpio.h /usr/include/linux/gpio.h
 ADD https://github.com/joan2937/lg/archive/master.tar.gz /tmp/lg.tar.gz
 RUN cd /tmp && tar xf lg.tar.gz \
     && cd lg-master && make -j"$(nproc)" && make install \
