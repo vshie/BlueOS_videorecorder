@@ -1031,6 +1031,18 @@ body.calib-tab .file-manager-wrapper{display:none}
 
 <!-- ═══════════════ SETUP TAB ═══════════════ -->
 <div class="tab-content" id="tab-setup">
+  <div class="card">
+    <div class="form-row" style="align-items:flex-end">
+      <div class="form-group">
+        <label>Clip time zone</label>
+        <input type="text" id="clipTimeZone" placeholder="e.g. Pacific/Honolulu" style="width:14em">
+      </div>
+      <button class="btn-sm btn-primary" onclick="saveClipTimeZone()">Save</button>
+      <span class="text-muted" id="clipTimeZoneMsg" style="font-size:.8em"></span>
+    </div>
+    <div class="text-muted" style="font-size:.82em">Recordings split into clips at the top of each hour, named with the date and time in this zone.
+      Recipes with a night schedule use their own time zone instead.</div>
+  </div>
   <div class="card setup-content" id="setupContent">
     <!-- Populated by JS on load for cleanliness, or directly here -->
   </div>
@@ -1110,23 +1122,26 @@ async function pollStatus() {
   const d = await api('/status');
   if (!d || d.success === false) return;
 
-  const wasRec = isRecording;
-  isRecording = d.recording;
+  const sess = d.scheduler || {};
+  // A session stops the recorder for a few seconds at each clip boundary;
+  // keep showing it as recording rather than flashing Idle.
+  const betweenClips = !d.recording && sess.state === 'starting' && !!sess.session_started;
+  isRecording = d.recording || betweenClips;
 
   const dot = document.getElementById('statusDot');
   const txt = document.getElementById('statusText');
-  dot.className = 'status-dot ' + (isRecording ? d.health : 'idle');
+  dot.className = 'status-dot ' + (d.recording ? d.health : betweenClips ? 'healthy' : 'idle');
 
   if (isRecording) {
     txt.textContent = 'Recording' + (d.mode==='stills' ? ' (stills)' : '');
     document.getElementById('btnStart').disabled = true;
     document.getElementById('btnStop').disabled = false;
-    if (!wasRec && d.duration_seconds > 0) {
-      recStartTime = new Date(Date.now() - d.duration_seconds*1000);
+    // Time the whole session, not the current hourly clip.
+    const elapsed = d.session_seconds != null ? d.session_seconds : (d.duration_seconds || 0);
+    const since = Date.now() - elapsed * 1000;
+    if (!recStartTime || Math.abs(recStartTime.getTime() - since) > 2000) {
       startDurationTimer();
-    } else if (!wasRec) {
-      recStartTime = new Date();
-      startDurationTimer();
+      recStartTime = new Date(since);
     }
   } else {
     txt.textContent = d.scheduler && d.scheduler.state === 'delay' ? 'Waiting to start...' :
@@ -1155,6 +1170,10 @@ async function pollStatus() {
   if (d.recording_error) {
     errEl.textContent = '\u26A0 ' + d.recording_error;
     errEl.classList.remove('hidden');
+  } else if (d.last_clip_error && isRecording) {
+    // The session restarted the clip; say why it had stopped.
+    errEl.textContent = '\u26A0 Recovered after: ' + d.last_clip_error;
+    errEl.classList.remove('hidden');
   } else {
     errEl.classList.add('hidden');
   }
@@ -1177,14 +1196,17 @@ async function pollStatus() {
   if (sched.state === 'delay') {
     schedEl.textContent = `Starting "${sched.recipe_name}" in ${Math.ceil(sched.remaining_s)}s...`;
     document.getElementById('btnScheduleStop').disabled = false;
-  } else if (sched.phase && (sched.state === 'recording' || sched.state === 'cycle_idle')) {
-    const Phase = sched.phase === 'night' ? 'Night' : 'Day';
+  } else if (sched.phase && ['recording', 'starting', 'cycle_idle'].includes(sched.state)) {
+    // Day/Night only means something with a night schedule.
+    const prefix = sched.night_schedule ? (sched.phase === 'night' ? 'Night — ' : 'Day — ') : '';
+    const win = sched.cycle_windows_total ? ` (window ${sched.cycle_window}/${sched.cycle_windows_total})` : '';
     const parts = [];
-    if (sched.state === 'recording') {
-      parts.push(`${Phase} — recording "${sched.recipe_name}" clip ${sched.cycle_window}` +
+    if (sched.state !== 'cycle_idle') {
+      parts.push(`${prefix}recording "${sched.recipe_name}" clip ${sched.clip}${win}` +
                  (sched.light_pct > 0 ? ` (light ${sched.light_pct}%)` : ''));
     } else {
-      parts.push(`${Phase} — light off, next clip in ${Math.ceil(sched.remaining_s / 60)} min`);
+      parts.push(`${prefix}${sched.night_schedule ? 'light off, ' : 'idle break, '}` +
+                 `next clip in ${Math.ceil(sched.remaining_s / 60)} min${win}`);
     }
     if (sched.next_change_local) parts.push(`${sched.phase === 'night' ? 'night ends' : 'night starts'} ${sched.next_change_local}`);
     parts.push(sched.open_ended ? 'until stopped' : `${fmtMinutes((sched.total_remaining_s || 0) / 60)} total remaining`);
@@ -2841,7 +2863,6 @@ function updateCycleCalc() {
 }
 
 /* ── Day / night schedule (mirrors recipes.next_segment) ─────────── */
-const CONTINUOUS_CLIP_MINUTES = 60;
 let unitTimeSynced = null;  // from /telemetry; the schedule follows the unit clock
 
 function browserTimeZone() {
@@ -2940,7 +2961,7 @@ function updateScheduleCalc() {
     const idle = parseFloat(document.getElementById('rCycleIdle').value);
     day = `${fmtMinutes(rec)} recording (${lightTxt(dayLight)}), then ${fmtMinutes(idle)} off, repeating`;
   } else {
-    day = `continuous recording, ${lightTxt(dayLight)} (saved as ${CONTINUOUS_CLIP_MINUTES}-min clips)`;
+    day = `continuous recording, ${lightTxt(dayLight)} (clips split at the top of each hour)`;
   }
   let txt = `<strong>${night ? 'Day' : 'Recording'}:</strong> ${day}.`;
 
@@ -3375,8 +3396,31 @@ async function pollEnv() {
   if (env) updateEnvCard(env);
 }
 
+/* ── Clip time zone ────────────────────────── */
+async function loadClipTimeZone() {
+  const d = await api('/time_zone');
+  if (!d || d.success === false) return;
+  let zone = d.time_zone;
+  if (!zone) {
+    // First visit: name clips in this browser's zone.
+    zone = browserTimeZone();
+    await api('/time_zone', {method:'POST', headers:{'Content-Type':'application/json'},
+                             body: JSON.stringify({time_zone: zone})});
+  }
+  document.getElementById('clipTimeZone').value = zone;
+}
+async function saveClipTimeZone() {
+  const zone = document.getElementById('clipTimeZone').value.trim();
+  const d = await api('/time_zone', {method:'POST', headers:{'Content-Type':'application/json'},
+                                     body: JSON.stringify({time_zone: zone})});
+  const msg = document.getElementById('clipTimeZoneMsg');
+  msg.textContent = d.success ? 'Saved' : (d.message || 'Failed');
+  setTimeout(() => { msg.textContent = ''; }, 4000);
+}
+
 /* ── Init ──────────────────────────────────── */
 loadSetup();
+loadClipTimeZone();
 loadBlueosModel();
 loadRecipes();
 loadVideoList();

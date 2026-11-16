@@ -23,8 +23,11 @@ import signal
 import threading
 import time
 import logging
+import queue
 import zipfile
 from datetime import datetime
+
+from dateutil import tz
 
 app = Flask(__name__)
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
@@ -50,7 +53,7 @@ from system_telemetry import (
 from recipes import (
     init_default_recipes, list_recipes, get_recipe,
     save_recipe, delete_recipe, calculate_sweep_time,
-    rename_legacy_keys, LEGACY_RECIPE_IDS,
+    rename_legacy_keys, LEGACY_RECIPE_IDS, clip_basename,
 )
 import usb_storage
 from battery import BatteryMonitor
@@ -97,16 +100,27 @@ current_ass_file = None
 current_events_file = None
 
 ass_thread = None
-stop_ass_thread = False
-
 gst_stderr_thread = None
-stop_gst_stderr_thread = False
 gst_error_count = 0
 gst_warning_count = 0
-
 watchdog_thread = None
-stop_watchdog_thread = False
 file_stall_count = 0
+
+# Start, stop and USB failover all go through this lock: the scheduler, the
+# routes, the watchdog and the abort thread can reach them at the same time,
+# and a long session crosses a clip boundary every hour.
+recorder_lock = threading.RLock()
+# Bumped on every start.  The watchdog and abort paths carry the number of
+# the clip they were watching, so one left over from an earlier clip can't
+# act on the next.
+clip_seq = 0
+# Set when the running clip stops; its ASS and watchdog threads wait on it.
+clip_stop_evt = threading.Event()
+# USB folder per deployment id, once a clash has given it a _2 suffix.
+_deployment_dirs = {}
+# Why the last clip of a session stopped on its own or failed to start.  Kept
+# across the automatic restart, which clears recording_error.
+last_clip_error = ""
 # Human-readable reason the most recent recording failed/aborted, surfaced to
 # the UI.  Cleared when a new recording starts successfully.
 recording_error = ""
@@ -408,6 +422,9 @@ def load_config():
         "active_recipe_id": None,
         "rotation_degrees": 0,
         "storage_preference": "usb",
+        # Time zone for clip names (manual recordings and recipes without a
+        # night schedule).  The page fills it in from the browser.
+        "time_zone": None,
         # DropCam-only: mux the USB camera's built-in mic into the video
         # MP4. The 4k Cam pipeline is video-only regardless of this flag
         # since a bare external RTSP camera has no local mic.
@@ -503,6 +520,7 @@ def save_config(cfg):
 _cfg = load_config()
 image_rotation = _cfg.get("rotation_degrees", 0)
 storage_preference = _cfg.get("storage_preference", "usb")
+label_time_zone = _cfg.get("time_zone")
 audio_enabled = bool(_cfg.get("audio_enabled", True))
 cam4k_awb_scene = normalize_awb_scene(_cfg.get("cam4k_awb_scene", DEFAULT_AWB_SCENE))
 
@@ -563,13 +581,12 @@ def parse_ass_ts(ts):
     return h * 3600 + m * 60 + s + cs / 100.0
 
 
-def update_ass_file():
-    global stop_ass_thread, current_ass_file
+def update_ass_file(stop_evt, ass_path, clip_start):
     rate = 2
-    while not stop_ass_thread and recording and current_ass_file:
+    while not stop_evt.is_set():
         try:
-            if start_time:
-                elapsed = (datetime.now() - start_time).total_seconds()
+            if clip_start:
+                elapsed = (datetime.now() - clip_start).total_seconds()
                 t0 = format_ass_ts(elapsed)
                 t1 = format_ass_ts(elapsed + 1 / rate)
 
@@ -654,13 +671,13 @@ def update_ass_file():
                 text = " | ".join(parts)
 
                 line = f"Dialogue: 0,{t0},{t1},Default,,0,0,0,,{text}\n"
-                with open(current_ass_file, "a") as f:
+                with open(ass_path, "a") as f:
                     f.write(line)
 
-            time.sleep(1 / rate)
+            stop_evt.wait(1 / rate)
         except Exception as e:
             logger.error(f"ASS subtitle error: {e}")
-            time.sleep(1)
+            stop_evt.wait(1)
 
 
 def adjust_ass_timing(ass_path, video_duration):
@@ -838,10 +855,9 @@ def _build_cam4k_pipeline(filepath: str, encode: str, proto=None) -> str:
 
 
 def gst_stderr_monitor(process):
+    """Log gst-launch's stderr; ends on its own when the process exits."""
     global gst_error_count, gst_warning_count, recording_error
     for line in iter(process.stderr.readline, b""):
-        if stop_gst_stderr_thread:
-            break
         decoded = line.decode("utf-8", errors="replace").strip()
         if not decoded:
             continue
@@ -861,104 +877,73 @@ def gst_stderr_monitor(process):
 
 # ── Health watchdog ──────────────────────────────────────────────────────
 
-def _usb_failover(reason="USB storage lost during recording"):
-    """Kill current recording on USB and restart on local SD card."""
-    global usb_failover_active
-    usb_failover_active = True
-    try:
-        _usb_failover_body(reason)
-    finally:
-        usb_failover_active = False
+def _usb_failover(reason="USB storage lost during recording", seq=None):
+    """Stop the clip on USB and carry on recording on the local SD card.
 
-
-def _usb_failover_body(reason):
-    global gst_process, recording, start_time, current_video_file
-    global current_ass_file, current_events_file
-    global ass_thread, stop_ass_thread
-    global gst_stderr_thread, stop_gst_stderr_thread
-    global stills_thread, stop_stills_thread, stills_dir
-    global usb_recording, usb_failover_count, recording_base_dir
-
-    logger.warning(f"USB failover: {reason}, switching to local SD")
-    log_event("usb_failover", f"{reason}, restarting on local SD")
-    usb_failover_count += 1
-
-    saved_recipe = active_recipe_for_recording
-    saved_mode = (saved_recipe or {}).get("mode", "video")
-    saved_interval = (saved_recipe or {}).get("still_interval_s", 1.0)
-    saved_rotation = image_rotation
-
-    stop_ass_thread = True
-    if ass_thread and ass_thread.is_alive():
-        ass_thread.join(timeout=2)
-
-    stop_stills_thread = True
-    if stills_thread and stills_thread.is_alive():
-        stills_thread.join(timeout=3)
-
-    stop_gst_stderr_thread = True
-    if gst_stderr_thread and gst_stderr_thread.is_alive():
-        gst_stderr_thread.join(timeout=2)
-
-    if gst_process:
+    seq is the clip the caller was watching; a stale caller does nothing.
+    The restart keeps the clip's recipe context, so it keeps its clip number.
+    """
+    global usb_failover_active, usb_failover_count, active_recipe_for_recording
+    with recorder_lock:
+        if not recording or not usb_recording or (seq is not None and seq != clip_seq):
+            return
+        usb_failover_active = True
         try:
-            gst_process.kill()
-            gst_process.wait(timeout=5)
-        except Exception:
-            pass
+            logger.warning(f"USB failover: {reason}, switching to local SD")
+            log_event("usb_failover", f"{reason}, restarting on local SD")
+            usb_failover_count += 1
+            saved_recipe = active_recipe_for_recording
+            saved_mode = (saved_recipe or {}).get("mode", "video")
+            saved_interval = (saved_recipe or {}).get("still_interval_s", 1.0)
+            _finalize_later(_detach_clip())
 
-    recording = False
-    start_time = None
-    gst_process = None
-    current_video_file = None
-    current_ass_file = None
-    current_events_file = None
-    stills_dir = None
-    usb_recording = False
-    recording_base_dir = None
-
-    hw.led_warning()
-    time.sleep(1)
-
-    ok = _start_recording_internal(
-        mode=saved_mode,
-        still_interval_s=saved_interval,
-        rotation=saved_rotation,
-        force_local=True,
-    )
-    if ok:
-        logger.info("USB failover: recording resumed on local SD")
-    else:
-        logger.error("USB failover: failed to restart recording on local SD")
-        hw.led_warning()
+            hw.led_warning()
+            time.sleep(1)
+            active_recipe_for_recording = saved_recipe
+            ok = _start_recording_internal(
+                mode=saved_mode,
+                still_interval_s=saved_interval,
+                rotation=image_rotation,
+                force_local=True,
+            )
+            if ok:
+                logger.info("USB failover: recording resumed on local SD")
+            else:
+                active_recipe_for_recording = None
+                logger.error("USB failover: failed to restart recording on local SD")
+                hw.led_warning()
+        finally:
+            usb_failover_active = False
 
 
-def _abort_recording(msg):
+def _abort_recording(msg, seq=None):
     """Abort an unhealthy recording from a background/watchdog thread.
 
     Records the reason (for the UI), flags the LED, and runs the stop in a
-    *separate* thread.  ``_stop_recording_internal`` joins the watchdog thread,
-    which would raise "cannot join current thread" if called inline from the
-    watchdog itself, so it must run elsewhere.
+    *separate* thread, so the watchdog never joins itself.  seq is the clip
+    the caller was watching; if it has already been replaced, the stop is
+    skipped.
     """
-    global recording_error
+    global recording_error, last_clip_error
     if not recording_error:
         recording_error = msg
+    last_clip_error = msg
     logger.error(msg)
     log_event("recording_aborted", msg)
     hw.led_warning()
-    threading.Thread(target=_stop_recording_internal, daemon=True).start()
+    threading.Thread(target=_stop_recording_internal, args=(seq,), daemon=True).start()
 
 
-def recording_health_watchdog():
+def recording_health_watchdog(stop_evt, seq):
+    """Watch one clip; stop_evt is set when that clip stops."""
     global file_stall_count
     last_size = 0
     file_stall_count = 0
 
-    while not stop_watchdog_thread and recording:
+    while not stop_evt.is_set():
         try:
             if usb_recording and not usb_storage.is_healthy():
-                _usb_failover()
+                _usb_failover(seq=seq)
                 return
 
             # Video file growth check.  A file that never grows — including one
@@ -985,13 +970,10 @@ def recording_health_watchdog():
                                 "camera/USB connection")
                         _abort_recording(
                             f"Recording aborted: no video data written for ~{secs}s "
-                            f"({sz} bytes). Check the {hint}."
+                            f"({sz} bytes). Check the {hint}.", seq
                         )
                         return
                 last_size = sz
-
-            if stills_dir and os.path.isdir(stills_dir):
-                pass
 
             if gst_process and gst_process.poll() is not None:
                 log_event("process_died", f"GStreamer exit code {gst_process.returncode}")
@@ -1000,7 +982,7 @@ def recording_health_watchdog():
                         "camera/USB connection")
                 _abort_recording(
                     f"Recording aborted: encoder process exited (code "
-                    f"{gst_process.returncode}). Check the {hint}."
+                    f"{gst_process.returncode}). Check the {hint}.", seq
                 )
                 return
 
@@ -1008,18 +990,18 @@ def recording_health_watchdog():
             disk_free = get_disk_free_mb(check_path)
             if disk_free is not None and disk_free < 1024 and usb_recording:
                 # Stick is full: carry on on the SD card instead of stopping.
-                _usb_failover(f"USB nearly full ({disk_free} MB free)")
+                _usb_failover(f"USB nearly full ({disk_free} MB free)", seq)
                 return
             if disk_free is not None and disk_free < 1024:
                 logger.warning(f"Disk space low: {disk_free} MB, stopping")
                 log_event("disk_full", f"{disk_free} MB remaining")
-                _abort_recording(f"Recording stopped: disk almost full ({disk_free} MB free).")
+                _abort_recording(f"Recording stopped: disk almost full ({disk_free} MB free).", seq)
                 return
 
-            time.sleep(WATCHDOG_INTERVAL_S)
+            stop_evt.wait(WATCHDOG_INTERVAL_S)
         except Exception as e:
             logger.error(f"Watchdog error: {e}")
-            time.sleep(WATCHDOG_INTERVAL_S)
+            stop_evt.wait(WATCHDOG_INTERVAL_S)
 
 # ── Stills capture ───────────────────────────────────────────────────────
 
@@ -1120,15 +1102,25 @@ def get_video_duration(path):
 # ── Core recording start/stop ────────────────────────────────────────────
 
 def start_recording_with_recipe(recipe):
-    """Called by the scheduler or directly. Returns True on success."""
+    """Called by the scheduler or directly. Returns True on success.
+
+    A recipe without rotation_degrees (a manual session) keeps the current
+    rotation rather than resetting it.
+    """
     global active_recipe_for_recording, image_rotation
-    active_recipe_for_recording = recipe
-    image_rotation = recipe.get("rotation_degrees", 0)
-    return _start_recording_internal(
-        mode=recipe.get("mode", "video"),
-        still_interval_s=recipe.get("still_interval_s", 1.0),
-        rotation=image_rotation,
-    )
+    with recorder_lock:
+        if recording:
+            return False
+        active_recipe_for_recording = recipe
+        image_rotation = recipe.get("rotation_degrees", image_rotation)
+        ok = _start_recording_internal(
+            mode=recipe.get("mode", "video"),
+            still_interval_s=recipe.get("still_interval_s", 1.0),
+            rotation=image_rotation,
+        )
+        if not ok:
+            active_recipe_for_recording = None
+        return ok
 
 
 def recorder_active():
@@ -1157,12 +1149,39 @@ def _start_recording_internal(mode="video", still_interval_s=1.0, rotation=0,
     BlueOS camera manager (which supports multiple simultaneous consumers),
     so no server-side preview lifecycle has to be managed here.
     """
-    if recording:
-        return False
-    return _start_recording_internal_body(
-        mode=mode, still_interval_s=still_interval_s,
-        rotation=rotation, force_local=force_local,
-    )
+    global last_clip_error
+    with recorder_lock:
+        if recording:
+            return False
+        ok = _start_recording_internal_body(
+            mode=mode, still_interval_s=still_interval_s,
+            rotation=rotation, force_local=force_local,
+        )
+        if not ok and recording_error:
+            last_clip_error = recording_error
+        return ok
+
+
+def _unique_name(directory, stem, ext=""):
+    """stem, or stem_2, stem_3 ... so that directory/<name><ext> is new."""
+    name, n = stem, 1
+    while os.path.exists(os.path.join(directory, name + ext)):
+        n += 1
+        name = f"{stem}_{n}"
+    return name
+
+
+def _deployment_dir(deployment_id):
+    """USB folder for a deployment: its id, or id_2 ... when another
+    session already used that name (two starts in the same minute, or the
+    repeated hour when DST ends).  Fixed on first use so every clip of the
+    deployment lands in the same folder."""
+    name = _deployment_dirs.get(deployment_id)
+    if name is None:
+        base = os.path.join(usb_storage.USB_MOUNT_POINT, usb_storage.DROPCAM_DIR)
+        name = _unique_name(base, deployment_id)
+        _deployment_dirs[deployment_id] = name
+    return name
 
 
 def _start_recording_internal_body(mode="video", still_interval_s=1.0,
@@ -1170,12 +1189,12 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     """Inner body of _start_recording_internal — see wrapper above."""
     global gst_process, recording, start_time, current_video_file
     global current_ass_file, current_events_file
-    global ass_thread, stop_ass_thread
-    global gst_stderr_thread, stop_gst_stderr_thread, gst_error_count, gst_warning_count
-    global watchdog_thread, stop_watchdog_thread, file_stall_count
+    global ass_thread
+    global gst_stderr_thread, gst_error_count, gst_warning_count
+    global watchdog_thread, file_stall_count
     global stills_thread, stop_stills_thread, stills_dir, stills_count
     global usb_recording, recording_base_dir, recording_rotation
-    global recording_error, cam4k_encode
+    global recording_error, cam4k_encode, clip_seq, clip_stop_evt
 
     recording_error = ""
     recording_rotation = int(rotation) % 360
@@ -1190,15 +1209,21 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     # Record/idle cycle: the scheduler tags every window of one deployment
     # with the same _deployment_id (already "<name>_<start ts>") so the
     # windows land together — one USB folder, a shared prefix on local SD.
-    deployment_id = (active_recipe_for_recording or {}).get("_deployment_id")
-    window_tag = ""
-    if deployment_id:
-        window_tag = f"w{int(active_recipe_for_recording.get('_window_index') or 1):02d}"
+    ctx = active_recipe_for_recording or {}
+    deployment_id = ctx.get("_deployment_id")
+    clip_index = int(ctx.get("_window_index") or 1)
+    window_tag = f"w{clip_index:02d}" if deployment_id else ""
+    clip_name = None
+    if deployment_id and "_label_tz" in ctx:
+        # Hourly clips: name, clip number, then local start time.
+        zone = tz.gettz(ctx["_label_tz"]) or tz.UTC
+        clip_name = clip_basename(ctx.get("name"), clip_index, datetime.now(zone),
+                                  ctx.get("_clip_phase"))
 
     use_usb = (not force_local) and (storage_preference == "usb") and usb_storage.is_usable()
     if use_usb:
         if deployment_id:
-            subfolder = deployment_id
+            subfolder = _deployment_dir(deployment_id)
         else:
             subfolder = f"{safe_name}_{timestamp}" if safe_name else f"manual_{timestamp}"
         rec_dir = usb_storage.get_recording_dir(subfolder)
@@ -1217,7 +1242,10 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
     recording_base_dir = rec_dir
 
     if mode == "video":
-        if deployment_id:
+        if clip_name:
+            # SD fallback stays flat; never overwrite an earlier clip.
+            basename = _unique_name(rec_dir, clip_name, ".mp4")
+        elif deployment_id:
             basename = f"{deployment_id}_{window_tag}_{timestamp[-6:]}"
             if not use_usb:
                 basename = f"recipe_{basename}"
@@ -1230,11 +1258,16 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
             filename = basename + ".mp4"
             filepath = os.path.join(rec_dir, filename)
             current_video_file = filepath
-            encode = probe_cam4k_encode()
+            if clip_index > 1 and cam4k_encode:
+                # Later clip of a session: skip the RTSP probe to keep the
+                # gap between clips short (startup failures re-probe).
+                encode = cam4k_encode
+            else:
+                encode = probe_cam4k_encode()
+                # Brief settle so the probe's RTSP session is fully torn down
+                # before gst-launch opens its own (helps flaky H.265 cameras).
+                time.sleep(0.5)
             cam4k_proto = "udp" if encode == "H265" else "tcp"
-            # Brief settle so the probe's RTSP session is fully torn down
-            # before gst-launch opens its own (helps flaky H.265 cameras).
-            time.sleep(0.5)
             pipeline = _build_cam4k_pipeline(filepath, encode, cam4k_proto)
             logger.info(
                 f"4k Cam recording pipeline encode={encode} proto={cam4k_proto}"
@@ -1388,7 +1421,6 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
         current_ass_file = create_ass_file(filepath)
         current_events_file = create_events_file(filepath)
 
-        stop_gst_stderr_thread = False
         gst_error_count = 0
         gst_warning_count = 0
         gst_stderr_thread = threading.Thread(
@@ -1434,15 +1466,21 @@ def _start_recording_internal_body(mode="video", still_interval_s=1.0,
         return False
 
     recording = True
+    clip_seq += 1
+    clip_stop_evt.set()  # any helper left from an earlier clip
+    clip_stop_evt = threading.Event()
 
     if current_ass_file:
-        stop_ass_thread = False
-        ass_thread = threading.Thread(target=update_ass_file, daemon=True)
+        ass_thread = threading.Thread(
+            target=update_ass_file, args=(clip_stop_evt, current_ass_file, start_time),
+            daemon=True,
+        )
         ass_thread.start()
 
-    stop_watchdog_thread = False
     file_stall_count = 0
-    watchdog_thread = threading.Thread(target=recording_health_watchdog, daemon=True)
+    watchdog_thread = threading.Thread(
+        target=recording_health_watchdog, args=(clip_stop_evt, clip_seq), daemon=True
+    )
     watchdog_thread.start()
 
     hw.led_recording()
@@ -1543,7 +1581,8 @@ def _apply_rotation_metadata_mp4(mp4_path, rotation):
     size_gib = src_size / (1024 ** 3)
     timeout_s = int(180 + size_gib * 180)
 
-    show_led = not recording
+    # Leave the LED alone while a session is still running.
+    show_led = not recording and not scheduler.is_running()
     if show_led:
         hw.led_processing()
     remux_filename = os.path.basename(mp4_path)
@@ -1620,7 +1659,8 @@ def _remux_to_mp4(ts_path, was_usb=False, usb_rec_dir=None, rotation=0):
     """
     global remux_active, remux_filename, remux_progress, remux_stage
 
-    show_led = not recording
+    # Leave the LED alone while a session is still running.
+    show_led = not recording and not scheduler.is_running()
     if show_led:
         hw.led_processing()
 
@@ -1737,42 +1777,31 @@ def _remux_usb(ts_path, ts_size, usb_rec_dir, show_led, rotation=0):
     return ts_path
 
 
-def _stop_recording_internal():
+def _detach_clip():
+    """Stop the running clip and clear its recorder state.
+
+    Call with recorder_lock held.  Returns what finalising the file needs,
+    so a caller that comes second (scheduler at the hour, /stop, an abort)
+    finds nothing left to stop.
+    """
     global gst_process, recording, start_time, current_video_file
     global current_ass_file, current_events_file
-    global ass_thread, stop_ass_thread
-    global gst_stderr_thread, stop_gst_stderr_thread
-    global watchdog_thread, stop_watchdog_thread
     global stills_thread, stop_stills_thread, stills_dir
     global active_recipe_for_recording
     global usb_recording, recording_base_dir
 
-    if not recording:
-        return
-
     log_event("recording_stopping", "Stop requested")
+    snap = {
+        "video": current_video_file,
+        "ass": current_ass_file,
+        "events": current_events_file,
+        "rotation": recording_rotation,
+        "was_usb": usb_recording,
+        "base_dir": recording_base_dir,
+    }
 
-    video_path = current_video_file
-    ass_path = current_ass_file
-    events_path = current_events_file
-    saved_rotation = recording_rotation
-
-    stop_ass_thread = True
-    if ass_thread and ass_thread.is_alive():
-        ass_thread.join(timeout=2)
-
-    stop_stills_thread = True
-    if stills_thread and stills_thread.is_alive():
-        stills_thread.join(timeout=5)
-
-    stop_gst_stderr_thread = True
-    if gst_stderr_thread and gst_stderr_thread.is_alive():
-        gst_stderr_thread.join(timeout=2)
-
-    stop_watchdog_thread = True
-    if watchdog_thread and watchdog_thread.is_alive():
-        watchdog_thread.join(timeout=2)
-
+    # Stop the encoder first: its stderr reader ends at end of output, and
+    # the next clip can start as soon as the file is closed.
     if gst_process:
         logger.info("Stopping GStreamer gracefully...")
         gst_process.send_signal(signal.SIGINT)
@@ -1783,11 +1812,19 @@ def _stop_recording_internal():
             logger.warning("GStreamer did not stop, force killing")
             log_event("stop_timeout", "Force kill after 7s")
             gst_process.kill()
-            gst_process.wait()
+            try:
+                gst_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Stuck in the kernel on a dead USB device; don't hang the lock.
+                logger.error("GStreamer did not exit after SIGKILL")
 
-    was_usb = usb_recording
-    usb_rec_dir = recording_base_dir
-    saved_stills_dir = stills_dir
+    clip_stop_evt.set()
+    stop_stills_thread = True
+    me = threading.current_thread()
+    for th, timeout in ((stills_thread, 5), (gst_stderr_thread, 2),
+                        (ass_thread, 2), (watchdog_thread, 2)):
+        if th and th is not me and th.is_alive():
+            th.join(timeout=timeout)
 
     recording = False
     start_time = None
@@ -1799,34 +1836,94 @@ def _stop_recording_internal():
     active_recipe_for_recording = None
     usb_recording = False
     recording_base_dir = None
+    return snap
 
-    if video_path and os.path.exists(video_path):
-        time.sleep(2)
-        if video_path.endswith(".ts"):
-            # Legacy path: only hit by .ts files from older builds still finishing
-            # up.  Rotation is stamped during the lossless TS→MP4 remux.
-            video_path = _remux_to_mp4(video_path, was_usb=was_usb,
-                                       usb_rec_dir=usb_rec_dir, rotation=saved_rotation)
-        elif video_path.endswith(".mp4") and saved_rotation:
-            # DropCam and 4k Cam both write the .mp4 directly, so stamp rotation now.
-            video_path = _apply_rotation_metadata_mp4(video_path, saved_rotation)
-        dur, st = get_video_duration(video_path)
-        if dur and ass_path and os.path.exists(ass_path):
-            adjust_ass_timing(ass_path, dur)
-        if events_path:
-            try:
-                evt = {
-                    "ts": time.time(),
-                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-                    "event": "remux_complete",
-                    "detail": f"{os.path.basename(video_path)}, duration={dur:.1f}s" if dur else "remux failed",
-                }
-                with open(events_path, "a") as f:
-                    f.write(json.dumps(evt) + "\n")
-            except Exception:
-                pass
 
+def _stop_recording_internal(expected_seq=None):
+    """Stop the running clip.  expected_seq (from the watchdog/abort path)
+    skips the stop if that clip has already been replaced."""
+    with recorder_lock:
+        if not recording or (expected_seq is not None and expected_seq != clip_seq):
+            return
+        snap = _detach_clip()
+    _finalize_later(snap)
     logger.info("Recording stopped")
+
+
+# Finished clips are tidied up one at a time on a worker thread, so the next
+# clip of a session doesn't wait for it.
+_finalize_queue = queue.Queue()
+_finalize_thread = None
+_finalize_start_lock = threading.Lock()
+# Free space to keep, on top of the file's size, before writing the rotated
+# copy next to a finished clip.
+ROTATION_REWRITE_MARGIN_MB = 2048
+
+
+def _finalize_later(snap):
+    global _finalize_thread
+    with _finalize_start_lock:
+        if _finalize_thread is None or not _finalize_thread.is_alive():
+            _finalize_thread = threading.Thread(
+                target=_finalize_worker, name="clip-finalize", daemon=True)
+            _finalize_thread.start()
+    _finalize_queue.put(snap)
+
+
+def finalize_pending():
+    """Finished clips still being tidied up (rotation, ASS timing)."""
+    return _finalize_queue.unfinished_tasks
+
+
+def _finalize_worker():
+    while True:
+        snap = _finalize_queue.get()
+        try:
+            _finalize_clip(snap)
+        except Exception as e:
+            logger.error(f"Finalising {snap.get('video')} failed: {e}")
+        finally:
+            _finalize_queue.task_done()
+
+
+def _finalize_clip(snap):
+    video_path = snap["video"]
+    ass_path = snap["ass"]
+    events_path = snap["events"]
+    rotation = snap["rotation"]
+    if not video_path or not os.path.exists(video_path):
+        return
+    time.sleep(2)
+    if video_path.endswith(".ts"):
+        # Legacy path: only hit by .ts files from older builds still finishing
+        # up.  Rotation is stamped during the lossless TS→MP4 remux.
+        video_path = _remux_to_mp4(video_path, was_usb=snap["was_usb"],
+                                   usb_rec_dir=snap["base_dir"], rotation=rotation)
+    elif video_path.endswith(".mp4") and rotation:
+        # DropCam and 4k Cam both write the .mp4 directly, so stamp rotation
+        # now -- unless the full-size copy would crowd out the live clip.
+        free_mb = get_disk_free_mb(os.path.dirname(video_path))
+        size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        if free_mb is not None and free_mb < size_mb + ROTATION_REWRITE_MARGIN_MB:
+            logger.warning(f"Skipping rotation metadata for {os.path.basename(video_path)}: "
+                           f"{free_mb:.0f} MB free, file {size_mb:.0f} MB")
+        else:
+            video_path = _apply_rotation_metadata_mp4(video_path, rotation)
+    dur, st = get_video_duration(video_path)
+    if dur and ass_path and os.path.exists(ass_path):
+        adjust_ass_timing(ass_path, dur)
+    if events_path:
+        try:
+            evt = {
+                "ts": time.time(),
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "event": "remux_complete",
+                "detail": f"{os.path.basename(video_path)}, duration={dur:.1f}s" if dur else "remux failed",
+            }
+            with open(events_path, "a") as f:
+                f.write(json.dumps(evt) + "\n")
+        except Exception:
+            pass
 
 # ── Flask Routes ─────────────────────────────────────────────────────────
 
@@ -1863,11 +1960,17 @@ def route_start():
         # recipe's next clip would then fail with "already recording".
         return jsonify({"success": False,
                         "message": "A recipe is running. Cancel it before recording manually."}), 409
+    global last_clip_error
     try:
-        ok = _start_recording_internal(mode="video", rotation=image_rotation)
-        if ok:
-            return jsonify({"success": True})
-        return jsonify({"success": False, "message": "Failed to start recording"}), 500
+        # Clip 1 starts here so a failure comes straight back; the scheduler
+        # then splits the recording at the top of each hour.
+        last_clip_error = ""
+        session = scheduler.manual_session()
+        if not start_recording_with_recipe(session):
+            return jsonify({"success": False,
+                            "message": recording_error or "Failed to start recording"}), 500
+        scheduler.start_manual(session)
+        return jsonify({"success": True})
     except Exception as e:
         logger.error(f"Start error: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
@@ -1889,14 +1992,11 @@ def route_stop():
 
 @app.route("/status", methods=["GET"])
 def route_status():
-    global gst_process, recording, start_time
     try:
-        if gst_process and gst_process.poll() is not None:
-            logger.warning("GStreamer process died")
-            gst_process = None
-            if recording:
-                recording = False
-                start_time = None
+        # A dead encoder is handled by the clip's watchdog (abort, or a new
+        # clip in a session); clearing state here would skip its cleanup.
+        proc = gst_process
+        gst_dead = proc is not None and proc.poll() is not None
 
         file_size_mb = 0.0
         if current_video_file and os.path.exists(current_video_file):
@@ -1906,7 +2006,7 @@ def route_status():
 
         if not recording:
             health = "idle"
-        elif gst_error_count > 0 or (gst_process is None and current_video_file):
+        elif gst_error_count > 0 or gst_dead or (proc is None and current_video_file):
             health = "failed"
         elif gst_warning_count > 0 or file_stall_count > 0:
             health = "degraded"
@@ -1923,7 +2023,14 @@ def route_status():
             "gst_warnings": gst_warning_count,
             "file_stalls": file_stall_count,
             "health": health,
-            "recording_error": recording_error or None,
+            "recording_error": recording_error or (
+                "Recording stopped: storage almost full." if sched["state"] == "disk_full" else None),
+            "last_clip_error": last_clip_error or None,
+            # Whole session, across hourly clips (the UI's duration timer).
+            "session_seconds": (round(time.time() - sched["session_started"], 1)
+                                if sched.get("session_started") else None),
+            "finalize_pending": finalize_pending(),
+            "time_zone": label_time_zone,
             "stills_count": stills_count if stills_dir else 0,
             "mode": (active_recipe_for_recording or {}).get("mode", "video"),
             "scheduler": sched,
@@ -1957,7 +2064,9 @@ def list_videos():
             d for d in os.listdir(VIDEO_DIR)
             if d.startswith("stills_") and os.path.isdir(os.path.join(VIDEO_DIR, d))
         ]
-        videos.sort(reverse=True)
+        # Newest first.  Clip names start with the clip number, so name order
+        # would interleave sessions.
+        videos.sort(key=lambda f: os.path.getmtime(os.path.join(VIDEO_DIR, f)), reverse=True)
         stills_dirs.sort(reverse=True)
 
         sessions = []
@@ -1975,12 +2084,16 @@ def list_videos():
         usb_stills = []
         dropcam_dir = os.path.join(usb_storage.USB_MOUNT_POINT, usb_storage.DROPCAM_DIR)
         if usb_storage.is_mounted() and os.path.isdir(dropcam_dir):
-            for folder in sorted(os.listdir(dropcam_dir), reverse=True):
+            # Newest session first; within a folder, files in name (clip) order.
+            folders = sorted(os.listdir(dropcam_dir),
+                             key=lambda d: os.path.getmtime(os.path.join(dropcam_dir, d)),
+                             reverse=True)
+            for folder in folders:
                 folder_path = os.path.join(dropcam_dir, folder)
                 if not os.path.isdir(folder_path):
                     continue
                 folder_files = os.listdir(folder_path)
-                vids = [f for f in folder_files if f.endswith((".ts", ".mp4"))]
+                vids = sorted(f for f in folder_files if f.endswith((".ts", ".mp4")))
                 has_session_json = "session.json" in folder_files
                 if vids:
                     v = vids[0]
@@ -2127,7 +2240,7 @@ def get_filesize():
         else:
             if os.path.exists(VIDEO_DIR):
                 vids = [f for f in os.listdir(VIDEO_DIR) if f.endswith((".ts", ".mp4"))]
-                vids.sort(reverse=True)
+                vids.sort(key=lambda f: os.path.getmtime(os.path.join(VIDEO_DIR, f)), reverse=True)
                 if vids:
                     filename = vids[0]
                     path = os.path.join(VIDEO_DIR, filename)
@@ -2692,7 +2805,8 @@ def route_release():
     data = request.get_json(silent=True) or {}
     action = (data.get("action") or "").lower()
 
-    scheduler_was_running = scheduler.is_running()
+    # A manual recording carries on, as it always has.
+    scheduler_was_running = scheduler.is_running() and not scheduler.is_manual()
     if scheduler_was_running:
         logger.info("Release control invoked while recipe running — cancelling schedule")
         scheduler.stop()
@@ -2998,11 +3112,23 @@ def route_recipe_delete(recipe_id):
 
 # ── Delete recordings ─────────────────────────────────────────────────────
 
+def _delete_blocked_reason():
+    """Why recordings can't be deleted right now, or None.  A session is
+    between clips for a few seconds every hour, and finished clips are
+    tidied up in the background, so 'not recording' isn't enough."""
+    if recording or scheduler.is_running():
+        return "Cannot delete while recording"
+    if finalize_pending():
+        return "Finishing the last recording; try again in a moment"
+    return None
+
+
 @app.route("/recordings", methods=["DELETE"])
 def route_delete_all_recordings():
     """Delete all video, stills, and associated sidecar files. Preserves recipes/ and config."""
-    if recording:
-        return jsonify({"success": False, "message": "Cannot delete while recording"}), 400
+    busy = _delete_blocked_reason()
+    if busy:
+        return jsonify({"success": False, "message": busy}), 400
     deleted = 0
     errors = []
     try:
@@ -3026,8 +3152,9 @@ def route_delete_all_recordings():
 @app.route("/recordings/selected", methods=["DELETE"])
 def route_delete_selected_recordings():
     """Delete a specific set of recordings identified by location and id."""
-    if recording:
-        return jsonify({"success": False, "message": "Cannot delete while recording"}), 400
+    busy = _delete_blocked_reason()
+    if busy:
+        return jsonify({"success": False, "message": busy}), 400
     data = request.get_json(silent=True) or {}
     items = data.get("items", [])
     deleted = 0
@@ -3156,11 +3283,39 @@ def route_storage_preference_set():
     return jsonify({"success": True, "storage_preference": pref})
 
 
+def _label_time_zone():
+    return label_time_zone
+
+
+@app.route("/time_zone", methods=["GET"])
+def route_time_zone_get():
+    return jsonify({"success": True, "time_zone": label_time_zone})
+
+
+@app.route("/time_zone", methods=["POST"])
+def route_time_zone_set():
+    """Time zone for clip names (manual recordings and recipes without a
+    night schedule, which use their own)."""
+    global label_time_zone
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("time_zone") or "").strip()
+    if not name or tz.gettz(name) is None:
+        return jsonify({"success": False,
+                        "message": f"unknown time zone '{name}' (use a name like Pacific/Honolulu)"}), 400
+    label_time_zone = name
+    cfg = load_config()
+    cfg["time_zone"] = name
+    save_config(cfg)
+    logger.info(f"Clip time zone set to: {name}")
+    return jsonify({"success": True, "time_zone": name})
+
+
 # ── Schedule control ─────────────────────────────────────────────────────
 
 @app.route("/schedule/start", methods=["POST"])
 def route_schedule_start():
     """Start the scheduler with the active recipe or a specified recipe_id."""
+    global last_clip_error
     data = request.get_json(silent=True) or {}
     rid = data.get("recipe_id")
     if not rid:
@@ -3171,7 +3326,7 @@ def route_schedule_start():
     recipe = get_recipe(rid)
     if not recipe:
         return jsonify({"success": False, "message": "Recipe not found"}), 404
-    if recording and not scheduler.is_running():
+    if scheduler.is_manual() or (recording and not scheduler.is_running()):
         return jsonify({"success": False,
                         "message": "A manual recording is running. Stop it before starting a recipe."}), 409
     if scheduler.is_running():
@@ -3179,6 +3334,7 @@ def route_schedule_start():
         # clip, which would make the new recipe's first clip fail.
         scheduler.stop()
         _stop_recording_internal()
+    last_clip_error = ""
     scheduler.start(recipe)
     return jsonify({"success": True, "recipe": recipe["name"]})
 
@@ -3267,7 +3423,17 @@ def _wait_for_camera():
 
 
 def _remux_orphaned_ts():
-    """Remux any .ts files left over from previous runs (e.g. timeout or crash)."""
+    """Remux any .ts files left over from previous runs (e.g. timeout or crash),
+    and remove half-written rotation copies (*.rot.mp4)."""
+    for base in (VIDEO_DIR, os.path.join(usb_storage.USB_MOUNT_POINT, usb_storage.DROPCAM_DIR)):
+        try:
+            for root, _dirs, files in os.walk(base):
+                for fname in files:
+                    if fname.endswith(".rot.mp4"):
+                        os.remove(os.path.join(root, fname))
+                        logger.info(f"Removed leftover rotation copy: {fname}")
+        except Exception as e:
+            logger.warning(f"Rotation-copy cleanup in {base} failed: {e}")
     try:
         os.makedirs(VIDEO_DIR, exist_ok=True)
         ts_files = [f for f in os.listdir(VIDEO_DIR) if f.endswith(".ts")]
@@ -3400,6 +3566,7 @@ def _boot():
         stop_fn=_stop_recording_internal,
         disk_free_fn=_scheduler_disk_free_mb,
         is_recording_fn=recorder_active,
+        default_tz_fn=_label_time_zone,
         hw=hw,
         capture_still_fn=_sweep_snapshot,
         log_event_fn=log_event,
@@ -3472,7 +3639,11 @@ def _boot():
             if not camera_ok:
                 logger.warning("Proceeding with auto-start despite camera not yet detected — "
                                "scheduler delay may allow it time to appear")
-            scheduler.start(recipe)
+            if recording or scheduler.is_running():
+                # The page takes requests during boot; someone already started.
+                logger.info("Skipping auto-start: a recording or recipe is already running")
+            else:
+                scheduler.start(recipe)
         else:
             logger.warning(f"Active recipe id '{rid}' not found on disk, skipping auto-start")
     else:

@@ -122,9 +122,13 @@ CYCLE_MIN_MINUTES = 0.5
 # pause points, which a duty cycle doesn't line up with.
 CYCLE_LIGHT_MODES = ("off", "always")
 
-# Continuous recording under a schedule is split into clips of this length
-# so a multi-day run doesn't produce one enormous file.
-CONTINUOUS_CLIP_MINUTES = 60.0
+# Continuous video, and record windows longer than this, are split into
+# clips at the top of each local hour so a long run isn't one huge file.
+# Recordings planned for this long or less are never split.
+HOURLY_SPLIT_MINUTES = 60.0
+# A recording that starts this close to the top of the hour runs its first
+# clip on to the following hour instead of making a clip of a few seconds.
+FIRST_CLIP_MIN_S = 120.0
 # A record segment shorter than this (cut by a phase boundary) is skipped
 # rather than starting a clip that would stop again immediately.
 MIN_CLIP_S = 5.0
@@ -232,46 +236,75 @@ def night_window_at(now_utc, recipe):
     return False, nxt.astimezone(tz.UTC)
 
 
+def schedule_owns_day_light(recipe):
+    """False when the day light belongs to someone else: the operator
+    (manual sessions) or a tilt sweep, which switches it at pause points."""
+    return not (recipe.get("_manual")
+                or not recipe.get("servo_fixed", True)
+                or recipe.get("light_mode", "off") not in CYCLE_LIGHT_MODES)
+
+
 def phase_settings(recipe, phase):
     """(record_minutes, idle_minutes, light_pct) for 'day' or 'night'.
 
-    idle 0 means continuous recording, split into CONTINUOUS_CLIP_MINUTES
-    clips.
+    record_minutes is None for continuous recording (idle 0).  light_pct
+    is None when the schedule should leave the light alone.
     """
     if phase == "night":
         rec = float(recipe.get("night_record_minutes", 5))
         idle = float(recipe.get("night_idle_minutes", 10))
         light = int(recipe.get("night_light_brightness_pct", 80))
     else:
-        light = (int(recipe.get("light_brightness_pct", 0))
-                 if recipe.get("light_mode", "off") == "always" else 0)
+        if not schedule_owns_day_light(recipe):
+            light = None
+        elif recipe.get("light_mode", "off") == "always":
+            light = int(recipe.get("light_brightness_pct", 0))
+        else:
+            light = 0
         if recipe.get("cycle_enable"):
             rec = float(recipe.get("cycle_record_minutes", 10))
             idle = float(recipe.get("cycle_idle_minutes", 50))
         else:
-            rec, idle = CONTINUOUS_CLIP_MINUTES, 0.0
+            rec, idle = None, 0.0
     if idle <= 0:
-        rec, idle = CONTINUOUS_CLIP_MINUTES, 0.0
+        rec, idle = None, 0.0
     return rec, idle, light
+
+
+def next_local_hour(now_utc, zone):
+    """The next top of the hour in zone, as an aware UTC datetime.
+
+    Counted in UTC from the seconds already past the local hour, so DST
+    changes and half-hour zones come out right; wall-clock arithmetic on
+    the local time would not.
+    """
+    local = now_utc.astimezone(zone)
+    past = local.minute * 60 + local.second + local.microsecond / 1e6
+    return now_utc + timedelta(seconds=3600 - past)
 
 
 class PhaseTracker:
     """Remembers when the current day/night phase began.  Record/idle
     windows are timed from that moment, so entering night starts a
-    recording window straight away."""
+    recording window straight away.  Also remembers when the recording
+    started, for the first clip's FIRST_CLIP_MIN_S rule."""
 
     def __init__(self):
         self.phase = None
         self.anchor = None
+        self.started = None
 
 
-def next_segment(now_utc, recipe, tracker, end_utc=None):
+def next_segment(now_utc, recipe, tracker, end_utc=None, split_zone=None):
     """Work out the segment running at now_utc.
 
+    With split_zone set, continuous recording and record windows longer
+    than HOURLY_SPLIT_MINUTES also end at the top of each hour in that zone.
+
     Returns a dict: kind ('record'|'idle'), phase ('day'|'night'),
-    continuous (bool), light_pct, end (aware UTC, capped at the day/night
-    boundary and end_utc), next_change (that boundary, or None) and
-    phase_changed.
+    continuous (bool), light_pct (None = leave the light alone), end (aware
+    UTC, capped at the hour, the day/night boundary and end_utc),
+    next_change (that boundary, or None) and phase_changed.
     """
     if recipe.get("night_enable"):
         is_night, boundary = night_window_at(now_utc, recipe)
@@ -282,39 +315,69 @@ def next_segment(now_utc, recipe, tracker, end_utc=None):
     # A clock that jumped backwards would put the anchor in the future.
     if changed or tracker.anchor is None or tracker.anchor > now_utc:
         tracker.phase, tracker.anchor = phase, now_utc
+    if tracker.started is None or tracker.started > now_utc:
+        tracker.started = now_utc
     rec, idle, light = phase_settings(recipe, phase)
-    period_s = (rec + idle) * 60.0
-    elapsed = (now_utc - tracker.anchor).total_seconds()
-    k = int(elapsed // period_s)
-    window_start = tracker.anchor + timedelta(seconds=k * period_s)
-    if elapsed - k * period_s < rec * 60.0:
-        kind, end = "record", window_start + timedelta(minutes=rec)
+    if rec is None:
+        kind, end = "record", None
     else:
-        kind, end = "idle", window_start + timedelta(seconds=period_s)
-    for cap in (boundary, end_utc):
-        if cap is not None and cap < end:
+        period_s = (rec + idle) * 60.0
+        elapsed = (now_utc - tracker.anchor).total_seconds()
+        k = int(elapsed // period_s)
+        window_start = tracker.anchor + timedelta(seconds=k * period_s)
+        if elapsed - k * period_s < rec * 60.0:
+            kind, end = "record", window_start + timedelta(minutes=rec)
+        else:
+            kind, end = "idle", window_start + timedelta(seconds=period_s)
+    hour = None
+    if kind == "record" and split_zone is not None and (rec is None or rec > HOURLY_SPLIT_MINUTES):
+        hour = next_local_hour(now_utc, split_zone)
+        if (hour - tracker.started).total_seconds() < FIRST_CLIP_MIN_S:
+            hour = next_local_hour(hour, split_zone)
+    for cap in (hour, boundary, end_utc):
+        if cap is not None and (end is None or cap < end):
             end = cap
+    if end is None:
+        # Continuous, unsplit and open-ended: replan once a day.
+        end = now_utc + timedelta(days=1)
     return {
         "kind": kind,
         "phase": phase,
         "continuous": idle <= 0,
-        "light_pct": light if kind == "record" else 0,
+        "light_pct": light if kind == "record" or light is None else 0,
         "end": end,
         "next_change": boundary,
         "phase_changed": changed,
     }
 
 
-def simulate_schedule(start_utc, end_utc, recipe):
+def simulate_schedule(start_utc, end_utc, recipe, split_zone=None):
     """List the segments a schedule produces between two UTC times."""
     tracker = PhaseTracker()
     out, now = [], start_utc
     while now < end_utc:
-        seg = next_segment(now, recipe, tracker, end_utc)
+        seg = next_segment(now, recipe, tracker, end_utc, split_zone)
         seg["start"] = now
         out.append(seg)
         now = seg["end"]
     return out
+
+
+def safe_label(name):
+    """A recipe name made safe for file and folder names."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "", str(name or "").replace(" ", "_")) or "Recording"
+
+
+def deployment_folder(name, start_local):
+    """Folder for one recording session, e.g. Whalefall_20261116_0902."""
+    return f"{safe_label(name)}_{start_local:%Y%m%d_%H%M}"
+
+
+def clip_basename(name, index, start_local, phase=None):
+    """Clip file name without extension, clip number first, e.g.
+    Whalefall_c013_20261116_1900_night."""
+    suffix = "_night" if phase == "night" else ""
+    return f"{safe_label(name)}_c{int(index):03d}_{start_local:%Y%m%d_%H%M}{suffix}"
 
 
 DEFAULT_RECIPES = [

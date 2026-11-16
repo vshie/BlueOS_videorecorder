@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.request
 
+from dateutil import tz
+
 logger = logging.getLogger(__name__)
 
 DISK_FREE_MINIMUM_MB = 1024  # 1 GB
@@ -109,6 +111,7 @@ class Scheduler:
         self._stop_recording_fn = None
         self._get_disk_free_fn = None
         self._is_recording_fn = None
+        self._default_tz_fn = None
         self._capture_still_fn = None
         self._log_event_fn = None
         self._hw = None
@@ -124,23 +127,31 @@ class Scheduler:
         # Record / idle cycle progress (0 when the recipe doesn't cycle).
         self._cycle_window = 0
         self._cycle_windows_total = 0
+        # Clip progress for any session that splits into clips.
+        self._clip = 0
+        self._session_started = None  # epoch seconds of the first clip
+        self._manual = False
+        self._night_schedule = False
         self._deadline = None  # monotonic end of the whole deployment
         # Wall-clock schedule (night window / run until stopped) progress.
         self._phase = None
         self._light_pct = 0
         self._light_on_since = None  # monotonic time the schedule lit the light
+        self._light_touched = False  # the clip loop has set the light
         self._next_change_utc = None
         self._zone = None
         self._open_ended = False
         self._now = lambda: datetime.now(timezone.utc)
 
     def configure(self, *, start_fn, stop_fn, disk_free_fn, hw,
-                  is_recording_fn=None, capture_still_fn=None,
+                  is_recording_fn=None, default_tz_fn=None, capture_still_fn=None,
                   log_event_fn=None, cam4k_mode=False, awb_scene=None):
         self._start_recording_fn = start_fn
         self._stop_recording_fn = stop_fn
         self._get_disk_free_fn = disk_free_fn
         self._is_recording_fn = is_recording_fn
+        # Time zone for clip names when the recipe has no night schedule.
+        self._default_tz_fn = default_tz_fn
         self._capture_still_fn = capture_still_fn
         # Inject main's log_event so scheduler-thread events land in the active
         # recording's events.ndjson.  Re-importing main here would load a second
@@ -189,6 +200,55 @@ class Scheduler:
         self._thread.start()
         logger.info(f"Scheduler started for recipe '{recipe.get('name')}'")
 
+    def manual_session(self):
+        """Clip 1's recipe context for a manual recording.
+
+        The caller starts clip 1 with it, then hands it to start_manual so
+        later clips split at the top of each hour.  Manual sessions leave
+        the light, tilt, LED, AWB and rotation to the operator.
+        """
+        from recipes import deployment_folder
+        zone_name = self._label_tz_name({})
+        zone = tz.gettz(zone_name) or tz.UTC
+        recipe = {
+            "name": "Manual", "mode": "video", "run_until_stopped": True,
+            "time_zone": zone_name, "_manual": True,
+        }
+        return self._clip_recipe(
+            recipe, deployment_folder("Manual", self._now().astimezone(zone)),
+            zone_name, 1, "day")
+
+    def start_manual(self, recipe):
+        """Take over a manual recording whose clip 1 is already running."""
+        self.stop()
+        self._stop.clear()
+        self._active_recipe = recipe
+        self._thread = threading.Thread(target=self._run_manual, daemon=True)
+        self._thread.start()
+        logger.info("Scheduler took over manual recording %s", recipe.get("_deployment_id"))
+
+    def is_manual(self):
+        return self.is_running() and self._manual
+
+    def _label_tz_name(self, recipe):
+        """Time zone for clip names: a night-schedule recipe's own zone,
+        otherwise the unit's setting.  (Every saved recipe has a time_zone,
+        but it only means anything for the night schedule.)"""
+        if recipe.get("night_enable") and recipe.get("time_zone"):
+            return recipe["time_zone"]
+        name = None
+        if self._default_tz_fn:
+            try:
+                name = self._default_tz_fn()
+            except Exception as e:
+                logger.debug(f"default time zone lookup failed: {e}")
+        return name if name and tz.gettz(name) else "UTC"
+
+    @staticmethod
+    def _clip_recipe(recipe, deployment_id, zone_name, index, phase):
+        return dict(recipe, _deployment_id=deployment_id, _window_index=index,
+                    _clip_phase=phase, _label_tz=zone_name)
+
     def stop(self):
         """Cancel any running schedule."""
         self._stop.set()
@@ -207,6 +267,10 @@ class Scheduler:
             self._remaining_s = 0
             self._cycle_window = 0
             self._cycle_windows_total = 0
+            self._clip = 0
+            self._session_started = None
+            self._manual = False
+            self._night_schedule = False
             self._deadline = None
             self._phase = None
             self._light_pct = 0
@@ -229,6 +293,10 @@ class Scheduler:
                 "recipe_name": self._active_recipe["name"] if self._active_recipe else None,
                 "cycle_window": self._cycle_window,
                 "cycle_windows_total": self._cycle_windows_total,
+                "clip": self._clip,
+                "session_started": self._session_started,
+                "is_manual": self._manual,
+                "night_schedule": self._night_schedule,
                 "total_remaining_s": total_remaining,
                 # Wall-clock schedule only (None / False otherwise).
                 "phase": self._phase,
@@ -284,30 +352,45 @@ class Scheduler:
             if self._stop.is_set():
                 return
 
-            from recipes import uses_schedule
-            scheduled = uses_schedule(recipe)
+            from recipes import (calculate_cycle_plan, deployment_folder,
+                                 night_window_at, schedule_owns_day_light, uses_schedule)
+            video = recipe.get("mode", "video") == "video"
+            # Every video recipe runs the wall-clock clip loop, which splits
+            # long recordings at the top of each hour; stills only when they
+            # need the schedule.
+            scheduled = video or uses_schedule(recipe)
             open_ended = bool(recipe.get("run_until_stopped"))
             duration_s = float("inf") if open_ended else recipe.get("duration_minutes", 30) * 60
             cycling = bool(recipe.get("cycle_enable")) and not scheduled
             if scheduled:
-                from recipes import recipe_zone
-                safe_name = re.sub(r"[^a-zA-Z0-9_-]", "",
-                                   str(recipe.get("name", "recipe")).replace(" ", "_"))
-                deployment_id = f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                zone_name = self._label_tz_name(recipe)
+                deployment_id = deployment_folder(
+                    recipe.get("name"), self._now().astimezone(tz.gettz(zone_name) or tz.UTC))
+                first_phase = "day"
+                if recipe.get("night_enable") and night_window_at(self._now(), recipe)[0]:
+                    first_phase = "night"
+                windows_total = 0
+                if recipe.get("cycle_enable") and not recipe.get("night_enable") and not open_ended:
+                    windows_total = calculate_cycle_plan(
+                        recipe.get("duration_minutes", 30),
+                        recipe.get("cycle_record_minutes", 10),
+                        recipe.get("cycle_idle_minutes", 50),
+                    )["windows"]
                 with self._lock:
-                    self._cycle_windows_total = 0
+                    self._cycle_windows_total = windows_total
                     self._cycle_window = 1
+                    self._clip = 1
                     self._open_ended = open_ended
-                    self._zone = recipe_zone(recipe)
+                    self._night_schedule = bool(recipe.get("night_enable"))
+                    self._zone = tz.gettz(zone_name) or tz.UTC
+                    self._phase = first_phase
                 logger.info(
-                    "Scheduled deployment %s: night=%s %s-%s %s, %s",
+                    "Scheduled deployment %s: night=%s %s-%s, names in %s, %s",
                     deployment_id, bool(recipe.get("night_enable")),
-                    recipe.get("night_start"), recipe.get("night_end"),
-                    recipe.get("time_zone"),
+                    recipe.get("night_start"), recipe.get("night_end"), zone_name,
                     "until stopped" if open_ended else f"{recipe.get('duration_minutes')} min",
                 )
             elif cycling:
-                from recipes import calculate_cycle_plan
                 plan = calculate_cycle_plan(
                     recipe.get("duration_minutes", 30),
                     recipe.get("cycle_record_minutes", 10),
@@ -326,15 +409,19 @@ class Scheduler:
                     recipe.get("duration_minutes"), plan["windows"], deployment_id,
                 )
 
-            def window_recipe(index):
-                if not (cycling or scheduled):
-                    return recipe
-                return dict(recipe, _deployment_id=deployment_id, _window_index=index)
+            def window_recipe(index, phase="day"):
+                if scheduled:
+                    return self._clip_recipe(recipe, deployment_id, zone_name, index, phase)
+                if cycling:
+                    return dict(recipe, _deployment_id=deployment_id, _window_index=index)
+                return recipe
 
-            if not self._start_recording_with_retries(window_recipe(1)):
+            if not self._start_recording_with_retries(
+                    window_recipe(1, first_phase if scheduled else "day")):
                 return
             with self._lock:
                 self._deadline = None if open_ended else time.monotonic() + duration_s
+                self._session_started = time.time()
             if cycling:
                 self._log("cycle_window_started", f"window=1/{self._cycle_windows_total}")
 
@@ -421,10 +508,12 @@ class Scheduler:
                 else:
                     self._hw.set_servo(recipe.get("servo_start_us", 1500))
 
-                if light_mode == "always":
-                    self._hw.light_on(light_brightness)
-                elif recipe.get("servo_fixed", True) and light_mode == "off":
-                    self._hw.light_off()
+                # The clip loop sets the light itself when it owns it.
+                if not (scheduled and schedule_owns_day_light(recipe)):
+                    if light_mode == "always":
+                        self._hw.light_on(light_brightness)
+                    elif recipe.get("servo_fixed", True) and light_mode == "off":
+                        self._hw.light_off()
 
             if self._hw and recipe.get("winch_enable"):
                 from hardware import WINCH_ROTATIONS_MAX
@@ -444,8 +533,7 @@ class Scheduler:
                 )
 
             if scheduled:
-                if not self._run_schedule(recipe, window_recipe):
-                    return  # a later clip failed to start; error state is set
+                self._run_schedule(recipe, window_recipe)
             elif cycling:
                 if not self._run_cycle(recipe, window_recipe):
                     return  # a later window failed to start; error state is set
@@ -461,7 +549,7 @@ class Scheduler:
                     self._hw.stop_sweep()
                     self._hw.light_off()
                     self._hw.led_complete()
-            else:
+            elif self._state != "disk_full":
                 self._set_state("stopped")
 
         except Exception as e:
@@ -470,19 +558,24 @@ class Scheduler:
             if self._hw:
                 self._hw.led_warning()
 
-    def _start_recording_with_retries(self, recipe):
+    def _start_recording_with_retries(self, recipe, attempts=RECORDING_START_RETRIES):
         """Start recording, retrying a few times. Returns True on success.
 
-        On final failure sets the error state and warning LED.
+        On final failure sets the error state and warning LED.  A clip that
+        comes up after Stop was requested is stopped again straight away, so
+        a slow start can't outlive the session.
         """
         self._set_state("starting")
-        for attempt in range(1, RECORDING_START_RETRIES + 1):
+        for attempt in range(1, attempts + 1):
             if self._stop.is_set():
                 return False
             if self._start_recording_fn(recipe):
+                if self._stop.is_set():
+                    self._stop_recording_fn()
+                    return False
                 return True
-            logger.warning(f"Scheduler: recording start attempt {attempt}/{RECORDING_START_RETRIES} failed")
-            if attempt < RECORDING_START_RETRIES:
+            logger.warning(f"Scheduler: recording start attempt {attempt}/{attempts} failed")
+            if attempt < attempts:
                 self._stop.wait(RECORDING_RETRY_INTERVAL_S)
         if self._stop.is_set():
             return False
@@ -535,30 +628,68 @@ class Scheduler:
                     self._hw.light_on(brightness)
                 self._apply_recipe_led(recipe)
 
+    def _run_manual(self):
+        """Split a manual recording (clip 1 already running) into clips at
+        the top of each hour until Stop or a full disk."""
+        recipe = self._active_recipe
+        zone_name = recipe["_label_tz"]
+        deployment_id = recipe["_deployment_id"]
+        with self._lock:
+            self._manual = True
+            self._open_ended = True
+            self._clip = 1
+            self._cycle_window = 1
+            self._zone = tz.gettz(zone_name) or tz.UTC
+            self._phase = "day"
+            self._session_started = time.time()
+
+        def window_recipe(index, phase="day"):
+            return self._clip_recipe(recipe, deployment_id, zone_name, index, phase)
+
+        try:
+            self._run_schedule(recipe, window_recipe)
+            if self._state != "disk_full":
+                self._set_state("stopped")
+        except Exception as e:
+            logger.error(f"Manual session error: {e}", exc_info=True)
+            self._set_state("error")
+
     def _run_schedule(self, recipe, window_recipe):
         """Follow the wall-clock schedule: day settings, the night window,
-        and continuous recording split into clips (recipes.next_segment).
+        and long recordings split into clips at the top of each hour
+        (recipes.next_segment).
 
-        Clip 1 is already recording when this is called. Every later record
-        segment is a new clip in the same deployment folder; the light
-        follows each segment. Runs until the deadline, or forever when
-        open-ended (Stop / disk full / power loss end it). Returns False if
-        a clip failed to start.
+        Clip 1 is already recording when this is called. Every later clip
+        goes in the same deployment folder; the light follows each segment
+        when the schedule owns it. Runs until the deadline, or forever when
+        open-ended (Stop / disk full / power loss end it).
         """
+        self._light_touched = False
         try:
-            return self._schedule_loop(recipe, window_recipe)
+            self._schedule_loop(recipe, window_recipe)
         finally:
-            # Disk full, a clip that won't start or an error can end the
-            # loop during a night clip; don't leave the light burning.
-            self._set_light(0)
+            # Disk full or an error can end the loop during a night clip;
+            # don't leave the light burning.
+            if self._light_touched:
+                self._set_light(0)
 
     def _schedule_loop(self, recipe, window_recipe):
-        from recipes import MIN_CLIP_S, PhaseTracker, next_segment
+        from recipes import HOURLY_SPLIT_MINUTES, MIN_CLIP_S, PhaseTracker, next_segment
 
+        # Video planned for an hour or less stays in one clip; stills never
+        # split at the hour.
+        long_run = (recipe.get("run_until_stopped")
+                    or float(recipe.get("duration_minutes", 0)) > HOURLY_SPLIT_MINUTES)
+        video = recipe.get("mode", "video") == "video"
+        split_zone = self._zone if video and long_run else None
         tracker = PhaseTracker()
-        recording = True
-        first = True
+        recording = True          # clip 1 is already recording
         clip = 1
+        window = 1
+        in_window = True
+        with self._lock:
+            clip_phase = self._phase or "day"
+        clip_end = None           # planned end of the clip that is recording
         clip_started = time.monotonic()
         quick_drops = 0
         while not self._stop.is_set():
@@ -569,7 +700,7 @@ class Scheduler:
                 if left <= 0:
                     break
                 end_utc = now + timedelta(seconds=left)
-            seg = next_segment(now, recipe, tracker, end_utc)
+            seg = next_segment(now, recipe, tracker, end_utc, split_zone)
             seg_s = (seg["end"] - now).total_seconds()
             with self._lock:
                 self._phase = seg["phase"]
@@ -578,47 +709,88 @@ class Scheduler:
                 self._log("phase_changed", f"phase={seg['phase']}")
                 logger.info("Schedule: %s phase", seg["phase"])
 
-            if seg["kind"] == "record" and (first or seg_s >= MIN_CLIP_S):
-                if not first:
-                    if recording:
-                        self._stop_recording_fn()
-                    clip += 1
-                    with self._lock:
-                        self._cycle_window = clip
-                    if not self._start_recording_with_retries(window_recipe(clip)):
-                        return False
-                    clip_started = time.monotonic()
-                    self._log("cycle_window_started", f"window={clip} phase={seg['phase']}")
-                    self._apply_recipe_led(recipe)
-                recording = True
-                self._set_light(seg["light_pct"])
-                self._wait_until("recording", seg["end"], check_disk=True,
-                                 watch_recorder=True)
-                if self._recorder_dropped():
-                    # The watchdog stopped the clip (encoder exit, stall, file
-                    # size limit).  Start a new one rather than sit out the
-                    # rest of the segment; the recorder picks USB or SD again.
-                    ran_s = time.monotonic() - clip_started
-                    quick_drops = quick_drops + 1 if ran_s < CLIP_DROP_QUICK_S else 0
-                    delay_s = min(CLIP_RESTART_DELAY_MAX_S,
-                                  CLIP_RESTART_DELAY_S * 2 ** max(0, quick_drops - 1))
-                    logger.warning("Schedule: clip %d stopped after %.0fs; "
-                                   "starting a new clip in %ds", clip, ran_s, delay_s)
-                    self._log("clip_dropped", f"window={clip} ran_s={ran_s:.0f}")
-                    recording = False
-                    self._stop.wait(delay_s)
-            else:
+            if seg["kind"] == "idle":
                 if recording:
                     self._stop_recording_fn()
                     recording = False
-                    self._log("cycle_idle_started", f"after_window={clip} phase={seg['phase']}")
-                self._set_light(0)
+                    self._log("cycle_idle_started", f"after_window={window} phase={seg['phase']}")
+                in_window = False
+                self._follow_light(seg["light_pct"])
                 self._wait_until("cycle_idle", seg["end"])
-            first = False
+                continue
+
+            if recording and clip_end is None:
+                # Clip 1, started before the loop.
+                clip_end, clip_phase = seg["end"], seg["phase"]
+            elif not recording or now >= clip_end or seg["phase"] != clip_phase:
+                if seg_s < MIN_CLIP_S:
+                    # A few seconds before the next boundary: keep the clip
+                    # that's recording rather than start one this short.
+                    if recording:
+                        clip_end = seg["end"]
+                        self._wait_until("recording", seg["end"], check_disk=True)
+                    else:
+                        self._wait_until("starting", seg["end"])
+                    continue
+                if recording:
+                    self._stop_recording_fn()
+                    recording = False
+                next_window = window if in_window else window + 1
+                if not self._start_recording_with_retries(window_recipe(clip + 1, seg["phase"])):
+                    if self._stop.is_set():
+                        break
+                    # Keep the session alive: a camera hiccup at the top of
+                    # the hour shouldn't end a multi-day deployment.
+                    quick_drops += 1
+                    delay_s = self._restart_delay(quick_drops)
+                    logger.warning("Schedule: clip %d failed to start; retrying in %ds",
+                                   clip + 1, delay_s)
+                    self._stop.wait(delay_s)
+                    continue
+                clip, window, in_window = clip + 1, next_window, True
+                recording = True
+                clip_started = time.monotonic()
+                clip_end, clip_phase = seg["end"], seg["phase"]
+                with self._lock:
+                    self._clip = clip
+                    self._cycle_window = window
+                self._log("cycle_window_started", f"window={clip} phase={seg['phase']}")
+                if not recipe.get("_manual"):
+                    self._apply_recipe_led(recipe)
+            # else: a clock step woke us early; the clip carries on.
+
+            self._follow_light(seg["light_pct"])
+            self._wait_until("recording", seg["end"], check_disk=True,
+                             watch_recorder=True)
+            ran_s = time.monotonic() - clip_started
+            if self._recorder_dropped():
+                # The watchdog stopped the clip (encoder exit, stall, file
+                # size limit).  Start a new one rather than sit out the
+                # rest of the segment; the recorder picks USB or SD again.
+                quick_drops = quick_drops + 1 if ran_s < CLIP_DROP_QUICK_S else 0
+                delay_s = self._restart_delay(quick_drops)
+                logger.warning("Schedule: clip %d stopped after %.0fs; "
+                               "starting a new clip in %ds", clip, ran_s, delay_s)
+                self._log("clip_dropped", f"window={clip} ran_s={ran_s:.0f}")
+                recording = False
+                self._stop.wait(delay_s)
+            elif ran_s >= CLIP_DROP_QUICK_S:
+                quick_drops = 0
 
         if recording and not self._stop.is_set():
             self._stop_recording_fn()
-        return True
+
+    @staticmethod
+    def _restart_delay(quick_drops):
+        return min(CLIP_RESTART_DELAY_MAX_S,
+                   CLIP_RESTART_DELAY_S * 2 ** max(0, quick_drops - 1))
+
+    def _follow_light(self, pct):
+        """Set the light for a segment, unless the schedule doesn't own it."""
+        if pct is None:
+            return
+        self._light_touched = True
+        self._set_light(pct)
 
     def _set_light(self, pct):
         with self._lock:
