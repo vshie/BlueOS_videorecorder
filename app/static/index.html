@@ -192,6 +192,8 @@ hr{border:none;border-top:1px solid #eee;margin:8px 0}
 .modal-box h3{margin-bottom:12px}
 .modal-box p{font-size:.92em;color:#555;margin-bottom:16px}
 .modal-box .btn-row{display:flex;gap:8px;justify-content:center}
+body.cam4k .modal-box{background:#140a32;border:1px solid #2a1a5e;color:#e0d0ff}
+body.cam4k .modal-box p{color:#c8b8f0}
 .countdown-text{font-size:1.3em;font-weight:700;color:#e53935;margin-bottom:12px}
 
 /* Setup content */
@@ -1037,6 +1039,20 @@ body.calib-tab .file-manager-wrapper{display:none}
   <iframe id="fileBrowserFrame" src="" style="width:100%;height:600px;border:none;border-radius:8px"></iframe>
 </div>
 
+<!-- Asked by Start when an auto-start recipe is selected -->
+<div class="modal-overlay" id="startModeModal" style="display:none">
+  <div class="modal-box">
+    <h3>Start the recipe?</h3>
+    <p><strong id="startModeName"></strong> is selected, but <strong>Start</strong> records manually:
+      no day/night schedule, no lights, one long clip.</p>
+    <div class="btn-row">
+      <button class="btn-primary" data-choice="recipe" id="startModeRecipeBtn">Start recipe</button>
+      <button data-choice="manual">Record manually</button>
+      <button data-choice="">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script src="static/mcm_webrtc_live.js"></script>
 <script>
 /* ── State ─────────────────────────────────── */
@@ -1113,7 +1129,10 @@ async function pollStatus() {
     txt.textContent = d.scheduler && d.scheduler.state === 'delay' ? 'Waiting to start...' :
                       d.scheduler && d.scheduler.state === 'cycle_idle' ? 'Idle break' :
                       d.scheduler && d.scheduler.state === 'complete' ? 'Complete' : 'Idle';
-    document.getElementById('btnStart').disabled = false;
+    // A running recipe owns the recorder through its countdown and idle
+    // breaks; a manual start then would collide with its next clip.
+    document.getElementById('btnStart').disabled =
+      ['delay', 'nodding', 'starting', 'recording', 'cycle_idle'].includes((d.scheduler || {}).state);
     document.getElementById('btnStop').disabled = true;
     stopDurationTimer();
   }
@@ -1478,10 +1497,28 @@ async function pollTelemetry() {
 
 /* ── Recording controls ────────────────────── */
 async function manualStart() {
+  // With a recipe selected, Start is easy to mistake for "run the recipe".
+  const sel = document.getElementById('autoRecipeSelect');
+  if (sel.value) {
+    const choice = await askStartMode(sel.options[sel.selectedIndex].textContent);
+    if (choice === 'recipe') return startSchedule();
+    if (choice !== 'manual') return;
+  }
   document.getElementById('btnStart').disabled = true;
   const d = await api('/start');
   if (d.success) { isRecording = true; pollStatus(); }
   else { alert(d.message || 'Failed to start'); document.getElementById('btnStart').disabled = false; }
+}
+function askStartMode(recipeName) {
+  return new Promise(resolve => {
+    const modal = document.getElementById('startModeModal');
+    document.getElementById('startModeName').textContent = `"${recipeName}"`;
+    document.getElementById('startModeRecipeBtn').textContent = `Start "${recipeName}"`;
+    const done = choice => { modal.style.display = 'none'; resolve(choice); };
+    modal.querySelectorAll('[data-choice]').forEach(b => { b.onclick = () => done(b.dataset.choice); });
+    modal.onclick = e => { if (e.target === modal) done(''); };
+    modal.style.display = 'flex';
+  });
 }
 async function manualStop() {
   document.getElementById('btnStop').disabled = true;

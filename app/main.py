@@ -1858,6 +1858,11 @@ def register_service():
 def route_start():
     if recording:
         return jsonify({"success": False, "message": "Already recording"}), 400
+    if scheduler.is_running():
+        # During the countdown or an idle break the recorder is free, but the
+        # recipe's next clip would then fail with "already recording".
+        return jsonify({"success": False,
+                        "message": "A recipe is running. Cancel it before recording manually."}), 409
     try:
         ok = _start_recording_internal(mode="video", rotation=image_rotation)
         if ok:
@@ -3166,6 +3171,14 @@ def route_schedule_start():
     recipe = get_recipe(rid)
     if not recipe:
         return jsonify({"success": False, "message": "Recipe not found"}), 404
+    if recording and not scheduler.is_running():
+        return jsonify({"success": False,
+                        "message": "A manual recording is running. Stop it before starting a recipe."}), 409
+    if scheduler.is_running():
+        # Restarting: scheduler.start() cancels the old recipe but not its
+        # clip, which would make the new recipe's first clip fail.
+        scheduler.stop()
+        _stop_recording_internal()
     scheduler.start(recipe)
     return jsonify({"success": True, "recipe": recipe["name"]})
 
