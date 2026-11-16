@@ -110,6 +110,9 @@ RECIPE_SCHEMA_DEFAULTS = {
     "night_record_minutes": 5.0,
     "night_idle_minutes": 10.0,
     "night_light_brightness_pct": 80,
+    # With one-push AWB on: at night fire it once, shortly after the light
+    # first comes on, then not again until the day phase resumes the interval.
+    "night_awb_once": False,
     "time_zone": "UTC",
 }
 
@@ -398,6 +401,7 @@ SCHEDULE_DEFAULT_RECIPES = [
         "night_record_minutes": 5,
         "night_idle_minutes": 10,
         "night_light_brightness_pct": 80,
+        "night_awb_once": True,
     },
 ]
 
@@ -612,7 +616,7 @@ def validate_recipe(data):
             "light_mode must be 'off' or 'always' when the record/idle cycle is enabled"
         )
 
-    for fld in ("run_until_stopped", "night_enable"):
+    for fld in ("run_until_stopped", "night_enable", "night_awb_once"):
         if fld in data:
             clean[fld] = bool(data[fld])
 

@@ -26,6 +26,10 @@ RECORDING_RETRY_INTERVAL_S = 5
 CLIP_RESTART_DELAY_S = 5
 CLIP_RESTART_DELAY_MAX_S = 300
 CLIP_DROP_QUICK_S = 120
+# Night-once AWB: wait this long after the light comes on (exposure settles),
+# and retry this often if the camera doesn't answer.
+NIGHT_AWB_SETTLE_S = 10
+NIGHT_AWB_RETRY_S = 30
 
 # Same POSTs 4k Cam Manager / towfish use for WB scene + one-push.
 # cgi_action GET path returns "error user/pwd" on current firmware.
@@ -124,6 +128,7 @@ class Scheduler:
         # Wall-clock schedule (night window / run until stopped) progress.
         self._phase = None
         self._light_pct = 0
+        self._light_on_since = None  # monotonic time the schedule lit the light
         self._next_change_utc = None
         self._zone = None
         self._open_ended = False
@@ -205,6 +210,7 @@ class Scheduler:
             self._deadline = None
             self._phase = None
             self._light_pct = 0
+            self._light_on_since = None
             self._next_change_utc = None
             self._open_ended = False
         self._active_recipe = None
@@ -372,16 +378,17 @@ class Scheduler:
             if recipe.get("cam4k_awb_enable", True):
                 interval_s = float(recipe.get("cam4k_awb_interval_s", 120) or 120)
                 interval_s = max(10.0, min(3600.0, interval_s))
+                night_once = bool(recipe.get("night_enable") and recipe.get("night_awb_once"))
                 self._awb_thread = threading.Thread(
                     target=self._awb_loop,
-                    args=(interval_s, duration_s),
+                    args=(interval_s, duration_s, night_once),
                     name="cam4k-awb-loop",
                     daemon=True,
                 )
                 self._awb_thread.start()
                 logger.info(
-                    "4k Cam AWB loop started (onceAWB=1 every %.0fs for %.0fs)",
-                    interval_s, duration_s,
+                    "4k Cam AWB loop started (onceAWB=1 every %.0fs for %.0fs%s)",
+                    interval_s, duration_s, ", once per night" if night_once else "",
                 )
 
             if self._hw:
@@ -615,6 +622,10 @@ class Scheduler:
 
     def _set_light(self, pct):
         with self._lock:
+            if pct <= 0:
+                self._light_on_since = None
+            elif self._light_pct <= 0:
+                self._light_on_since = time.monotonic()
             self._light_pct = pct
         if not self._hw:
             return
@@ -869,24 +880,45 @@ class Scheduler:
         self._log("cam4k_awb_failed", err)
         return False
 
-    def _awb_loop(self, interval_s, duration_s):
+    def _awb_loop(self, interval_s, duration_s, night_once=False):
         """Fire AWB once now, then every interval_s for the recording window.
+
+        With night_once the night phase gets a single one-push instead,
+        NIGHT_AWB_SETTLE_S after the light first comes on; none follow until
+        the day phase resumes the interval, firing straight away.
 
         Bounded by duration_s so a delayed release (which keeps ``_stop``
         clear after the recording ends) does not keep retriggering AWB.
         """
         logger.info("AWB loop started (interval %.0fs)", interval_s)
-        self._trigger_awb_once()
         deadline = time.monotonic() + float(duration_s)
+        next_due = time.monotonic()
+        night_done = False
+        night_next_try = 0.0
         while not self._stop.is_set():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            now = time.monotonic()
+            if now >= deadline:
                 break
-            if self._stop.wait(min(interval_s, remaining)):
+            with self._lock:
+                phase, lit_since = self._phase, self._light_on_since
+            if night_once and phase is None:
+                pass  # schedule not running yet; don't guess day or night
+            elif night_once and phase == "night":
+                next_due = now
+                if (not night_done and lit_since is not None
+                        and now - lit_since >= NIGHT_AWB_SETTLE_S
+                        and now >= night_next_try):
+                    night_done = self._trigger_awb_once()
+                    night_next_try = now + NIGHT_AWB_RETRY_S
+                    if night_done:
+                        self._log("cam4k_awb_night_hold", "no more one-push until day")
+            else:
+                night_done = False
+                if now >= next_due:
+                    self._trigger_awb_once()
+                    next_due = now + interval_s
+            if self._stop.wait(min(1.0, max(0.0, deadline - now))):
                 break
-            if time.monotonic() >= deadline:
-                break
-            self._trigger_awb_once()
         logger.info("AWB loop stopped")
 
     def _focus_sweep_loop(self, start_us, end_us, duration_s):

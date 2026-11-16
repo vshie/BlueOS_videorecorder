@@ -792,6 +792,9 @@ body.calib-tab .file-manager-wrapper{display:none}
           <label>AWB Interval (s)</label>
           <input type="number" id="rAwbInterval" value="120" min="10" max="3600" step="1">
         </div>
+        <div class="form-group" id="awbNightGroup">
+          <label><input type="checkbox" id="rAwbNightOnce"> At night: one push when the light first comes on, then none until day</label>
+        </div>
       </div>
       <div class="text-muted" style="font-size:.82em">
         Re-triggers 4k Cam white balance via <span class="mono">setImageAdjustmentEx</span> (<span class="mono">onceAWB=1</span>) while recording — same path as 4k Cam Manager / towfish.
@@ -2583,6 +2586,7 @@ function newRecipe() {
   document.getElementById('rRecZoomVal').textContent = curZoom;
   document.getElementById('rAwbEnable').checked = true;
   document.getElementById('rAwbInterval').value = 120;
+  document.getElementById('rAwbNightOnce').checked = false;
   document.getElementById('rReleaseEnable').checked = false;
   document.getElementById('rReleaseOffset').value = 0;
   document.getElementById('rWinchEnable').checked = false;
@@ -2651,6 +2655,7 @@ async function editRecipe(id) {
   document.getElementById('rRecZoomVal').textContent = rZoom;
   document.getElementById('rAwbEnable').checked = r.cam4k_awb_enable !== false;
   document.getElementById('rAwbInterval').value = (r.cam4k_awb_interval_s != null ? r.cam4k_awb_interval_s : 120);
+  document.getElementById('rAwbNightOnce').checked = !!r.night_awb_once;
   document.getElementById('rReleaseEnable').checked = !!r.release_enable;
   document.getElementById('rReleaseOffset').value = (r.release_offset_s != null ? r.release_offset_s : 0);
   document.getElementById('rWinchEnable').checked = !!r.winch_enable;
@@ -2718,6 +2723,7 @@ async function saveCurrentRecipe() {
     cam4k_zoom_us: +document.getElementById('rRecZoom').value,
     cam4k_awb_enable: document.getElementById('rAwbEnable').checked,
     cam4k_awb_interval_s: +document.getElementById('rAwbInterval').value,
+    night_awb_once: document.getElementById('rAwbNightOnce').checked,
     release_enable: document.getElementById('rReleaseEnable').checked,
     release_offset_s: +document.getElementById('rReleaseOffset').value,
     winch_enable: document.getElementById('rWinchEnable').checked,
@@ -2752,6 +2758,9 @@ function toggleServoFields() {
 function toggleAwbFields() {
   const on = document.getElementById('rAwbEnable').checked;
   document.getElementById('awbIntervalGroup').style.display = on ? '' : 'none';
+  // Only meaningful with a night schedule.
+  const night = document.getElementById('rNightEnable').checked;
+  document.getElementById('awbNightGroup').style.display = on && night ? '' : 'none';
 }
 function toggleFocusFinderFields() {
   const on = document.getElementById('rFocusFinder').checked;
@@ -2867,6 +2876,7 @@ function toggleScheduleFields() {
   document.getElementById('rDuration').disabled = until;
   document.querySelectorAll('input[name=rDurationUnit]').forEach(el => el.disabled = until);
   document.getElementById('nightFields').style.display = night ? '' : 'none';
+  toggleAwbFields();
   UNTIL_STOPPED_CONFLICTS.forEach(([id, toggle]) => {
     const cb = document.getElementById(id);
     if (until && cb.checked) { cb.checked = false; toggle(); }
