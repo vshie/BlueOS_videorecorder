@@ -24,6 +24,7 @@ import threading
 import time
 import logging
 import queue
+import urllib.parse
 import zipfile
 from datetime import datetime
 
@@ -81,6 +82,8 @@ cam4k_encode = "H264"
 # camera manager publishes.  The extension runs with host networking, so the
 # manager's REST API and RTSP server are reachable on localhost.
 CAMERA_MANAGER_URL = "http://127.0.0.1:6020"
+# Port the camera manager serves its own RTSP streams on (--rtsp-port).
+MCM_RTSP_PORT = 8554
 RTSP_HOST = "127.0.0.1"
 
 # The H264 USB Camera plugged into the DropCam is always /dev/video2.  On
@@ -169,15 +172,18 @@ blueos_rtsp_encode = "H264"
 
 
 def _rewrite_rtsp_host(url):
-    """Force an RTSP endpoint to localhost.
+    """Force an RTSP endpoint served by the camera manager to localhost.
 
     The camera manager advertises its LAN IP (e.g. 192.168.1.111), but the
     extension shares the host network namespace, so localhost is the most
-    reliable address regardless of the unit's current IP.
+    reliable address regardless of the unit's current IP.  Redirect streams
+    point at another device (the 4k Cam) and are left alone.
     """
     try:
         from urllib.parse import urlsplit, urlunsplit
         parts = urlsplit(url)
+        if parts.port != MCM_RTSP_PORT and parts.hostname != "0.0.0.0":
+            return url
         netloc = RTSP_HOST + (f":{parts.port}" if parts.port else "")
         return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
     except Exception:
@@ -416,6 +422,58 @@ def ensure_rtsp_stream_for_video2():
 
 
 # ── Config ───────────────────────────────────────────────────────────────
+
+
+# The 4k Cam's stream in BlueOS's camera manager (BlueOS video page, this
+# page's live preview).  MCM deletes a stream it can't reconnect to for 5 min
+# (camera unplugged, or slow to come up) and never adds it back, so the
+# extension keeps a Redirect stream there while in 4k Cam mode.
+CAM4K_MCM_STREAM_NAME = "4K Cam"
+CAM4K_MCM_STREAM_URL = re.sub(r"//[^@/]+@", "//", RTSP_ENDPOINT)  # without login
+CAM4K_MCM_CHECK_INTERVAL_S = 60
+
+
+def ensure_cam4k_mcm_stream():
+    """Add the 4k Cam to MCM unless MCM already has a stream for it.
+
+    Returns "present", "added", "camera_offline" or "error".
+    """
+    host = urllib.parse.urlparse(CAM4K_MCM_STREAM_URL).hostname
+    try:
+        streams = _mcm_get_streams()
+    except Exception as e:
+        logger.debug(f"cam4k MCM stream check: MCM unreachable: {e}")
+        return "error"
+    if any(host in json.dumps(s) for s in streams or []):
+        return "present"
+    try:
+        socket.create_connection((host, 554), timeout=3).close()
+    except OSError:
+        return "camera_offline"
+    try:
+        code, _ = _mcm_post_stream({
+            "name": CAM4K_MCM_STREAM_NAME,
+            "source": "Redirect",
+            "stream_information": {
+                "endpoints": [CAM4K_MCM_STREAM_URL],
+                "configuration": {"type": "redirect"},
+            },
+        })
+    except Exception as e:
+        logger.warning(f"Could not add the 4k Cam stream to MCM: {e}")
+        return "error"
+    logger.info(f"Added the 4k Cam stream to MCM: {CAM4K_MCM_STREAM_URL} (HTTP {code})")
+    return "added"
+
+
+def _cam4k_mcm_stream_keeper():
+    while True:
+        if cam4k_mode:
+            try:
+                ensure_cam4k_mcm_stream()
+            except Exception as e:
+                logger.warning(f"cam4k MCM stream check failed: {e}")
+        time.sleep(CAM4K_MCM_CHECK_INTERVAL_S)
 
 def load_config():
     defaults = {
@@ -3577,6 +3635,7 @@ def _boot():
     hw.led_idle()
 
     threading.Thread(target=_remux_orphaned_ts, daemon=True).start()
+    threading.Thread(target=_cam4k_mcm_stream_keeper, name="cam4k-mcm-stream", daemon=True).start()
 
     cfg = load_config()
     storage_preference = cfg.get("storage_preference", "usb")
